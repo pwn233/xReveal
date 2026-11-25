@@ -53,7 +53,7 @@ _Avoid_: vendor dialog, properties
 Which audio input (usually the Source's own audio) xReveal plays, and which output device it plays to.
 
 **A/V sync offset**
-A delay, in milliseconds, applied to the sound or the picture so they line up.
+A delay, in milliseconds, applied to the sound or the picture so they line up. Positive delays the sound (free); negative delays the picture, which adds the same amount of input lag. Ranges from −500 to +500 ms.
 
 **Remembered setup**
 The single saved set of choices (Source, Video format, Target ratio, Fill mode and Smart stretch strength, Picture adjustments, Audio route, A/V sync offset and the monitor to go fullscreen on) that xReveal applies automatically on launch. There is one, not several named ones.
