@@ -74,6 +74,23 @@ pub fn run(target: RenderTarget, slot: &FrameSlot<PixelBuffer>, shared: Arc<Vide
     }
 }
 
+static DIAG: std::sync::Mutex<Vec<[f64; 9]>> = std::sync::Mutex::new(Vec::new());
+fn diag_record(sample: [f64; 9]) {
+    let mut all = DIAG.lock().unwrap();
+    all.push(sample);
+    if all.len() == 240 {
+        let names = ["arrival→draw", "plan", "nextDrawable", "encode+commit", "commit→GPU done", "GPU done→glass", "arrival→glass", "capture→arrival", "glass→handler"];
+        let mut line = String::from("DIAG median ms:");
+        for (i, name) in names.iter().enumerate() {
+            let mut v: Vec<f64> = all.iter().map(|s| s[i] * 1000.0).collect();
+            v.sort_by(f64::total_cmp);
+            line += &format!(" {name}={:.1}(p90 {:.1})", v[v.len() / 2], v[v.len() * 9 / 10]);
+        }
+        eprintln!("{line}");
+        all.clear();
+    }
+}
+
 /// The compiled video shader, ready to draw a planned frame into any BGRA8 texture.
 pub struct VideoPass {
     pub queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -156,6 +173,7 @@ impl Renderer {
 
     /// Draws one frame and presents it. `Ok(None)` when there is nothing to draw into yet.
     fn draw(&self, frame: PixelBuffer) -> Result<Option<InFlight>, String> {
+        let t_start = CACurrentMediaTime();
         let image = &*frame.image;
         let (info, planes) = match CVPixelBufferGetPixelFormatType(image) {
             format @ (NV12_VIDEO_RANGE | NV12_FULL_RANGE) => {
@@ -186,9 +204,11 @@ impl Renderer {
         if layer.drawableSize() != size {
             layer.setDrawableSize(size);
         }
+        let t_before_drawable = CACurrentMediaTime();
         let Some(drawable) = layer.nextDrawable() else {
             return Ok(None);
         };
+        let t_drawable = CACurrentMediaTime();
 
         let settings = *lock(&self.shared.picture);
         let plan = picture::plan(info, &settings, (size.width, size.height));
@@ -197,9 +217,24 @@ impl Renderer {
         self.pass.encode(&command_buffer, &drawable.texture(), [&textures[0], second], &plan)?;
         // Record when the frame actually reached the screen (Metal's host-time present time).
         let (shared, stamps) = (self.shared.clone(), frame.stamps);
+        let t_commit = CACurrentMediaTime();
+        let cb = command_buffer.clone();
         let on_presented = RcBlock::new(move |presented: NonNull<ProtocolObject<dyn MTLDrawable>>| {
             let at = unsafe { presented.as_ref() }.presentedTime();
             lock(&shared.stats).presented(stamps, at, false);
+            if at > 0.0 {
+                diag_record([
+                    t_start - stamps.arrival,
+                    t_before_drawable - t_start,
+                    t_drawable - t_before_drawable,
+                    t_commit - t_drawable,
+                    cb.GPUEndTime() - t_commit,
+                    at - cb.GPUEndTime(),
+                    at - stamps.arrival,
+                    stamps.arrival - stamps.capture,
+                    CACurrentMediaTime() - at,
+                ]);
+            }
         });
         unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&on_presented)) };
         command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));

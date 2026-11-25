@@ -35,11 +35,13 @@ pub fn attach_below(gpui_view: NonNull<c_void>) -> Result<RenderTarget, String> 
     layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
     layer.setFramebufferOnly(true);
     // At most one frame in flight (docs/spec/v1.md §3.3).
-    layer.setMaximumDrawableCount(2);
-    layer.setDisplaySyncEnabled(true);
+    let diag = std::env::var("XREVEAL_DIAG").unwrap_or_default();
+    layer.setMaximumDrawableCount(if diag.contains("drawables3") { 3 } else { 2 });
+    layer.setDisplaySyncEnabled(!diag.contains("nosync"));
+    eprintln!("DIAG config: {diag:?}");
     layer.setOpaque(true);
     if let Some(window) = gpui_view.window() {
-        layer.setContentsScale(window.backingScaleFactor());
+        layer.setContentsScale(if diag.contains("scale1") { 1.0 } else { window.backingScaleFactor() });
     }
 
     let view = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
@@ -50,6 +52,9 @@ pub fn attach_below(gpui_view: NonNull<c_void>) -> Result<RenderTarget, String> 
     view.setLayer(Some(&layer));
     view.setWantsLayer(true);
     content.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, Some(gpui_view));
+    if diag.contains("hide_gpui") {
+        gpui_view.setHidden(true);
+    }
 
     Ok(RenderTarget { layer, device })
 }
