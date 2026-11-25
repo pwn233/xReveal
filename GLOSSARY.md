@@ -41,6 +41,14 @@ _Avoid_: panorama, non-linear scale
 **Smart stretch strength**
 How far Smart stretch moves away from plain Stretch: 0% looks exactly like Stretch, 100% keeps the centre fully undistorted and puts all the stretching at the edges. Starts at 50%.
 
+**Colour range**
+Whether the Source's levels use the full scale (Full) or reserve the ends for headroom (Limited). Auto assumes Full. Each Source remembers its own choice.
+_Avoid_: RGB range, levels, black level
+
+**Colour space**
+Which colour formula the Source's picture follows: BT.709 for HD, BT.601 for standard definition. Auto picks by picture size (720 lines and up is BT.709). Each Source remembers its own choice.
+_Avoid_: colour matrix, colour profile
+
 **Picture adjustments**
 xReveal's own brightness, contrast and saturation (always shown), plus gamma and hue (in a collapsed "More" group), applied to the Source picture the same way on every card and OS.
 _Avoid_: filters, colour correction, card settings
