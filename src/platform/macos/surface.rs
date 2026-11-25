@@ -34,9 +34,12 @@ pub fn attach_below(gpui_view: NonNull<c_void>) -> Result<RenderTarget, String> 
     layer.setDevice(Some(&device));
     layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
     layer.setFramebufferOnly(true);
-    // At most one frame in flight (docs/spec/v1.md §3.3).
-    layer.setMaximumDrawableCount(2);
-    layer.setDisplaySyncEnabled(true);
+    // Hand each frame to the window server as soon as it is drawn: the window server already
+    // composites in step with the display, so the layer's own vsync only added a second wait
+    // (~45 ms → ~8 ms arrival → screen, issue #54). Three drawables so drawing never waits for one
+    // to come back. The picture doesn't tear: the window is composited (docs/spec/v1.md §3.3).
+    layer.setDisplaySyncEnabled(false);
+    layer.setMaximumDrawableCount(3);
     layer.setOpaque(true);
     if let Some(window) = gpui_view.window() {
         layer.setContentsScale(window.backingScaleFactor());
