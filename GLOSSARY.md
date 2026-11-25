@@ -15,6 +15,10 @@ The specific capture card (the user's Onten card) that xReveal is tested against
 The resolution, frame rate and pixel encoding that xReveal asks the Source to deliver.
 _Avoid_: mode, quality
 
+**Buffering**
+A Source setting that holds back the newest frames to even out uneven delivery from the card: Off (always show the newest frame, the default), 1 frame or 2 frames. Each frame held back adds that much input lag.
+_Avoid_: queue, latency mode
+
 **Target ratio**
 The shape xReveal fills on screen, such as 4:3, 16:9, 16:10, 21:9 or a custom ratio. It is independent of the Source's own 16:9 shape.
 _Avoid_: aspect, scale, resolution
@@ -80,6 +84,10 @@ _Avoid_: device locked, in use error
 **Card-unplugged screen**
 The last picture, dimmed, with a "waiting for it" message, shown when the Source is unplugged during a session. When the same Source comes back, xReveal resumes by itself.
 _Avoid_: disconnected error
+
+**Stats overlay**
+A small corner readout, toggled by a key, showing how long frames take from the Source to the screen, the real frame rate, dropped frames and the active Video format. Off by default.
+_Avoid_: debug overlay, FPS counter
 
 **Audio route**
 Which audio input (usually the Source's own audio) xReveal plays, and which output device it plays to.
