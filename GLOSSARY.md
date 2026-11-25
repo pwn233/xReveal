@@ -61,6 +61,14 @@ _Avoid_: vendor dialog, properties
 The see-through panel that slides in over the live picture (it floats on top, never pushes or shrinks the picture) to change settings. Opens from the right by default; the side can be changed. Looks the same on every OS.
 _Avoid_: sidebar, settings window, overlay menu
 
+**Welcome screen**
+The centred screen shown on the very first launch, when there is no Remembered setup yet, where the user picks a Source.
+_Avoid_: onboarding, setup wizard
+
+**Card-not-found picker**
+The smaller picker shown at launch when the Remembered setup's Source isn't plugged in. It waits for the user's click.
+_Avoid_: error screen, welcome screen
+
 **Audio route**
 Which audio input (usually the Source's own audio) xReveal plays, and which output device it plays to.
 
