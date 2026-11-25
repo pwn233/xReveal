@@ -1,0 +1,16 @@
+[package]
+name = "jbench"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+zune-jpeg = "=0.5.15"
+zune-core = "0.5"
+jpeg-decoder = { version = "0.3", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
