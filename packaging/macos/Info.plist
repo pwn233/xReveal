@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>xReveal</string>
+	<key>CFBundleDisplayName</key>
+	<string>xReveal</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.pwn233.xreveal</string>
+	<key>CFBundleExecutable</key>
+	<string>xreveal</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>xReveal shows the live picture from your capture card.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>xReveal plays the live sound from your capture card.</string>
+</dict>
+</plist>

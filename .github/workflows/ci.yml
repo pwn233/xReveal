@@ -1,0 +1,59 @@
+# Build, lint and test on both OSes for every PR and every push to main (docs/spec/v1.md §5).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the version; this installs it (with clippy) up front.
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # GPUI compiles its Metal shaders at build time with `xcrun metal`.
+      # Newer Xcode images ship the Metal toolchain as a separate download.
+      - name: Ensure Metal toolchain
+        if: runner.os == 'macOS'
+        run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --all-targets --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Upload Windows build
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: xreveal-windows-x64-debug
+          path: target/debug/xreveal.exe
+          if-no-files-found: error
