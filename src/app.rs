@@ -65,6 +65,28 @@ impl XReveal {
         cx.notify();
     }
 
+    /// Switches to another Source or Video format: the picture restarts briefly, with a notice
+    /// until the new format is running (docs/spec/v1.md §2.3).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[expect(dead_code, reason = "called from the Settings drawer's Source tab (its own slice)")]
+    pub fn switch_source(&mut self, os_id: String, choice: crate::source::VideoFormat, cx: &mut Context<Self>) {
+        self.status = "Restarting picture…".into();
+        cx.notify();
+        // Let the notice paint before opening the device (which blocks for a moment).
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |this, cx| {
+                if let Some(video) = &mut this.video {
+                    this.status = match video.switch_to(&os_id, choice) {
+                        Ok(()) => video.description().to_owned(),
+                        Err(error) => error,
+                    };
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn stats(&self) -> Option<Summary> {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         return self.video.as_ref().map(VideoPipeline::stats);
