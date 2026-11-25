@@ -1,8 +1,9 @@
-//! The video thread on Windows: xReveal's own Direct3D 11 device draws the newest frame into a
-//! flip-model, waitable swap chain held to one frame of latency, presenting on arrival with vsync
-//! (docs/spec/v1.md §3.3, §3.4; ADR 0001).
+//! The video thread on Windows: xReveal's own Direct3D 11 device draws the newest frame, in one
+//! shader pass planned by `video::picture`, into a flip-model waitable swap chain held to one frame
+//! of latency, presenting on arrival with vsync (docs/spec/v1.md §3.3, §3.4; ADR 0001).
 
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use windows::Win32::Foundation::{HANDLE, HMODULE};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
@@ -15,7 +16,7 @@ use windows::core::{Interface, PCSTR, Result, s};
 
 use super::media::{Frame, PixelFormat};
 use super::surface::Surface;
-use crate::video::fill;
+use crate::video::picture::{self, FrameInfo, Layout, PictureSettings, Plan, ShaderParams};
 use crate::video::slot::FrameSlot;
 
 const SHADER: &str = include_str!("video.hlsl");
@@ -23,8 +24,8 @@ const SWAP_CHAIN_FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENC
 
 /// Runs until the slot is closed. Presents one black frame first, so the surface is proven working
 /// even with no card (the CI smoke launch checks [`crate::video::FIRST_PRESENT`]).
-pub fn run(surface: Surface, slot: &FrameSlot<Frame>) {
-    let mut renderer = match Renderer::new(surface) {
+pub fn run(surface: Surface, slot: &FrameSlot<Frame>, settings: Arc<Mutex<PictureSettings>>) {
+    let mut renderer = match Renderer::new(surface, settings) {
         Ok(renderer) => renderer,
         Err(error) => {
             eprintln!("video: {error}");
@@ -48,6 +49,124 @@ pub fn run(surface: Surface, slot: &FrameSlot<Frame>) {
     }
 }
 
+fn layout(format: PixelFormat) -> Layout {
+    match format {
+        PixelFormat::Nv12 => Layout::Nv12,
+        PixelFormat::Yuy2 => Layout::Yuy2,
+    }
+}
+
+/// The compiled video shader and its uniforms, ready to draw a planned frame into any target.
+pub struct VideoPass {
+    vertex_shader: ID3D11VertexShader,
+    pixel_shader: ID3D11PixelShader,
+    params: ID3D11Buffer,
+}
+
+impl VideoPass {
+    pub fn new(device: &ID3D11Device) -> Result<Self> {
+        unsafe {
+            let vertex_bytes = compile(s!("vs_main"), s!("vs_4_0"))?;
+            let pixel_bytes = compile(s!("ps_main"), s!("ps_4_0"))?;
+            let (mut vertex_shader, mut pixel_shader, mut params) = (None, None, None);
+            device.CreateVertexShader(&vertex_bytes, None, Some(&mut vertex_shader))?;
+            device.CreatePixelShader(&pixel_bytes, None, Some(&mut pixel_shader))?;
+            device.CreateBuffer(
+                &D3D11_BUFFER_DESC {
+                    ByteWidth: size_of::<ShaderParams>() as u32,
+                    Usage: D3D11_USAGE_DYNAMIC,
+                    BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                    ..Default::default()
+                },
+                None,
+                Some(&mut params),
+            )?;
+            Ok(Self {
+                vertex_shader: vertex_shader.expect("created"),
+                pixel_shader: pixel_shader.expect("created"),
+                params: params.expect("created"),
+            })
+        }
+    }
+
+    /// Clears `target` to black and draws `planes` through `plan`.
+    pub fn encode(&self, context: &ID3D11DeviceContext, target: &ID3D11RenderTargetView, planes: &Planes, plan: &Plan) -> Result<()> {
+        unsafe {
+            context.ClearRenderTargetView(target, &[0.0, 0.0, 0.0, 1.0]);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context.Map(&self.params, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))?;
+            std::ptr::copy_nonoverlapping(
+                &plan.params as *const ShaderParams as *const u8,
+                mapped.pData as *mut u8,
+                size_of::<ShaderParams>(),
+            );
+            context.Unmap(&self.params, 0);
+
+            let vp = plan.viewport;
+            context.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: vp.x as f32,
+                TopLeftY: vp.y as f32,
+                Width: vp.width as f32,
+                Height: vp.height as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            }]));
+            context.OMSetRenderTargets(Some(&[Some(target.clone())]), None);
+            context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context.VSSetShader(&self.vertex_shader, None);
+            context.PSSetShader(&self.pixel_shader, None);
+            let second = planes.views.get(1).unwrap_or(&planes.views[0]);
+            context.PSSetShaderResources(0, Some(&[planes.views[0].clone(), second.clone()]));
+            context.PSSetConstantBuffers(0, Some(&[Some(self.params.clone())]));
+            context.Draw(3, 0);
+        }
+        Ok(())
+    }
+}
+
+/// Upload textures for one frame size and layout: NV12 = luma (R8) + CbCr (R8G8);
+/// YUY2 = one packed RGBA8 texture at half width.
+pub struct Planes {
+    key: (Layout, u32, u32),
+    pub textures: Vec<ID3D11Texture2D>,
+    views: Vec<Option<ID3D11ShaderResourceView>>,
+}
+
+impl Planes {
+    pub fn new(device: &ID3D11Device, layout: Layout, w: u32, h: u32) -> Result<Self> {
+        let specs: &[(DXGI_FORMAT, u32, u32)] = match layout {
+            Layout::Nv12 => &[(DXGI_FORMAT_R8_UNORM, w, h), (DXGI_FORMAT_R8G8_UNORM, w.div_ceil(2), h.div_ceil(2))],
+            Layout::Yuy2 => &[(DXGI_FORMAT_R8G8B8A8_UNORM, w.div_ceil(2), h)],
+        };
+        let mut textures = Vec::new();
+        let mut views = Vec::new();
+        for &(format, width, height) in specs {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: format,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DYNAMIC,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                MiscFlags: 0,
+            };
+            let (mut texture, mut view) = (None, None);
+            unsafe {
+                device.CreateTexture2D(&desc, None, Some(&mut texture))?;
+                let texture = texture.expect("created");
+                device.CreateShaderResourceView(&texture, None, Some(&mut view))?;
+                textures.push(texture);
+            }
+            views.push(view);
+        }
+        Ok(Self { key: (layout, w, h), textures, views })
+    }
+}
+
 struct Renderer {
     surface: Surface,
     device: ID3D11Device,
@@ -56,31 +175,13 @@ struct Renderer {
     frame_latency: HANDLE,
     target: Option<ID3D11RenderTargetView>,
     size: (u32, u32),
-    vertex_shader: ID3D11VertexShader,
-    nv12_shader: ID3D11PixelShader,
-    yuy2_shader: ID3D11PixelShader,
-    sampler: ID3D11SamplerState,
-    params: ID3D11Buffer,
+    pass: VideoPass,
     planes: Option<Planes>,
-}
-
-/// Upload textures for the current frame size and pixel format.
-struct Planes {
-    key: (PixelFormat, u32, u32),
-    textures: Vec<ID3D11Texture2D>,
-    views: Vec<Option<ID3D11ShaderResourceView>>,
-}
-
-#[repr(C)]
-struct Params {
-    video_range: u32,
-    picture_width: u32,
-    picture_height: u32,
-    pad: u32,
+    settings: Arc<Mutex<PictureSettings>>,
 }
 
 impl Renderer {
-    fn new(surface: Surface) -> Result<Self> {
+    fn new(surface: Surface, settings: Arc<Mutex<PictureSettings>>) -> Result<Self> {
         unsafe {
             let (device, context) = create_device()?;
             let factory: IDXGIFactory2 = device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
@@ -104,38 +205,7 @@ impl Renderer {
             // At most one frame in flight (docs/spec/v1.md §3.3).
             swap_chain.SetMaximumFrameLatency(1)?;
             let frame_latency = swap_chain.GetFrameLatencyWaitableObject();
-
-            let vertex_bytes = compile(s!("vs_main"), s!("vs_4_0"))?;
-            let mut vertex_shader = None;
-            device.CreateVertexShader(&vertex_bytes, None, Some(&mut vertex_shader))?;
-            let nv12_shader = pixel_shader(&device, s!("ps_nv12"))?;
-            let yuy2_shader = pixel_shader(&device, s!("ps_yuy2"))?;
-
-            let mut sampler = None;
-            device.CreateSamplerState(
-                &D3D11_SAMPLER_DESC {
-                    Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-                    AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
-                    AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
-                    AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
-                    MaxLOD: f32::MAX,
-                    ..Default::default()
-                },
-                Some(&mut sampler),
-            )?;
-            let mut params = None;
-            device.CreateBuffer(
-                &D3D11_BUFFER_DESC {
-                    ByteWidth: size_of::<Params>() as u32,
-                    Usage: D3D11_USAGE_DYNAMIC,
-                    BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
-                    CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
-                    ..Default::default()
-                },
-                None,
-                Some(&mut params),
-            )?;
-
+            let pass = VideoPass::new(&device)?;
             Ok(Self {
                 surface,
                 device,
@@ -144,12 +214,9 @@ impl Renderer {
                 frame_latency,
                 target: None,
                 size: (desc.Width, desc.Height),
-                vertex_shader: vertex_shader.expect("created"),
-                nv12_shader,
-                yuy2_shader,
-                sampler: sampler.expect("created"),
-                params: params.expect("created"),
+                pass,
                 planes: None,
+                settings,
             })
         }
     }
@@ -166,40 +233,17 @@ impl Renderer {
                 self.target = target;
             }
             let target = self.target.clone().expect("created above");
-            self.context.ClearRenderTargetView(&target, &[0.0, 0.0, 0.0, 1.0]);
-
-            if let Some(frame) = frame {
-                self.upload(frame)?;
-                let f = frame.format;
-                let rect = fill::fit(f.width as f64, f.height as f64, self.size.0 as f64, self.size.1 as f64);
-                self.context.RSSetViewports(Some(&[D3D11_VIEWPORT {
-                    TopLeftX: rect.x as f32,
-                    TopLeftY: rect.y as f32,
-                    Width: rect.width as f32,
-                    Height: rect.height as f32,
-                    MinDepth: 0.0,
-                    MaxDepth: 1.0,
-                }]));
-                // Windows passes the card's levels through untouched; Auto Colour range = Full
-                // (docs/spec/v1.md §2.6). Range/space settings arrive with the full shader.
-                self.write_params(&Params { video_range: 0, picture_width: f.width, picture_height: f.height, pad: 0 })?;
-                let planes = self.planes.as_ref().expect("uploaded above");
-                self.context.OMSetRenderTargets(Some(&[Some(target.clone())]), None);
-                self.context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-                self.context.VSSetShader(&self.vertex_shader, None);
-                let shader = match f.pixel_format {
-                    PixelFormat::Nv12 => &self.nv12_shader,
-                    PixelFormat::Yuy2 => &self.yuy2_shader,
-                };
-                self.context.PSSetShader(shader, None);
-                let views = match f.pixel_format {
-                    PixelFormat::Nv12 => [planes.views[0].clone(), planes.views[1].clone(), None],
-                    PixelFormat::Yuy2 => [None, None, planes.views[0].clone()],
-                };
-                self.context.PSSetShaderResources(0, Some(&views));
-                self.context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
-                self.context.PSSetConstantBuffers(0, Some(&[Some(self.params.clone())]));
-                self.context.Draw(3, 0);
+            match frame {
+                Some(frame) => {
+                    self.upload(frame)?;
+                    let f = frame.format;
+                    // Windows passes the card's levels through untouched: nothing to undo.
+                    let info = FrameInfo { width: f.width, height: f.height, layout: layout(f.pixel_format), os_squeezed: false };
+                    let settings = *self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+                    let plan = picture::plan(info, &settings, (self.size.0 as f64, self.size.1 as f64));
+                    self.pass.encode(&self.context, &target, self.planes.as_ref().expect("uploaded"), &plan)?;
+                }
+                None => self.context.ClearRenderTargetView(&target, &[0.0, 0.0, 0.0, 1.0]),
             }
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
         }
@@ -224,9 +268,9 @@ impl Renderer {
     /// Copies the frame's planes into the upload textures: the one CPU→GPU copy per frame.
     fn upload(&mut self, frame: &Frame) -> Result<()> {
         let f = frame.format;
-        let key = (f.pixel_format, f.width, f.height);
+        let key = (layout(f.pixel_format), f.width, f.height);
         if self.planes.as_ref().map(|p| p.key) != Some(key) {
-            self.planes = Some(self.create_planes(key)?);
+            self.planes = Some(Planes::new(&self.device, key.0, f.width, f.height)?);
         }
         let planes = self.planes.as_ref().expect("created above");
         let context = &self.context;
@@ -241,54 +285,10 @@ impl Renderer {
             }
         })?
     }
-
-    fn create_planes(&self, key: (PixelFormat, u32, u32)) -> Result<Planes> {
-        let (format, w, h) = key;
-        let layout: &[(DXGI_FORMAT, u32, u32)] = match format {
-            PixelFormat::Nv12 => &[(DXGI_FORMAT_R8_UNORM, w, h), (DXGI_FORMAT_R8G8_UNORM, w.div_ceil(2), h.div_ceil(2))],
-            PixelFormat::Yuy2 => &[(DXGI_FORMAT_R8G8B8A8_UNORM, w.div_ceil(2), h)],
-        };
-        let mut textures = Vec::new();
-        let mut views = Vec::new();
-        for &(format, width, height) in layout {
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: width,
-                Height: height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: format,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Usage: D3D11_USAGE_DYNAMIC,
-                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
-                MiscFlags: 0,
-            };
-            let mut texture = None;
-            let mut view = None;
-            unsafe {
-                self.device.CreateTexture2D(&desc, None, Some(&mut texture))?;
-                let texture = texture.expect("created");
-                self.device.CreateShaderResourceView(&texture, None, Some(&mut view))?;
-                textures.push(texture);
-            }
-            views.push(view);
-        }
-        Ok(Planes { key, textures, views })
-    }
-
-    fn write_params(&self, params: &Params) -> Result<()> {
-        unsafe {
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            self.context.Map(&self.params, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))?;
-            std::ptr::copy_nonoverlapping(params as *const Params as *const u8, mapped.pData as *mut u8, size_of::<Params>());
-            self.context.Unmap(&self.params, 0);
-        }
-        Ok(())
-    }
 }
 
 /// Copies `rows` rows of `row_bytes` from `source` (with `pitch`) into a dynamic texture.
-fn write_rows(
+pub fn write_rows(
     context: &ID3D11DeviceContext,
     texture: &ID3D11Texture2D,
     source: &[u8],
@@ -311,31 +311,36 @@ fn write_rows(
 
 /// A hardware device, or Microsoft's software renderer (WARP) where there is no GPU, e.g. on CI.
 fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
-    let levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0];
     let mut last_error = None;
     for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                driver,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&levels),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        match (result, device, context) {
-            (Ok(()), Some(device), Some(context)) => return Ok((device, context)),
-            (Err(error), _, _) => last_error = Some(error),
-            _ => {}
+        match create_device_of(driver) {
+            Ok(pair) => return Ok(pair),
+            Err(error) => last_error = Some(error),
         }
     }
     Err(last_error.unwrap_or_else(windows::core::Error::empty))
+}
+
+fn create_device_of(driver: D3D_DRIVER_TYPE) -> Result<(ID3D11Device, ID3D11DeviceContext)> {
+    let levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0];
+    let (mut device, mut context) = (None, None);
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            driver,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&levels),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )?;
+    }
+    match (device, context) {
+        (Some(device), Some(context)) => Ok((device, context)),
+        _ => Err(windows::core::Error::empty()),
+    }
 }
 
 fn compile(entry: PCSTR, target: PCSTR) -> Result<Vec<u8>> {
@@ -367,9 +372,72 @@ fn compile(entry: PCSTR, target: PCSTR) -> Result<Vec<u8>> {
     }
 }
 
-fn pixel_shader(device: &ID3D11Device, entry: PCSTR) -> Result<ID3D11PixelShader> {
-    let bytes = compile(entry, s!("ps_4_0"))?;
-    let mut shader = None;
-    unsafe { device.CreatePixelShader(&bytes, None, Some(&mut shader))? };
-    Ok(shader.expect("created"))
+#[cfg(test)]
+mod gpu_tests {
+    //! The HLSL shader against the CPU reference (`video::picture::gpu_check`), offscreen on WARP.
+    use super::*;
+    use crate::video::picture::{gpu_check, reference};
+
+    fn render(device: &ID3D11Device, context: &ID3D11DeviceContext, pass: &VideoPass, src: &reference::Planes, plan: &Plan) -> Vec<[f32; 3]> {
+        unsafe {
+            let (w, h) = gpu_check::FRAME;
+            let planes = Planes::new(device, src.layout, w, h).expect("planes");
+            match src.layout {
+                Layout::Nv12 => {
+                    write_rows(context, &planes.textures[0], src.first, w as usize, w as usize, h as usize).unwrap();
+                    let row = w.div_ceil(2) as usize * 2;
+                    write_rows(context, &planes.textures[1], src.second, row, row, h.div_ceil(2) as usize).unwrap();
+                }
+                Layout::Yuy2 => {
+                    let row = w.div_ceil(2) as usize * 4;
+                    write_rows(context, &planes.textures[0], src.first, row, row, h as usize).unwrap();
+                }
+            }
+            let (out_w, out_h) = gpu_check::OUTPUT;
+            let mut desc = D3D11_TEXTURE2D_DESC {
+                Width: out_w,
+                Height: out_h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut target = None;
+            device.CreateTexture2D(&desc, None, Some(&mut target)).unwrap();
+            let target = target.unwrap();
+            let mut view = None;
+            device.CreateRenderTargetView(&target, None, Some(&mut view)).unwrap();
+            pass.encode(context, &view.unwrap(), &planes, plan).unwrap();
+
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            let mut staging = None;
+            device.CreateTexture2D(&desc, None, Some(&mut staging)).unwrap();
+            let staging = staging.unwrap();
+            context.CopyResource(&staging, &target);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).unwrap();
+            let mut image = Vec::with_capacity((out_w * out_h) as usize);
+            for y in 0..out_h as usize {
+                let row = std::slice::from_raw_parts((mapped.pData as *const u8).add(y * mapped.RowPitch as usize), out_w as usize * 4);
+                image.extend(row.as_chunks::<4>().0.iter().map(|p| [p[2] as f32 / 255.0, p[1] as f32 / 255.0, p[0] as f32 / 255.0]));
+            }
+            context.Unmap(&staging, 0);
+            image
+        }
+    }
+
+    #[test]
+    fn hlsl_matches_reference() {
+        let (device, context) = create_device_of(D3D_DRIVER_TYPE_WARP).expect("WARP device");
+        let pass = VideoPass::new(&device).expect("video pass");
+        for layout in [Layout::Nv12, Layout::Yuy2] {
+            gpu_check::assert_all_match(layout, |planes, plan| render(&device, &context, &pass, planes, plan));
+        }
+    }
 }
