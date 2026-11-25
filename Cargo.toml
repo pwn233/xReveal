@@ -10,3 +10,17 @@ publish = false
 # GPUI Kit: GPUI + gpui-component + default assets behind one dependency.
 # https://gpui-kit.com
 gpui-kit = "0.11.0"
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Capture (AVFoundation) and the video surface (Metal under GPUI's view). docs/spec/v1.md §3.1, §3.4.
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-av-foundation = { version = "0.3", features = ["dispatch2", "objc2-core-media", "objc2-core-video"] }
+objc2-core-foundation = "0.3"
+objc2-core-media = { version = "0.3", features = ["objc2-core-video"] }
+objc2-core-video = { version = "0.3", features = ["objc2-metal"] }
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+objc2-quartz-core = { version = "0.3", features = ["objc2-metal", "objc2-core-foundation"] }

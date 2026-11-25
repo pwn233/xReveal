@@ -1,94 +1,66 @@
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, TitleBar, h_flex, v_flex};
+//! Root view: the live picture shows through it (it paints no background), with a one-line status
+//! until the Settings drawer and the screens without a picture exist.
+
 use gpui_kit::*;
 
-/// Root view of the application.
+#[cfg(target_os = "macos")]
+use crate::platform::macos::VideoPipeline;
+
 pub struct XReveal {
-    clicks: usize,
+    focus: FocusHandle,
+    status: String,
+    #[cfg(target_os = "macos")]
+    _video: Option<VideoPipeline>,
 }
 
 impl XReveal {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        Self { clicks: 0 }
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+
+        #[cfg(target_os = "macos")]
+        {
+            let (video, status) = match VideoPipeline::start(window) {
+                Ok(video) => {
+                    let status = video.description().to_owned();
+                    (Some(video), status)
+                }
+                Err(error) => (None, error),
+            };
+            Self { focus, status, _video: video }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self { focus, status: "The live picture isn't implemented on this OS yet.".into() }
+        }
     }
 
-    fn increment(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.clicks += 1;
-        cx.notify();
-    }
-
-    fn reset(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.clicks = 0;
-        cx.notify();
-    }
-
-    fn toggle_theme(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let mode = if cx.theme().is_dark() {
-            ThemeMode::Light
-        } else {
-            ThemeMode::Dark
-        };
-        Theme::change(mode, Some(window), cx);
-        cx.notify();
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        // F11: windowed / fullscreen (docs/spec/v1.md §2.2; assumption to confirm, §8).
+        if event.keystroke.key == "f11" {
+            window.toggle_simple_fullscreen();
+        }
     }
 }
 
 impl Render for XReveal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let theme_label = if theme.is_dark() {
-            "Light mode"
-        } else {
-            "Dark mode"
-        };
-
-        v_flex()
+        div()
             .size_full()
-            .bg(theme.background)
-            .text_color(theme.foreground)
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key_down))
+            .flex()
+            .items_end()
+            .p_3()
             .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .w_full()
-                        .pr_2()
-                        .justify_between()
-                        .child("xReveal")
-                        .child(
-                            Button::new("toggle-theme")
-                                .ghost()
-                                .label(theme_label)
-                                .on_click(cx.listener(Self::toggle_theme)),
-                        ),
-                ),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .gap_4()
-                    .items_center()
-                    .justify_center()
-                    .child(div().text_2xl().child("Hello from xReveal"))
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("Button clicked {} times", self.clicks)),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("increment")
-                                    .primary()
-                                    .label("Click me")
-                                    .on_click(cx.listener(Self::increment)),
-                            )
-                            .child(
-                                Button::new("reset")
-                                    .outline()
-                                    .label("Reset")
-                                    .on_click(cx.listener(Self::reset)),
-                            ),
-                    ),
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgba(0x0000_0099))
+                    .text_color(rgb(0xffffff))
+                    .text_sm()
+                    .child(self.status.clone()),
             )
     }
 }
