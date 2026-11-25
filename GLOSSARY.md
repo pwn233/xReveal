@@ -69,6 +69,18 @@ _Avoid_: onboarding, setup wizard
 The smaller picker shown at launch when the Remembered setup's Source isn't plugged in. It waits for the user's click.
 _Avoid_: error screen, welcome screen
 
+**No-signal screen**
+The black screen with a centred message that xReveal shows when no frame has arrived from the Source for a second. It goes away by itself when frames return. A picture that is merely black (a loading screen, a card's own blank output) is shown as it is, not as a No-signal screen.
+_Avoid_: error screen, blank screen
+
+**Source busy**
+When another app holds the Source so xReveal cannot open it. xReveal says so and keeps retrying until the other app lets go.
+_Avoid_: device locked, in use error
+
+**Card-unplugged screen**
+The last picture, dimmed, with a "waiting for it" message, shown when the Source is unplugged during a session. When the same Source comes back, xReveal resumes by itself.
+_Avoid_: disconnected error
+
 **Audio route**
 Which audio input (usually the Source's own audio) xReveal plays, and which output device it plays to.
 
