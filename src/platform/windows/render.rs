@@ -14,7 +14,10 @@ use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use windows::core::{Interface, PCSTR, Result, s};
 
+use windows::Win32::Media::MediaFoundation::MF_E_INVALIDMEDIATYPE;
+
 use super::media::{Frame, PixelFormat};
+use crate::video::mjpeg::MjpegDecoder;
 use super::surface::Surface;
 use crate::video::picture::{self, FrameInfo, Layout, PictureSettings, Plan, ShaderParams};
 use crate::video::slot::FrameSlot;
@@ -53,6 +56,7 @@ fn layout(format: PixelFormat) -> Layout {
     match format {
         PixelFormat::Nv12 => Layout::Nv12,
         PixelFormat::Yuy2 => Layout::Yuy2,
+        PixelFormat::Mjpeg => Layout::Ycbcr444,
     }
 }
 
@@ -152,6 +156,7 @@ impl Planes {
         let specs: &[(DXGI_FORMAT, u32, u32)] = match layout {
             Layout::Nv12 => &[(DXGI_FORMAT_R8_UNORM, w, h), (DXGI_FORMAT_R8G8_UNORM, w.div_ceil(2), h.div_ceil(2))],
             Layout::Yuy2 => &[(DXGI_FORMAT_R8G8B8A8_UNORM, w.div_ceil(2), h)],
+            Layout::Ycbcr444 => &[(DXGI_FORMAT_R8_UNORM, w * 3, h)],
         };
         let mut textures = Vec::new();
         let mut views = Vec::new();
@@ -192,6 +197,7 @@ struct Renderer {
     pass: VideoPass,
     planes: Option<Planes>,
     settings: Arc<Mutex<PictureSettings>>,
+    mjpeg: MjpegDecoder,
 }
 
 impl Renderer {
@@ -231,6 +237,7 @@ impl Renderer {
                 pass,
                 planes: None,
                 settings,
+                mjpeg: MjpegDecoder::default(),
             })
         }
     }
@@ -249,10 +256,9 @@ impl Renderer {
             let target = self.target.clone().expect("created above");
             match frame {
                 Some(frame) => {
-                    self.upload(frame)?;
-                    let f = frame.format;
+                    let (width, height) = self.upload(frame)?;
                     // Windows passes the card's levels through untouched: nothing to undo.
-                    let info = FrameInfo { width: f.width, height: f.height, layout: layout(f.pixel_format), os_squeezed: false };
+                    let info = FrameInfo { width, height, layout: layout(frame.format.pixel_format), os_squeezed: false };
                     let settings = *self.settings.lock().unwrap_or_else(PoisonError::into_inner);
                     let plan = picture::plan(info, &settings, (self.size.0 as f64, self.size.1 as f64));
                     self.pass.encode(&self.context, &target, self.planes.as_ref().expect("uploaded"), &plan)?;
@@ -280,25 +286,42 @@ impl Renderer {
     }
 
     /// Copies the frame's planes into the upload textures: the one CPU→GPU copy per frame.
-    fn upload(&mut self, frame: &Frame) -> Result<()> {
+    /// MJPEG frames are decoded first (only the newest frame ever reaches here). Returns the
+    /// picture size actually uploaded.
+    fn upload(&mut self, frame: &Frame) -> Result<(u32, u32)> {
         let f = frame.format;
-        let key = (layout(f.pixel_format), f.width, f.height);
-        if self.planes.as_ref().map(|p| p.key) != Some(key) {
-            self.planes = Some(Planes::new(&self.device, key.0, f.width, f.height)?);
-        }
-        let planes = self.planes.as_ref().expect("created above");
+        let (device, planes, mjpeg) = (&self.device, &mut self.planes, &mut self.mjpeg);
         let context = &self.context;
-        let (w, h) = (f.width as usize, f.height as usize);
-        frame.with_pixels(|bytes, pitch| -> Result<()> {
+        frame.with_pixels(|bytes, pitch| -> Result<(u32, u32)> {
+            if f.pixel_format == PixelFormat::Mjpeg {
+                let decoded = mjpeg.decode(bytes).map_err(|e| windows::core::Error::new(MF_E_INVALIDMEDIATYPE, e))?;
+                let (w, h) = (decoded.width, decoded.height);
+                let planes = ensure_planes(device, planes, Layout::Ycbcr444, w, h)?;
+                let row = w as usize * 3;
+                write_rows(context, &planes.textures[0], decoded.ycbcr, row, row, h as usize)?;
+                return Ok((w, h));
+            }
+            let planes = ensure_planes(device, planes, layout(f.pixel_format), f.width, f.height)?;
+            let (w, h) = (f.width as usize, f.height as usize);
             match f.pixel_format {
                 PixelFormat::Nv12 => {
                     write_rows(context, &planes.textures[0], &bytes[..pitch * h], pitch, w, h)?;
-                    write_rows(context, &planes.textures[1], &bytes[pitch * h..], pitch, w, h.div_ceil(2))
+                    write_rows(context, &planes.textures[1], &bytes[pitch * h..], pitch, w, h.div_ceil(2))?;
                 }
-                PixelFormat::Yuy2 => write_rows(context, &planes.textures[0], bytes, pitch, w * 2, h),
+                PixelFormat::Yuy2 => write_rows(context, &planes.textures[0], bytes, pitch, w * 2, h)?,
+                PixelFormat::Mjpeg => unreachable!("handled above"),
             }
+            Ok((f.width, f.height))
         })?
     }
+}
+
+/// The upload textures for `layout` at `w`×`h`, recreated only when that changes.
+fn ensure_planes<'a>(device: &ID3D11Device, planes: &'a mut Option<Planes>, layout: Layout, w: u32, h: u32) -> Result<&'a Planes> {
+    if planes.as_ref().map(|p| p.key) != Some((layout, w, h)) {
+        *planes = Some(Planes::new(device, layout, w, h)?);
+    }
+    Ok(planes.as_ref().expect("set above"))
 }
 
 /// Copies `rows` rows of `row_bytes` from `source` (with `pitch`) into a dynamic texture.
@@ -397,6 +420,10 @@ mod gpu_tests {
             let (w, h) = gpu_check::FRAME;
             let planes = Planes::new(device, src.layout, w, h).expect("planes");
             match src.layout {
+                Layout::Ycbcr444 => {
+                    let row = w as usize * 3;
+                    write_rows(context, &planes.textures[0], src.first, row, row, h as usize).unwrap();
+                }
                 Layout::Nv12 => {
                     write_rows(context, &planes.textures[0], src.first, w as usize, w as usize, h as usize).unwrap();
                     let row = w.div_ceil(2) as usize * 2;
@@ -450,7 +477,7 @@ mod gpu_tests {
     fn hlsl_matches_reference() {
         let (device, context) = create_device_of(D3D_DRIVER_TYPE_WARP).expect("WARP device");
         let pass = VideoPass::new(&device).expect("video pass");
-        for layout in [Layout::Nv12, Layout::Yuy2] {
+        for layout in [Layout::Nv12, Layout::Yuy2, Layout::Ycbcr444] {
             gpu_check::assert_all_match(layout, |planes, plan| render(&device, &context, &pass, planes, plan));
         }
     }

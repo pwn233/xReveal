@@ -264,6 +264,10 @@ mod gpu_tests {
                 let t = texture(device, MTLPixelFormat::RGBA8Unorm, (w.div_ceil(2), h), planes.first, 4);
                 (t.clone(), t)
             }
+            Layout::Ycbcr444 => {
+                let t = texture(device, MTLPixelFormat::R8Unorm, (w * 3, h), planes.first, 1);
+                (t.clone(), t)
+            }
         };
         let (out_w, out_h) = (gpu_check::OUTPUT.0 as usize, gpu_check::OUTPUT.1 as usize);
         let desc = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(MTLPixelFormat::BGRA8Unorm, out_w, out_h, false) };
@@ -301,7 +305,7 @@ mod gpu_tests {
     fn msl_matches_reference() {
         let device = device();
         let pass = VideoPass::new(&device).expect("video pass");
-        for layout in [Layout::Nv12, Layout::Yuy2] {
+        for layout in [Layout::Nv12, Layout::Yuy2, Layout::Ycbcr444] {
             gpu_check::assert_all_match(layout, |planes, plan| render(&device, &pass, planes, plan));
         }
     }

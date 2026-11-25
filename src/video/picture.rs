@@ -122,6 +122,23 @@ pub enum Layout {
     Nv12,
     /// One RGBA8 texture at half width: (Y0, Cb, Y1, Cr) per texel.
     Yuy2,
+    /// One R8 texture three times as wide: Y, Cb, Cr per pixel (xReveal's own MJPEG decode).
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(dead_code, reason = "macOS decodes MJPEG in the OS; only Windows draws this layout")
+    )]
+    Ycbcr444,
+}
+
+impl Layout {
+    /// The value the shaders branch on (`misc.y`).
+    fn shader_code(self) -> f32 {
+        match self {
+            Layout::Nv12 => 0.0,
+            Layout::Yuy2 => 1.0,
+            Layout::Ycbcr444 => 2.0,
+        }
+    }
 }
 
 /// Facts about the frame being drawn.
@@ -167,7 +184,7 @@ pub struct ShaderParams {
     pub smart: [f32; 4],
     /// xy = luma texture size in texels, zw = chroma texture size in texels.
     pub sizes: [f32; 4],
-    /// x = 1 ÷ gamma, y = layout (0 NV12, 1 YUY2), zw unused.
+    /// x = 1 ÷ gamma, y = layout (0 NV12, 1 YUY2, 2 Y-Cb-Cr 4:4:4), zw unused.
     pub misc: [f32; 4],
 }
 
@@ -208,6 +225,7 @@ pub fn plan(frame: FrameInfo, settings: &PictureSettings, surface_size: (f64, f6
     let (luma, chroma) = match frame.layout {
         Layout::Nv12 => ((frame.width, frame.height), (frame.width.div_ceil(2), frame.height.div_ceil(2))),
         Layout::Yuy2 => ((frame.width, frame.height), (frame.width.div_ceil(2), frame.height)),
+        Layout::Ycbcr444 => ((frame.width, frame.height), (frame.width, frame.height)),
     };
     let colour = colour_matrix(frame, settings);
     let gamma = settings.adjustments.gamma.clamp(0.1, 10.0);
@@ -218,7 +236,7 @@ pub fn plan(frame: FrameInfo, settings: &PictureSettings, surface_size: (f64, f6
             mapping: mapping.map(|v| v as f32),
             smart: smart.unwrap_or([1.0, 0.0, 3.0, 0.0]).map(|v| v as f32),
             sizes: [luma.0 as f32, luma.1 as f32, chroma.0 as f32, chroma.1 as f32],
-            misc: [1.0 / gamma, if frame.layout == Layout::Yuy2 { 1.0 } else { 0.0 }, 0.0, 0.0],
+            misc: [1.0 / gamma, frame.layout.shader_code(), 0.0, 0.0],
         },
     }
 }
@@ -383,6 +401,7 @@ pub mod reference {
                 let texel = (y * width.div_ceil(2) + x / 2) * 4;
                 planes.first[texel + if x % 2 == 0 { 0 } else { 2 }] as f32 / 255.0
             }
+            Layout::Ycbcr444 => planes.first[(y * width + x) * 3] as f32 / 255.0,
         }
     }
 
@@ -397,6 +416,10 @@ pub mod reference {
             Layout::Yuy2 => {
                 let at = (y * width + x) * 4;
                 [planes.first[at + 1] as f32 / 255.0, planes.first[at + 3] as f32 / 255.0]
+            }
+            Layout::Ycbcr444 => {
+                let at = (y * width + x) * 3;
+                [planes.first[at + 1] as f32 / 255.0, planes.first[at + 2] as f32 / 255.0]
             }
         }
     }
@@ -437,6 +460,16 @@ pub fn test_frame(width: u32, height: u32, layout: Layout) -> (Vec<u8>, Vec<u8>)
                     let (y0, cb, cr) = pixel(x * 2, y);
                     let (y1, _, _) = pixel((x * 2 + 1).min(w - 1), y);
                     [y0, cb, y1, cr]
+                })
+                .collect();
+            (packed, Vec::new())
+        }
+        Layout::Ycbcr444 => {
+            let packed = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .flat_map(|(x, y)| {
+                    let (l, cb, cr) = pixel(x, y);
+                    [l, cb, cr]
                 })
                 .collect();
             (packed, Vec::new())

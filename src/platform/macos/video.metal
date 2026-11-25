@@ -13,7 +13,7 @@ struct Params {
     float4 mapping;   // xy offset, zw scale: source UV = offset + UV × scale
     float4 smart;     // k, t, p, enabled
     float4 sizes;     // luma size (texels), chroma size (texels)
-    float4 misc;      // 1 / gamma, layout (0 NV12, 1 YUY2)
+    float4 misc;      // 1 / gamma, layout (0 NV12, 1 YUY2, 2 Y-Cb-Cr 4:4:4)
 };
 
 struct VertexOut {
@@ -48,16 +48,22 @@ static float4 weights(float t) {
     return 0.5 * float4(-t3 + 2.0 * t2 - t, 3.0 * t3 - 5.0 * t2 + 2.0, -3.0 * t3 + 4.0 * t2 + t, t3 - t2);
 }
 
-static float fetch_luma(texture2d<float> first, int x, int y, bool yuy2) {
-    if (yuy2) {
+static float fetch_luma(texture2d<float> first, int x, int y, int layout) {
+    if (layout == 2) {
+        return first.read(uint2(x * 3, y)).r;
+    }
+    if (layout == 1) {
         float4 texel = first.read(uint2(x / 2, y));
         return (x & 1) ? texel.b : texel.r;
     }
     return first.read(uint2(x, y)).r;
 }
 
-static float2 fetch_chroma(texture2d<float> first, texture2d<float> second, int x, int y, bool yuy2) {
-    if (yuy2) {
+static float2 fetch_chroma(texture2d<float> first, texture2d<float> second, int x, int y, int layout) {
+    if (layout == 2) {
+        return float2(first.read(uint2(x * 3 + 1, y)).r, first.read(uint2(x * 3 + 2, y)).r);
+    }
+    if (layout == 1) {
         return first.read(uint2(x, y)).ga;
     }
     return second.read(uint2(x, y)).rg;
@@ -67,7 +73,7 @@ fragment float4 video_fragment(VertexOut in [[stage_in]],
                                texture2d<float> first [[texture(0)]],
                                texture2d<float> second [[texture(1)]],
                                constant Params& p [[buffer(0)]]) {
-    bool yuy2 = p.misc.y > 0.5;
+    int layout = int(p.misc.y + 0.5);
     float2 src = source_uv(p, in.uv);
 
     // Luma: 4×4 Catmull-Rom taps, clamped at the edges.
@@ -81,7 +87,7 @@ fragment float4 video_fragment(VertexOut in [[stage_in]],
         float row = 0.0;
         for (int i = 0; i < 4; i++) {
             int x = clamp(int(li.x) + i - 1, 0, lmax.x);
-            row += lwx[i] * fetch_luma(first, x, y, yuy2);
+            row += lwx[i] * fetch_luma(first, x, y, layout);
         }
         luma += lwy[j] * row;
     }
@@ -97,7 +103,7 @@ fragment float4 video_fragment(VertexOut in [[stage_in]],
         float2 row = 0.0;
         for (int i = 0; i < 4; i++) {
             int x = clamp(int(ci.x) + i - 1, 0, cmax.x);
-            row += cwx[i] * fetch_chroma(first, second, x, y, yuy2);
+            row += cwx[i] * fetch_chroma(first, second, x, y, layout);
         }
         chroma += cwy[j] * row;
     }
