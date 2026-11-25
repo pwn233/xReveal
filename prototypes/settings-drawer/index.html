@@ -1,0 +1,205 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. Not part of xReveal.
+  Question (ticket "How is the settings panel summoned and laid out over the fullscreen picture?"):
+  how the Settings drawer opens and how its controls are organised.
+  Three layouts of the drawer, switchable via ?variant=A|B|C (bottom bar or ← →). The grey box is your 21:9 monitor.
+  Open: move the mouse to the drawer's edge and click the handle, or press Tab. Esc closes. "Simulate first run" shows the no-setup flow.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE · Settings drawer</title>
+<style>
+  :root { color-scheme: dark; --bg:#060708; --glass:rgba(20,22,27,.72); --line:rgba(255,255,255,.12); --text:#eef0f4; --muted:#9aa1ad; --accent:#6aa9ff; --warn:#ffcc66; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 system-ui, sans-serif; padding:12px 16px 80px; }
+  .top { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; margin-bottom:8px; color:var(--muted); }
+  .tag { font-size:11px; padding:2px 8px; border-radius:999px; background:#3b2a12; color:#ffc76a; }
+  .top button { background:#1b1e24; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 10px; cursor:pointer; }
+  #monitor { position:relative; width:100%; aspect-ratio:21/9; background:#000; border:1px solid #333; overflow:hidden; }
+  #pic { position:absolute; inset:0; width:100%; height:100%; }
+  #edge { position:absolute; top:0; bottom:0; width:48px; z-index:3; }
+  #handle { position:absolute; top:50%; transform:translateY(-50%); width:22px; height:72px; border-radius:8px; background:var(--glass);
+    border:1px solid var(--line); display:none; align-items:center; justify-content:center; cursor:pointer; z-index:4; backdrop-filter:blur(8px); }
+  #drawer { position:absolute; top:0; bottom:0; z-index:5; background:var(--glass); backdrop-filter:blur(14px); border:1px solid var(--line);
+    transition:transform .18s ease-out; overflow:auto; }
+  #drawer.right { right:0; border-width:0 0 0 1px; } #drawer.left { left:0; border-width:0 1px 0 0; }
+  #drawer.right.closed { transform:translateX(105%); } #drawer.left.closed { transform:translateX(-105%); }
+  h3 { font-size:11px; letter-spacing:.02em; color:var(--muted); margin:14px 0 6px; font-weight:600; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:6px 0; }
+  .row > span { color:var(--muted); white-space:nowrap; }
+  select, input[type=number] { background:rgba(0,0,0,.35); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 6px; max-width:62%; }
+  input[type=range] { accent-color:var(--accent); width:56%; }
+  .seg { display:flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .seg button { flex:1; background:transparent; color:var(--text); border:0; padding:4px 8px; cursor:pointer; }
+  .seg button.on { background:var(--accent); color:#06121f; font-weight:600; }
+  .btn { background:rgba(255,255,255,.08); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 10px; cursor:pointer; }
+  .note { color:var(--muted); font-size:11.5px; } .warn { color:var(--warn); font-size:11.5px; }
+  .more { border-top:1px dashed var(--line); margin-top:6px; padding-top:4px; }
+  summary { cursor:pointer; color:var(--muted); }
+  /* A: icon rail tabs */
+  .rail { display:flex; height:100%; } .rail nav { width:56px; border-right:1px solid var(--line); padding-top:8px; flex:none; }
+  .rail nav button { display:block; width:100%; background:none; border:0; color:var(--muted); padding:10px 0; cursor:pointer; font-size:11px; }
+  .rail nav button.on { color:var(--accent); } .rail nav b { display:block; font-size:18px; }
+  .rail .pane { padding:10px 14px; flex:1; overflow:auto; }
+  /* B: accordion */
+  .acc { padding:4px 14px 14px; } .acc details { border-bottom:1px solid var(--line); padding:8px 0; }
+  .acc details > summary { color:var(--text); font-weight:600; list-style:none; } .acc details > summary::before { content:'▸ '; color:var(--muted); }
+  .acc details[open] > summary::before { content:'▾ '; }
+  /* C: quick + full */
+  .quick { padding:12px 14px; } .full { display:grid; grid-template-columns:1fr 1fr; gap:0 22px; padding:10px 16px; }
+  #toast { position:absolute; left:50%; top:14px; transform:translateX(-50%); background:var(--glass); border:1px solid var(--line); padding:6px 12px;
+    border-radius:8px; z-index:6; display:none; backdrop-filter:blur(8px); }
+  #switcher { position:fixed; left:50%; bottom:calc(14px + env(safe-area-inset-bottom, 0px)); transform:translateX(-50%); display:flex; align-items:center; gap:6px;
+    background:#fff; color:#111; border-radius:999px; padding:6px; box-shadow:0 6px 24px rgba(0,0,0,.5); font-weight:600; z-index:20; }
+  #switcher button { border:0; background:#111; color:#fff; width:32px; height:32px; border-radius:999px; cursor:pointer; }
+  #switcher span { padding:0 12px; min-width:240px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="top">
+  <b style="color:var(--text)">Settings drawer</b><span class="tag">PROTOTYPE, throwaway</span>
+  <span>Open: mouse to the edge → handle, or <b>Tab</b>. Close: <b>Esc</b>.</span>
+  <button id="firstRun">Simulate first run</button>
+  <label>OS <select id="os"><option>Windows</option><option>macOS</option></select></label>
+</div>
+<div id="monitor">
+  <canvas id="pic"></canvas>
+  <div id="edge"></div><div id="handle">⋮</div>
+  <div id="toast"></div>
+  <div id="drawer" class="closed"></div>
+</div>
+<div class="note" style="margin-top:6px">Live in this prototype: Fill mode, Target ratio, Smart stretch strength, brightness/contrast/saturation/hue, drawer side. Everything else is a stub.</div>
+<div id="switcher"><button id="prev">←</button><span id="vlabel"></span><button id="next">→</button></div>
+
+<script>
+// ---------------- state (in memory only) ----------------
+const S = { source:'USB2 Video', format:'1280×720 · 60 fps', buffering:'Off', ratio:'21:9', custom:'', fill:'Smart stretch', strength:0.5,
+  range:'Auto', space:'Auto', brightness:0, contrast:1, saturation:1, gamma:1, hue:0,
+  audioIn:'auto', audioOut:'Speakers', volume:0.8, mute:false, sync:0, monitor:'Main 21:9 (180 Hz)', side:'right', firstRun:false };
+const VARIANTS = [ { key:'A', name:'Tabs on a side rail' }, { key:'B', name:'One list, collapsible sections' }, { key:'C', name:'Quick panel + full view' } ];
+const qs = new URLSearchParams(location.search);
+let vi = Math.max(0, VARIANTS.findIndex(v => v.key === (qs.get('variant') || 'A'))), open = false, tabA = 'Source', fullC = false;
+const $ = id => document.getElementById(id);
+
+// ---------------- controls (shared building blocks) ----------------
+const sources = ['USB2 Video (Onten · MS2131)', 'Elgato HD60 X', 'FaceTime HD Camera'];
+const formats = ['1280×720 · 60 fps', '1920×1080 · 50 fps', '1920×1080 · 30 fps', '2560×1440 · 30 fps', '720×480 · 60 fps (uncompressed)'];
+const sel = (k, opts, label) => `<div class="row"><span>${label}</span><select data-k="${k}">${opts.map(o => `<option ${S[k]===o?'selected':''}>${o}</option>`).join('')}</select></div>`;
+const seg = (k, opts, label) => `<div class="row"><span>${label}</span><div class="seg">${opts.map(o => `<button data-seg="${k}" data-v="${o}" class="${S[k]===o?'on':''}">${o}</button>`).join('')}</div></div>`;
+const FMT = {};
+const slider = (k, min, max, step, label, fmt) => (FMT[k] = fmt, `<div class="row"><span>${label}</span><input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${S[k]}"><span style="min-width:56px;text-align:right">${fmt(S[k])}</span></div>`);
+const pct = v => `${Math.round(v*100)}%`, sgn = v => (v > 0 ? '+' : '') + Math.round(v*100) + '%';
+
+const SECTIONS = {
+  Source: () => `${S.firstRun ? '<div class="warn" style="margin-bottom:6px">Choose your capture card to start.</div>' : ''}
+    ${sel('source', sources, 'Capture card')}
+    ${sel('format', formats, 'Video format')}
+    <div class="note">Changing the format restarts the picture for a moment.</div>
+    ${seg('buffering', ['Off','On'], 'Buffering')}
+    ${$('os').value === 'Windows' ? '<div class="row"><span>Card settings</span><button class="btn">Card settings…</button></div>' : ''}`,
+  Display: () => `${sel('ratio', ['4:3','16:9','16:10','21:9','32:9','Custom…'], 'Target ratio')}
+    ${S.ratio === 'Custom…' ? '<div class="row"><span>Custom</span><input type="number" value="2.4" step="0.01" style="width:80px"> : 1</div>' : ''}
+    ${seg('fill', ['Fit','Stretch','Crop','Smart stretch'], 'Fill mode')}
+    ${S.fill === 'Smart stretch' ? slider('strength', 0, 1, 0.01, 'Strength', pct) : ''}
+    ${sel('monitor', ['Main 21:9 (180 Hz)', 'Laptop display'], 'Monitor')}
+    ${seg('side', ['left','right'], 'Drawer side')}`,
+  Colour: () => `${seg('range', ['Auto','Full','Limited'], 'Range')}
+    ${seg('space', ['Auto','BT.709','BT.601'], 'Colour space')}
+    <h3>Picture adjustments</h3>
+    ${slider('brightness', -0.5, 0.5, 0.01, 'Brightness', sgn)}${slider('contrast', 0.5, 1.5, 0.01, 'Contrast', pct)}${slider('saturation', 0, 2, 0.01, 'Saturation', pct)}
+    <details class="more"><summary>More</summary>${slider('gamma', 0.5, 2, 0.01, 'Gamma', v => v.toFixed(2))}${slider('hue', -180, 180, 1, 'Hue', v => `${v}°`)}</details>
+    <div class="row"><span></span><button class="btn" data-reset="colour">Reset picture</button></div>`,
+  Audio: () => `${sel('audioIn', ['auto', 'MacBook Pro Microphone', 'Line In'], 'Input').replace('>auto<', '>From this card (USB2 Digital Audio)<')}
+    ${sel('audioOut', ['Speakers', 'Headphones', 'Bluetooth headset'], 'Output')}
+    ${slider('volume', 0, 1, 0.01, 'Volume', pct)}${seg('mute', ['false','true'], 'Mute').replace('>false<','>On<').replace('>true<','>Muted<')}
+    ${slider('sync', -500, 500, 1, 'A/V sync', v => `${v > 0 ? '+' : ''}${v} ms`)}
+    ${S.sync < 0 ? `<div class="warn">Picture delayed: +${-S.sync} ms input lag</div>` : '<div class="note">Positive delays the sound.</div>'}`,
+};
+const ICON = { Source:'⎆', Display:'▭', Colour:'◐', Audio:'♪' };
+
+// ---------------- the three drawer layouts ----------------
+function drawerHTML() {
+  const V = VARIANTS[vi].key, d = $('drawer');
+  if (V === 'A') { d.style.width = '380px';
+    return `<div class="rail"><nav>${Object.keys(SECTIONS).map(k => `<button data-tab="${k}" class="${k===tabA?'on':''}"><b>${ICON[k]}</b>${k}</button>`).join('')}</nav>
+      <div class="pane"><h3>${tabA.toUpperCase()}</h3>${SECTIONS[tabA]()}</div></div>`; }
+  if (V === 'B') { d.style.width = '360px';
+    return `<div class="acc">${Object.keys(SECTIONS).map(k => `<details ${k==='Display'||S.firstRun&&k==='Source'?'open':''}><summary>${ICON[k]} ${k}</summary>${SECTIONS[k]()}</details>`).join('')}</div>`; }
+  if (!fullC && !S.firstRun) { d.style.width = '300px';
+    return `<div class="quick"><h3>QUICK</h3>${seg('fill', ['Fit','Stretch','Crop','Smart stretch'], 'Fill')}
+      ${S.fill === 'Smart stretch' ? slider('strength', 0, 1, 0.01, 'Strength', pct) : ''}
+      ${sel('ratio', ['4:3','16:9','16:10','21:9','32:9'], 'Ratio')}${slider('volume', 0, 1, 0.01, 'Volume', pct)}
+      <div class="row"><span>${S.source}</span><button class="btn" data-full>All settings →</button></div></div>`; }
+  d.style.width = '720px';
+  return `<div class="full"><div><h3>SOURCE</h3>${SECTIONS.Source()}<h3>DISPLAY</h3>${SECTIONS.Display()}</div>
+    <div><h3>COLOUR</h3>${SECTIONS.Colour()}<h3>AUDIO</h3>${SECTIONS.Audio()}${S.firstRun ? '' : '<div class="row"><span></span><button class="btn" data-full>← Quick</button></div>'}</div></div>`;
+}
+function renderDrawer() {
+  const d = $('drawer'); const keepOpen = [...d.querySelectorAll('details')].map(x => x.open);
+  d.className = `${S.side} ${open ? '' : 'closed'}`; d.innerHTML = drawerHTML();
+  if (keepOpen.length) [...d.querySelectorAll('details')].forEach((x, i) => { if (keepOpen[i] !== undefined) x.open = keepOpen[i]; });
+  const e = $('edge'), h = $('handle'); e.style[S.side] = '0'; e.style[S.side === 'right' ? 'left' : 'right'] = '';
+  h.style[S.side] = '4px'; h.style[S.side === 'right' ? 'left' : 'right'] = '';
+  $('vlabel').textContent = `${VARIANTS[vi].key} (${VARIANTS[vi].name})`;
+  history.replaceState(null, '', '?variant=' + VARIANTS[vi].key);
+}
+$('drawer').addEventListener('input', e => { const k = e.target.dataset.k; if (!k) return; S[k] = e.target.type === 'range' ? Number(e.target.value) : e.target.value;
+  if (e.target.type === "range") { e.target.nextElementSibling.textContent = FMT[k](S[k]); drawPicture(); return; } update(true); });
+$("drawer").addEventListener("change", e => { const k = e.target.dataset.k; if (!k) return; if (e.target.type === "range") { renderDrawer(); return; }
+  if (k === 'format' || k === 'source') { toast('Restarting picture…'); S.firstRun = false; } update(true); });
+$('drawer').addEventListener('click', e => { const t = e.target.closest('button'); if (!t) return;
+  if (t.dataset.seg) { let v = t.dataset.v; if (t.dataset.seg === 'mute') v = v === 'true'; S[t.dataset.seg] = v; update(true); }
+  if (t.dataset.tab) { tabA = t.dataset.tab; update(true); }
+  if (t.dataset.full !== undefined) { fullC = !fullC; update(true); }
+  if (t.dataset.reset) { Object.assign(S, { brightness:0, contrast:1, saturation:1, gamma:1, hue:0 }); update(true); } });
+let rerender = null;
+function update(full) { drawPicture(); if (full) renderDrawer(); else { clearTimeout(rerender); rerender = setTimeout(renderDrawer, 250); } }
+
+// ---------------- summon / dismiss ----------------
+function setOpen(v) { open = v; renderDrawer(); $('handle').style.display = 'none'; }
+$('edge').onmouseenter = () => { if (!open) $('handle').style.display = 'flex'; };
+$('monitor').onmouseleave = () => { $('handle').style.display = 'none'; };
+$('handle').onclick = () => setOpen(true);
+addEventListener('keydown', e => {
+  if (e.key === 'Tab') { e.preventDefault(); setOpen(!open); return; }
+  if (e.key === 'Escape') { setOpen(false); return; }
+  if (e.target.closest('input, select, textarea, [contenteditable]')) return;
+  if (e.key === 'ArrowLeft') go(-1); if (e.key === 'ArrowRight') go(1); });
+$('firstRun').onclick = () => { S.firstRun = true; S.source = '—'; fullC = true; tabA = 'Source'; setOpen(true); drawPicture(); toast('No Remembered setup yet'); };
+$('os').onchange = () => renderDrawer();
+const go = d => { vi = (vi + d + VARIANTS.length) % VARIANTS.length; fullC = false; renderDrawer(); };
+$('prev').onclick = () => go(-1); $('next').onclick = () => go(1);
+function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(el._t); el._t = setTimeout(() => el.style.display = 'none', 1400); }
+
+// ---------------- picture (Fill mode + Target ratio + adjustments are live) ----------------
+const img = new Image(); let src = makePattern();
+if (window.PRELOAD_IMAGE) { img.onload = () => { src = img; drawPicture(); }; img.src = window.PRELOAD_IMAGE; }
+function makePattern() { const c = document.createElement('canvas'); c.width = 1920; c.height = 1080; const x = c.getContext('2d');
+  const g = x.createLinearGradient(0,0,0,1080); g.addColorStop(0,'#1d3557'); g.addColorStop(.62,'#457b9d'); g.addColorStop(.62,'#2d4a22'); g.addColorStop(1,'#1b2e15');
+  x.fillStyle = g; x.fillRect(0,0,1920,1080); x.fillStyle = '#e9c46a'; for (let i = 0; i < 9; i++) { x.beginPath(); x.arc(120+i*210, 560, 70, 0, 7); x.fill(); }
+  x.fillStyle = '#f4a261'; x.fillRect(900,520,120,260); x.beginPath(); x.arc(960,480,55,0,7); x.fill();
+  x.fillStyle = 'rgba(0,0,0,.55)'; x.beginPath(); x.arc(150,150,110,0,7); x.fill(); x.fillRect(50,960,420,56); x.fillStyle = '#e63946'; x.fillRect(60,970,300,36);
+  x.fillStyle = '#fff'; x.font = 'bold 64px system-ui'; x.textAlign = 'right'; x.fillText('30 / 120', 1860, 1010); return c; }
+function drawPicture() {
+  const cv = $('pic'), M = $('monitor'), W = cv.width = M.clientWidth * devicePixelRatio, H = cv.height = M.clientHeight * devicePixelRatio, x = cv.getContext('2d');
+  x.fillStyle = '#000'; x.fillRect(0,0,W,H); if (S.firstRun) { x.fillStyle = '#9aa1ad'; x.font = `${16*devicePixelRatio}px system-ui`; x.textAlign = 'center'; x.fillText('No capture card selected', W/2, H/2); return; }
+  const [a, b] = (S.ratio === 'Custom…' ? '2.4:1' : S.ratio).split(':').map(Number), rt = a / b;
+  let tw = W, th = W / rt; if (th > H) { th = H; tw = H * rt; } const tx = (W - tw) / 2;          // Target ratio box inside the monitor
+  const sw = src.width, sh = src.height, rs = sw / sh, k = rt / rs;
+  x.filter = `brightness(${1 + S.brightness}) contrast(${S.contrast}) saturate(${S.saturation}) hue-rotate(${S.hue}deg)`;
+  if (S.fill === 'Fit') { let w = tw, h = tw / rs; if (h > th) { h = th; w = th * rs; } x.drawImage(src, tx + (tw - w)/2, (H - th)/2 + (th - h)/2, w, h); }
+  else if (S.fill === 'Crop') { let w = tw, h = tw / rs; if (h < th) { h = th; w = th * rs; } x.save(); x.beginPath(); x.rect(tx, (H-th)/2, tw, th); x.clip(); x.drawImage(src, tx + (tw - w)/2, (H - h)/2, w, h); x.restore(); }
+  else { const t = S.fill === 'Stretch' ? 0 : S.strength, p = k > 1 ? Math.min(3, 0.95*k/(k-1)) : 3, g = v => (1-t)*v + t*(k*v - (k-1)*Math.pow(v, p)), step = 3;
+    for (let px = 0; px < tw; px += step) { const v0 = (px - tw/2)/(tw/2), v1 = (px + step - tw/2)/(tw/2), u0 = Math.sign(v0)*g(Math.abs(v0)), u1 = Math.sign(v1)*g(Math.abs(v1));
+      x.drawImage(src, sw/2 + u0*sw/2, 0, Math.max(.01, (u1 - u0)*sw/2), sh, tx + px, (H - th)/2, step, th); } }
+  x.filter = 'none';
+}
+addEventListener('resize', drawPicture);
+if (qs.get('open')) open = true;
+renderDrawer(); drawPicture();
+</script>
+</body>
+</html>
