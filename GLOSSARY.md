@@ -41,6 +41,14 @@ _Avoid_: panorama, non-linear scale
 **Smart stretch strength**
 How far Smart stretch moves away from plain Stretch: 0% looks exactly like Stretch, 100% keeps the centre fully undistorted and puts all the stretching at the edges. Starts at 50%.
 
+**Picture adjustments**
+xReveal's own brightness, contrast and saturation (always shown), plus gamma and hue (in a collapsed "More" group), applied to the Source picture the same way on every card and OS.
+_Avoid_: filters, colour correction, card settings
+
+**Card settings**
+The settings window supplied by the capture card's maker, opened from xReveal only where the operating system offers one.
+_Avoid_: vendor dialog, properties
+
 **Audio route**
 Which audio input (usually the Source's own audio) xReveal plays, and which output device it plays to.
 
@@ -48,7 +56,7 @@ Which audio input (usually the Source's own audio) xReveal plays, and which outp
 A delay, in milliseconds, applied to the sound or the picture so they line up.
 
 **Remembered setup**
-The single saved set of choices (Source, Video format, Target ratio, Fill mode and Smart stretch strength, Audio route, A/V sync offset and the monitor to go fullscreen on) that xReveal applies automatically on launch. There is one, not several named ones.
+The single saved set of choices (Source, Video format, Target ratio, Fill mode and Smart stretch strength, Picture adjustments, Audio route, A/V sync offset and the monitor to go fullscreen on) that xReveal applies automatically on launch. There is one, not several named ones.
 _Avoid_: profile, preset, scene
 
 ## Relationships
