@@ -21,6 +21,11 @@ need_stdout = false
 command = ["cargo", "clippy", "--all-targets", "--color", "always"]
 need_stdout = false
 
+# Windows dry lab: type-check + lint the Windows build from the Mac (needs `brew install llvm`).
+[jobs.check-win]
+command = ["scripts/check-win.sh"]
+need_stdout = false
+
 [jobs.test]
 command = ["cargo", "test", "--color", "always"]
 need_stdout = true
