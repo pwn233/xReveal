@@ -1,0 +1,11 @@
+[package]
+name = "xreveal"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[dependencies]
+# GPUI Kit: GPUI + gpui-component + default assets behind one dependency.
+# https://gpui-kit.com
+gpui-kit = "0.11.0"
