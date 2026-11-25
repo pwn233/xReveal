@@ -72,7 +72,6 @@ pub enum FillMode {
 pub struct TargetRatio(pub f64);
 
 impl TargetRatio {
-    #[expect(dead_code, reason = "listed by the Settings drawer (its own slice)")]
     pub const PRESETS: [(&'static str, TargetRatio); 5] = [
         ("4:3", TargetRatio(4.0 / 3.0)),
         ("16:9", TargetRatio(16.0 / 9.0)),

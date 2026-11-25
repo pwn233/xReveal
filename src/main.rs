@@ -1,4 +1,5 @@
 mod app;
+mod drawer;
 mod platform;
 mod setup;
 mod source;
@@ -16,6 +17,7 @@ fn main() {
 
     gpui_kit::application().run(|cx| {
         gpui_kit::init(cx);
+        app::bind_keys(cx);
 
         let store = setup::Store::open();
         // The monitor to go fullscreen on: the remembered one, recognised by the display's own

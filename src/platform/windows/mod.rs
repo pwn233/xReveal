@@ -90,7 +90,6 @@ impl VideoPipeline {
     }
 
     /// Every capture device and its formats, as listed at start or the last [`refresh_sources`].
-    #[expect(dead_code, reason = "listed by the Settings drawer and the pickers (their own slices)")]
     pub fn sources(&self) -> &[SourceInfo] {
         &self.sources
     }
