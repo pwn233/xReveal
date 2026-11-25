@@ -10,23 +10,27 @@ use std::thread::JoinHandle;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+use crate::source::{self, SourceInfo, VideoFormat};
 use crate::video::picture::PictureSettings;
+use crate::video::slot::FrameSlot;
 use crate::video::timing::{DelaySettings, Summary};
 use crate::video::{VideoShared, lock};
-use crate::video::slot::FrameSlot;
 use capture::{Capture, PixelBuffer};
 
-/// The live picture: keeps capture running and the video thread drawing until dropped.
+/// The live picture: the video surface and thread live as long as this does; the capture can be
+/// switched to another Source or Video format without recreating them.
 pub struct VideoPipeline {
-    capture: Capture,
+    capture: Option<Capture>,
+    status: String,
+    sources: Vec<SourceInfo>,
     slot: Arc<FrameSlot<PixelBuffer>>,
     shared: Arc<VideoShared>,
     video_thread: Option<JoinHandle<()>>,
 }
 
 impl VideoPipeline {
-    /// Puts a video surface under GPUI's content in `window` and starts showing the first capture
-    /// device. Must be called on the main thread.
+    /// Puts a video surface under GPUI's content in `window` and starts showing a Source: the
+    /// first card at its default Video format. Must be called on the main thread.
     pub fn start(window: &gpui_kit::Window) -> Result<Self, String> {
         let handle = HasWindowHandle::window_handle(window).map_err(|e| format!("no native window: {e}"))?;
         let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
@@ -43,8 +47,47 @@ impl VideoPipeline {
                 .spawn(move || render::run(target, &slot, shared))
                 .map_err(|e| format!("could not start the video thread: {e}"))?
         };
-        let capture = Capture::start(slot.clone())?;
-        Ok(Self { capture, slot, shared, video_thread: Some(video_thread) })
+        let mut pipeline = Self {
+            capture: None,
+            status: "No capture card found.".into(),
+            sources: capture::list_sources(),
+            slot,
+            shared,
+            video_thread: Some(video_thread),
+        };
+        if let Some((index, choice, _)) = source::initial_pick(&pipeline.sources) {
+            let os_id = pipeline.sources[index].identity.os_id.clone();
+            if let Err(error) = pipeline.switch_to(&os_id, choice) {
+                pipeline.status = error;
+            }
+        }
+        Ok(pipeline)
+    }
+
+    /// Every capture device and its formats, as listed at start or the last [`refresh_sources`].
+    #[expect(dead_code, reason = "listed by the Settings drawer and the pickers (their own slices)")]
+    pub fn sources(&self) -> &[SourceInfo] {
+        &self.sources
+    }
+
+    /// Lists the capture devices again (e.g. after a card is plugged in).
+    #[expect(dead_code, reason = "called by the pickers (their own slices)")]
+    pub fn refresh_sources(&mut self) {
+        self.sources = capture::list_sources();
+    }
+
+    /// Shows Source `os_id` at `choice`, replacing the current capture. The video surface stays;
+    /// the picture restarts briefly (docs/spec/v1.md §2.3).
+    pub fn switch_to(&mut self, os_id: &str, choice: VideoFormat) -> Result<(), String> {
+        let info = self.sources.iter().find(|s| s.identity.os_id == os_id).ok_or("That capture card isn't connected.")?;
+        let native = source::best_native(&info.formats, choice).ok_or(format!("{} doesn't offer {choice}.", info.identity.name))?;
+        if let Some(old) = self.capture.take() {
+            old.stop();
+        }
+        let capture = Capture::start(self.slot.clone(), os_id, native)?;
+        self.status = capture.description.clone();
+        self.capture = Some(capture);
+        Ok(())
     }
 
     /// Changes how the picture is drawn; applies from the next frame.
@@ -64,15 +107,17 @@ impl VideoPipeline {
         lock(&self.shared.stats).summary(self.slot.replaced_total())
     }
 
-    /// A one-line description of what is being shown, e.g. `USB2 Video · 1280x720 @ 60 · 420v`.
+    /// What is being shown, e.g. `USB2 Video · 1280x720 @ 60 · 420v`, or why nothing is.
     pub fn description(&self) -> &str {
-        &self.capture.description
+        &self.status
     }
 }
 
 impl Drop for VideoPipeline {
     fn drop(&mut self) {
-        self.capture.stop();
+        if let Some(capture) = &self.capture {
+            capture.stop();
+        }
         self.slot.close();
         if let Some(thread) = self.video_thread.take() {
             let _ = thread.join();

@@ -14,13 +14,12 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::core::{AsImpl, GUID, Interface, PWSTR, Ref, Result, implement};
 
+use crate::source::{self, NativeFormat, PixelKind, SourceIdentity, SourceInfo};
 use crate::video::slot::FrameSlot;
 use crate::video::timing::{Stamps, Timed};
 
 const FIRST_VIDEO_STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
-/// The Reference card's best live mode; used when the device offers it.
-const PREFERRED: (u32, u32, u32) = (1280, 720, 60);
 
 /// What the reader delivers, as the renderer receives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,8 +169,60 @@ pub fn startup() -> Result<()> {
     }
 }
 
-/// The first video capture device Media Foundation lists, with its friendly name.
-pub fn first_device() -> Result<Option<(IMFActivate, String)>> {
+/// Every video capture device Media Foundation lists (docs/spec/v1.md §1: all are offered), with
+/// the formats each offers right now (read through a short-lived Source Reader).
+pub fn list_sources() -> Vec<SourceInfo> {
+    let Ok(devices) = devices() else {
+        return Vec::new();
+    };
+    devices
+        .into_iter()
+        .map(|device| {
+            let name = string_attribute(&device, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME).unwrap_or_else(|| "Capture card".into());
+            let link = string_attribute(&device, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK).unwrap_or_default();
+            let (model, serial) = source::identity_from_windows_link(&link);
+            // Every USB device is "external" here; built-in laptop cameras are USB too, so this
+            // only orders the list: a card the user plugged in usually lists after the webcam.
+            let formats = native_formats(&device).unwrap_or_default();
+            SourceInfo { identity: SourceIdentity { os_id: link, serial, model, name }, external: true, formats }
+        })
+        .collect()
+}
+
+/// The device whose symbolic link is `link`.
+fn find_device(link: &str) -> Result<Option<IMFActivate>> {
+    Ok(devices()?
+        .into_iter()
+        .find(|d| string_attribute(d, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK).as_deref() == Some(link)))
+}
+
+fn native_formats(device: &IMFActivate) -> Result<Vec<NativeFormat>> {
+    unsafe {
+        let source: IMFMediaSource = device.ActivateObject()?;
+        let result = (|| {
+            let reader = MFCreateSourceReaderFromMediaSource(&source, None)?;
+            let mut out = Vec::new();
+            let mut index = 0;
+            while let Ok(t) = reader.GetNativeMediaType(FIRST_VIDEO_STREAM, index) {
+                index += 1;
+                let Some((width, height)) = frame_size(&t) else { continue };
+                let pixel = match t.GetGUID(&MF_MT_SUBTYPE).ok().and_then(PixelFormat::from_subtype) {
+                    Some(PixelFormat::Nv12) => PixelKind::Nv12,
+                    Some(PixelFormat::Yuy2) => PixelKind::Yuy2,
+                    Some(PixelFormat::Mjpeg) => PixelKind::Mjpeg,
+                    None => PixelKind::Other,
+                };
+                out.push(NativeFormat { width, height, fps: frame_rate(&t).unwrap_or(0.0), pixel });
+            }
+            Ok(out)
+        })();
+        let _ = source.Shutdown();
+        let _ = device.ShutdownObject();
+        result
+    }
+}
+
+fn devices() -> Result<Vec<IMFActivate>> {
     unsafe {
         let mut attributes = None;
         MFCreateAttributes(&mut attributes, 1)?;
@@ -182,26 +233,20 @@ pub fn first_device() -> Result<Option<(IMFActivate, String)>> {
         let mut count = 0u32;
         MFEnumDeviceSources(&attributes, &mut devices, &mut count)?;
         if devices.is_null() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let list = std::slice::from_raw_parts_mut(devices, count as usize);
-        let first = list.first_mut().and_then(Option::take);
-        for device in list.iter_mut() {
-            drop(device.take());
-        }
+        let found = list.iter_mut().filter_map(Option::take).collect();
         CoTaskMemFree(Some(devices as *const _));
-        Ok(first.map(|device| {
-            let name = friendly_name(&device).unwrap_or_else(|| "Capture card".into());
-            (device, name)
-        }))
+        Ok(found)
     }
 }
 
-fn friendly_name(device: &IMFActivate) -> Option<String> {
+fn string_attribute(device: &IMFActivate, key: &GUID) -> Option<String> {
     unsafe {
         let mut value = PWSTR::null();
         let mut length = 0u32;
-        device.GetAllocatedString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &mut value, &mut length).ok()?;
+        device.GetAllocatedString(key, &mut value, &mut length).ok()?;
         let name = value.to_string().ok();
         CoTaskMemFree(Some(value.0 as *const _));
         name
@@ -218,8 +263,10 @@ pub struct DeviceCapture {
 }
 
 impl DeviceCapture {
-    pub fn start(device: IMFActivate, name: String, slot: Arc<FrameSlot<Frame>>) -> Result<Self> {
+    /// Opens the device with symbolic link `link` at exactly `native` and starts delivering frames.
+    pub fn start(link: &str, name: String, native: NativeFormat, slot: Arc<FrameSlot<Frame>>) -> Result<Self> {
         unsafe {
+            let device = find_device(link)?.ok_or_else(|| windows::core::Error::from(MF_E_INVALIDMEDIATYPE))?;
             let source: IMFMediaSource = device.ActivateObject()?;
             let callback_impl = ReaderCallback { slot, state: Mutex::new(CallbackState::default()) };
             let callback: IMFSourceReaderCallback = callback_impl.into();
@@ -231,7 +278,7 @@ impl DeviceCapture {
             attributes.SetUINT32(&MF_LOW_LATENCY, 1)?;
 
             let reader = MFCreateSourceReaderFromMediaSource(&source, &attributes)?;
-            let format = negotiate(&reader, Some(PREFERRED))?;
+            let format = negotiate(&reader, Some(native))?;
 
             if let Ok(mut state) = callback.as_impl().state.lock() {
                 state.reader = Some(reader.clone());
@@ -345,9 +392,9 @@ pub fn read_frame(reader: &IMFSourceReader, format: StreamFormat) -> Result<Opti
     }
 }
 
-/// Picks the native type (preferring `want`, then NV12 > YUY2 > anything) and makes the reader
-/// deliver NV12 or YUY2, letting Media Foundation decode compressed types.
-fn negotiate(reader: &IMFSourceReader, want: Option<(u32, u32, u32)>) -> Result<StreamFormat> {
+/// Picks the native type (exactly `want` if given, then NV12 > YUY2 > MJPEG > anything) and makes
+/// the reader deliver it; other compressed types are decoded by Media Foundation.
+fn negotiate(reader: &IMFSourceReader, want: Option<NativeFormat>) -> Result<StreamFormat> {
     unsafe {
         reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
         reader.SetStreamSelection(FIRST_VIDEO_STREAM, true)?;
@@ -360,14 +407,22 @@ fn negotiate(reader: &IMFSourceReader, want: Option<(u32, u32, u32)>) -> Result<
         }
         let rank = |t: &IMFMediaType| {
             let (w, h) = frame_size(t).unwrap_or_default();
-            let fps = frame_rate(t).unwrap_or_default().round() as u32;
-            let matches_want = want.is_some_and(|(ww, wh, wf)| (w, h, fps) == (ww, wh, wf));
-            let format_rank = match t.GetGUID(&MF_MT_SUBTYPE).ok().and_then(PixelFormat::from_subtype) {
+            let fps = frame_rate(t).unwrap_or_default();
+            let kind = t.GetGUID(&MF_MT_SUBTYPE).ok().and_then(PixelFormat::from_subtype);
+            let format_rank = match kind {
                 Some(PixelFormat::Nv12) => 3,
                 Some(PixelFormat::Yuy2) => 2,
                 Some(PixelFormat::Mjpeg) => 1,
                 None => 0,
             };
+            let kind_matches = |want: PixelKind| match kind {
+                Some(PixelFormat::Nv12) => want == PixelKind::Nv12,
+                Some(PixelFormat::Yuy2) => want == PixelKind::Yuy2,
+                Some(PixelFormat::Mjpeg) => want == PixelKind::Mjpeg,
+                None => want == PixelKind::Other,
+            };
+            let matches_want =
+                want.is_some_and(|n| (w, h) == (n.width, n.height) && (fps - n.fps).abs() < 0.5 && kind_matches(n.pixel));
             (matches_want, format_rank)
         };
         let native = natives

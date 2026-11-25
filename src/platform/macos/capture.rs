@@ -1,28 +1,25 @@
-//! AVFoundation capture (docs/spec/v1.md §3.1).
-//!
-//! Tracer bullet: shows the first external capture device, preferring 1280x720 @ 60 (the Reference
-//! card's best live mode) in its native pixel format. Source and Video format choice arrive with the
-//! "Source, Video format and monitor model" slice.
+//! AVFoundation capture (docs/spec/v1.md §3.1): lists every video capture device with its live
+//! formats, and runs one at a chosen format.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
-use std::sync::OnceLock;
 use objc2_av_foundation::{
     AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceFormat,
-    AVCaptureDeviceInput, AVCaptureDevicePosition, AVCaptureDeviceTypeExternal, AVCaptureOutput,
-    AVCaptureSession, AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate,
-    AVMediaTypeVideo,
+    AVCaptureDeviceInput, AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
+    AVCaptureDeviceTypeExternal, AVCaptureOutput, AVCaptureSession, AVCaptureVideoDataOutput,
+    AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeAudio, AVMediaTypeVideo,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_media::{CMClock, CMSampleBuffer, CMSyncConvertTime, CMVideoFormatDescriptionGetDimensions};
-use objc2_quartz_core::CACurrentMediaTime;
 use objc2_core_video::CVPixelBuffer;
-use objc2_foundation::{NSArray, NSDictionary, NSObject, NSObjectProtocol};
+use objc2_foundation::{NSArray, NSDictionary, NSObject, NSObjectProtocol, NSString};
+use objc2_quartz_core::CACurrentMediaTime;
 
+use crate::source::{self, NativeFormat, PixelKind, SourceIdentity, SourceInfo};
 use crate::video::slot::FrameSlot;
 use crate::video::timing::{Stamps, Timed};
 
@@ -49,8 +46,68 @@ struct SessionClock(CFRetained<CMClock>);
 unsafe impl Send for SessionClock {}
 unsafe impl Sync for SessionClock {}
 
-/// The Reference card's best live mode; used when the device offers it.
-const PREFERRED: (i32, i32, f64) = (1280, 720, 60.0);
+/// Every video capture device macOS lists (docs/spec/v1.md §1: all are offered), cards first.
+pub fn list_sources() -> Vec<SourceInfo> {
+    unsafe {
+        let audio_ids = audio_device_ids();
+        let mut sources: Vec<SourceInfo> = video_devices()
+            .iter()
+            .map(|device| {
+                let name = device.localizedName().to_string();
+                let external = device.deviceType().isEqual(Some(AVCaptureDeviceTypeExternal));
+                let model = source::model_from_mac_model_id(&device.modelID().to_string());
+                let serial = audio_ids.iter().find_map(|id| source::serial_from_mac_audio_id(id, &name));
+                let identity = SourceIdentity { os_id: device.uniqueID().to_string(), serial, model, name };
+                SourceInfo { identity, external, formats: native_formats(&device) }
+            })
+            .collect();
+        sources.sort_by_key(|s| !s.external);
+        sources
+    }
+}
+
+unsafe fn video_devices() -> Retained<NSArray<AVCaptureDevice>> {
+    unsafe {
+        let types = NSArray::from_slice(&[AVCaptureDeviceTypeExternal, AVCaptureDeviceTypeBuiltInWideAngleCamera]);
+        AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
+            &types,
+            AVMediaTypeVideo,
+            AVCaptureDevicePosition::Unspecified,
+        )
+        .devices()
+    }
+}
+
+/// Audio input device IDs: a capture card's audio ID carries its USB serial (#25).
+unsafe fn audio_device_ids() -> Vec<String> {
+    let Some(audio) = (unsafe { AVMediaTypeAudio }) else {
+        return Vec::new();
+    };
+    #[allow(deprecated, reason = "the replacement discovery types vary by macOS version; this lists every input")]
+    let devices = unsafe { AVCaptureDevice::devicesWithMediaType(audio) };
+    devices.iter().map(|d| unsafe { d.uniqueID() }.to_string()).collect()
+}
+
+unsafe fn native_formats(device: &AVCaptureDevice) -> Vec<NativeFormat> {
+    let mut out = Vec::new();
+    for format in unsafe { device.formats() }.iter() {
+        let (width, height) = unsafe { dimensions(&format) };
+        let pixel = pixel_kind(unsafe { format.formatDescription().media_sub_type() });
+        for range in unsafe { format.videoSupportedFrameRateRanges() }.iter() {
+            let fps = unsafe { range.maxFrameRate() };
+            out.push(NativeFormat { width: width as u32, height: height as u32, fps, pixel });
+        }
+    }
+    out
+}
+
+fn pixel_kind(subtype: u32) -> PixelKind {
+    match &subtype.to_be_bytes() {
+        b"420v" | b"420f" => PixelKind::Nv12,
+        b"yuvs" => PixelKind::Yuy2,
+        _ => PixelKind::Other,
+    }
+}
 
 pub struct Capture {
     session: Retained<AVCaptureSession>,
@@ -62,10 +119,17 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn start(slot: Arc<FrameSlot<PixelBuffer>>) -> Result<Self, String> {
+    /// Opens the device with OS ID `os_id` at exactly `native` and starts delivering frames.
+    pub fn start(slot: Arc<FrameSlot<PixelBuffer>>, os_id: &str, native: NativeFormat) -> Result<Self, String> {
         unsafe {
-            let device = first_capture_device().ok_or("No capture card found.")?;
-            let chosen = choose_format(&device);
+            let device = AVCaptureDevice::deviceWithUniqueID(&NSString::from_str(os_id))
+                .ok_or("The capture card is no longer connected.")?;
+            let chosen = device.formats().iter().find_map(|format| {
+                let (w, h) = dimensions(&format);
+                let same_kind = pixel_kind(format.formatDescription().media_sub_type()) == native.pixel;
+                let duration = frame_rate_range(&format, native.fps)?;
+                (w as u32 == native.width && h as u32 == native.height && same_kind).then(|| (format.clone(), duration))
+            });
 
             let session = AVCaptureSession::new();
             session.beginConfiguration();
@@ -90,12 +154,10 @@ impl Capture {
             // The session preset silently overrides `activeFormat` unless the device stays locked
             // across `startRunning` (Reference card finding, #3).
             let locked = device.lockForConfiguration().is_ok();
-            if locked && let Some((format, fps)) = &chosen {
+            if locked && let Some((format, duration)) = &chosen {
                 device.setActiveFormat(format);
-                if let Some(duration) = frame_rate_range(format, *fps) {
-                    device.setActiveVideoMinFrameDuration(duration);
-                    device.setActiveVideoMaxFrameDuration(duration);
-                }
+                device.setActiveVideoMinFrameDuration(*duration);
+                device.setActiveVideoMaxFrameDuration(*duration);
             }
             // Sample times are on the session's clock; keep it to convert them to host time.
             if session.respondsToSelector(sel!(synchronizationClock))
@@ -126,30 +188,6 @@ impl Capture {
 
     pub fn stop(&self) {
         unsafe { self.session.stopRunning() };
-    }
-}
-
-unsafe fn first_capture_device() -> Option<Retained<AVCaptureDevice>> {
-    unsafe {
-        let types = NSArray::from_slice(&[AVCaptureDeviceTypeExternal]);
-        let discovery = AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
-            &types,
-            AVMediaTypeVideo,
-            AVCaptureDevicePosition::Unspecified,
-        );
-        discovery.devices().firstObject()
-    }
-}
-
-/// The device format matching [`PREFERRED`], if it exists, with its frame rate.
-unsafe fn choose_format(device: &AVCaptureDevice) -> Option<(Retained<AVCaptureDeviceFormat>, f64)> {
-    unsafe {
-        let (want_w, want_h, want_fps) = PREFERRED;
-        device.formats().iter().find_map(|format| {
-            let (w, h) = dimensions(&format);
-            let has_rate = frame_rate_range(&format, want_fps).is_some();
-            (w == want_w && h == want_h && has_rate).then(|| (format.clone(), want_fps))
-        })
     }
 }
 
