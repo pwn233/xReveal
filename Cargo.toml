@@ -24,7 +24,9 @@ objc2-core-foundation = "0.3"
 objc2-core-media = { version = "0.3", features = ["objc2-core-video"] }
 objc2-core-video = { version = "0.3", features = ["objc2-metal"] }
 objc2-foundation = "0.3"
-objc2-metal = "0.3"
+objc2-metal = { version = "0.3", features = ["block2"] }
+# Metal's "presented" callback (the frame's on-screen time) is an Objective-C block.
+block2 = "0.6"
 objc2-quartz-core = { version = "0.3", features = ["objc2-metal", "objc2-core-foundation"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -41,6 +43,7 @@ windows = { version = "0.62", features = [
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }

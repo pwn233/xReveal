@@ -4,11 +4,22 @@
 //! been taken yet is replaced (and dropped) by the next one, so the video thread always draws the
 //! newest frame and nothing ever queues up behind a slow frame (docs/spec/v1.md §3.3).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 pub struct FrameSlot<T> {
     state: Mutex<State<T>>,
     wake: Condvar,
+    replaced: AtomicU64,
+}
+
+/// What [`FrameSlot::take_timeout`] found.
+#[derive(Debug, PartialEq)]
+pub enum Taken<T> {
+    Frame(T),
+    TimedOut,
+    Closed,
 }
 
 struct State<T> {
@@ -21,6 +32,7 @@ impl<T> Default for FrameSlot<T> {
         Self {
             state: Mutex::new(State { frame: None, closed: false }),
             wake: Condvar::new(),
+            replaced: AtomicU64::new(0),
         }
     }
 }
@@ -41,8 +53,35 @@ impl<T> FrameSlot<T> {
             state.frame.replace(frame)
         };
         self.wake.notify_one();
+        if replaced.is_some() {
+            self.replaced.fetch_add(1, Ordering::Relaxed);
+        }
         // Dropped outside the lock: releasing a frame may return it to the capture pool.
         replaced.is_some()
+    }
+
+    /// Frames replaced before the video thread took them (dropped frames), since creation.
+    pub fn replaced_total(&self) -> u64 {
+        self.replaced.load(Ordering::Relaxed)
+    }
+
+    /// Like [`take`](Self::take), but gives up after `timeout`.
+    pub fn take_timeout(&self, timeout: Duration) -> Taken<T> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if state.closed {
+                return Taken::Closed;
+            }
+            if let Some(frame) = state.frame.take() {
+                return Taken::Frame(frame);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Taken::TimedOut;
+            }
+            state = self.wake.wait_timeout(state, deadline - now).unwrap_or_else(PoisonError::into_inner).0;
+        }
     }
 
     /// Waits for the next frame. Returns `None` once the slot is closed.
@@ -117,6 +156,18 @@ mod tests {
         };
         assert_eq!(slot.take(), Some(7));
         producer.join().unwrap();
+    }
+
+    #[test]
+    fn take_timeout_returns_frames_timeouts_and_close() {
+        let slot = FrameSlot::new();
+        assert_eq!(slot.take_timeout(Duration::from_millis(5)), Taken::TimedOut);
+        slot.put(1);
+        slot.put(2);
+        assert_eq!(slot.replaced_total(), 1);
+        assert_eq!(slot.take_timeout(Duration::from_millis(5)), Taken::Frame(2));
+        slot.close();
+        assert_eq!(slot.take_timeout(Duration::from_millis(5)), Taken::Closed);
     }
 
     #[test]

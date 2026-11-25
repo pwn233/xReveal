@@ -15,6 +15,7 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMe
 use windows::core::{AsImpl, GUID, Interface, PWSTR, Ref, Result, implement};
 
 use crate::video::slot::FrameSlot;
+use crate::video::timing::{Stamps, Timed};
 
 const FIRST_VIDEO_STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
@@ -64,6 +65,39 @@ pub struct StreamFormat {
 pub struct Frame {
     pub sample: IMFSample,
     pub format: StreamFormat,
+    pub stamps: Stamps,
+}
+
+impl Timed for Frame {
+    fn stamps(&self) -> Stamps {
+        self.stamps
+    }
+}
+
+/// The host clock, in seconds: QueryPerformanceCounter, the clock DXGI's frame statistics and
+/// Media Foundation's device timestamps use.
+pub fn host_seconds() -> f64 {
+    use std::sync::OnceLock;
+    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+    static FREQUENCY: OnceLock<f64> = OnceLock::new();
+    let frequency = *FREQUENCY.get_or_init(|| {
+        let mut f = 0i64;
+        let _ = unsafe { QueryPerformanceFrequency(&mut f) };
+        f.max(1) as f64
+    });
+    let mut counter = 0i64;
+    let _ = unsafe { QueryPerformanceCounter(&mut counter) };
+    counter as f64 / frequency
+}
+
+/// When the device captured the sample, in host seconds (`MFSampleExtension_DeviceTimestamp` is
+/// QPC time in 100 ns units); the arrival time when it's missing or implausible.
+fn capture_time(sample: &IMFSample, arrival: f64) -> f64 {
+    let seconds = unsafe { sample.GetUINT64(&MFSampleExtension_DeviceTimestamp) }.map(|t| t as f64 / 1e7);
+    match seconds {
+        Ok(s) if s.is_finite() && s <= arrival && arrival - s < 2.0 => s,
+        _ => arrival,
+    }
 }
 
 // SAFETY: Media Foundation samples and buffers are free-threaded COM objects; the video thread is
@@ -261,7 +295,9 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
             _ => return Ok(()),
         };
         if let (Some(sample), Some(format)) = (sample.as_ref(), format) {
-            self.slot.put(Frame { sample: sample.clone(), format });
+            let arrival = host_seconds();
+            let stamps = Stamps { capture: capture_time(sample, arrival), arrival };
+            self.slot.put(Frame { sample: sample.clone(), format, stamps });
         }
         if hrstatus.is_ok()
             && let Some(reader) = reader
@@ -299,7 +335,8 @@ pub fn read_frame(reader: &IMFSourceReader, format: StreamFormat) -> Result<Opti
             let mut sample = None;
             reader.ReadSample(FIRST_VIDEO_STREAM, 0, None, Some(&mut flags), None, Some(&mut sample))?;
             if let Some(sample) = sample {
-                return Ok(Some(Frame { sample, format }));
+                let now = host_seconds();
+                return Ok(Some(Frame { sample, format, stamps: Stamps { capture: now, arrival: now } }));
             }
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 return Ok(None);

@@ -2,8 +2,8 @@
 //! shader pass planned by `video::picture`, into a flip-model waitable swap chain held to one frame
 //! of latency, presenting on arrival with vsync (docs/spec/v1.md §3.3, §3.4; ADR 0001).
 
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::VecDeque;
+use std::sync::Arc;
 
 use windows::Win32::Foundation::{HANDLE, HMODULE};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
@@ -19,7 +19,9 @@ use windows::Win32::Media::MediaFoundation::MF_E_INVALIDMEDIATYPE;
 use super::media::{Frame, PixelFormat};
 use crate::video::mjpeg::MjpegDecoder;
 use super::surface::Surface;
-use crate::video::picture::{self, FrameInfo, Layout, PictureSettings, Plan, ShaderParams};
+use crate::video::picture::{self, FrameInfo, Layout, Plan, ShaderParams};
+use crate::video::timing::{self, Stamps};
+use crate::video::{VideoShared, lock};
 use crate::video::slot::FrameSlot;
 
 const SHADER: &str = include_str!("video.hlsl");
@@ -27,8 +29,8 @@ const SWAP_CHAIN_FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENC
 
 /// Runs until the slot is closed. Presents one black frame first, so the surface is proven working
 /// even with no card (the CI smoke launch checks [`crate::video::FIRST_PRESENT`]).
-pub fn run(surface: Surface, slot: &FrameSlot<Frame>, settings: Arc<Mutex<PictureSettings>>) {
-    let mut renderer = match Renderer::new(surface, settings) {
+pub fn run(surface: Surface, slot: &FrameSlot<Frame>, shared: Arc<VideoShared>) {
+    let mut renderer = match Renderer::new(surface, shared.clone()) {
         Ok(renderer) => renderer,
         Err(error) => {
             eprintln!("video: {error}");
@@ -39,17 +41,17 @@ pub fn run(surface: Surface, slot: &FrameSlot<Frame>, settings: Arc<Mutex<Pictur
         eprintln!("video: first present failed: {error}");
         return;
     }
-    crate::video::FIRST_PRESENT.store(true, Ordering::SeqCst);
+    crate::video::mark_first_present();
 
     let mut reported = false;
-    while let Some(frame) = slot.take() {
+    timing::run_video_loop(slot, &shared.delay, &shared.stats, super::media::host_seconds, |frame| {
         if let Err(error) = renderer.draw(Some(&frame))
             && !reported
         {
             eprintln!("video: {error}");
             reported = true;
         }
-    }
+    });
 }
 
 fn layout(format: PixelFormat) -> Layout {
@@ -196,12 +198,14 @@ struct Renderer {
     size: (u32, u32),
     pass: VideoPass,
     planes: Option<Planes>,
-    settings: Arc<Mutex<PictureSettings>>,
+    shared: Arc<VideoShared>,
     mjpeg: MjpegDecoder,
+    /// Presents not yet seen in the frame statistics: (present count, stamps).
+    pending: VecDeque<(u32, Stamps)>,
 }
 
 impl Renderer {
-    fn new(surface: Surface, settings: Arc<Mutex<PictureSettings>>) -> Result<Self> {
+    fn new(surface: Surface, shared: Arc<VideoShared>) -> Result<Self> {
         unsafe {
             let (device, context) = create_device()?;
             let factory: IDXGIFactory2 = device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
@@ -236,8 +240,9 @@ impl Renderer {
                 size: (desc.Width, desc.Height),
                 pass,
                 planes: None,
-                settings,
+                shared,
                 mjpeg: MjpegDecoder::default(),
+                pending: VecDeque::new(),
             })
         }
     }
@@ -259,13 +264,55 @@ impl Renderer {
                     let (width, height) = self.upload(frame)?;
                     // Windows passes the card's levels through untouched: nothing to undo.
                     let info = FrameInfo { width, height, layout: layout(frame.format.pixel_format), os_squeezed: false };
-                    let settings = *self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+                    let settings = *lock(&self.shared.picture);
                     let plan = picture::plan(info, &settings, (self.size.0 as f64, self.size.1 as f64));
                     self.pass.encode(&self.context, &target, self.planes.as_ref().expect("uploaded"), &plan)?;
                 }
                 None => self.context.ClearRenderTargetView(&target, &[0.0, 0.0, 0.0, 1.0]),
             }
-            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
+            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
+            if let Some(frame) = frame {
+                self.record_present(frame.stamps);
+            }
+            Ok(())
+        }
+    }
+
+    /// Matches presents to DXGI's frame statistics (the refresh each present reached the screen,
+    /// in QPC time). Where Windows gives no statistics (e.g. a composed window), records the time
+    /// of the Present call instead, marked as estimated.
+    fn record_present(&mut self, stamps: Stamps) {
+        let mut stats = lock(&self.shared.stats);
+        let Ok(count) = (unsafe { self.swap_chain.GetLastPresentCount() }) else {
+            stats.presented(stamps, super::media::host_seconds(), true);
+            return;
+        };
+        self.pending.push_back((count, stamps));
+        let mut frame_stats = DXGI_FRAME_STATISTICS::default();
+        if unsafe { self.swap_chain.GetFrameStatistics(&mut frame_stats) }.is_err() {
+            // No statistics: report this present now, as estimated.
+            self.pending.clear();
+            stats.presented(stamps, super::media::host_seconds(), true);
+            return;
+        }
+        let frequency = {
+            let mut f = 0i64;
+            let _ = unsafe { windows::Win32::System::Performance::QueryPerformanceFrequency(&mut f) };
+            f.max(1) as f64
+        };
+        let displayed_at = frame_stats.SyncQPCTime as f64 / frequency;
+        while let Some(&(id, earlier)) = self.pending.front() {
+            if id > frame_stats.PresentCount {
+                break;
+            }
+            self.pending.pop_front();
+            if id == frame_stats.PresentCount {
+                stats.presented(earlier, displayed_at, false);
+            }
+        }
+        // Statistics that stop advancing mustn't grow this without bound.
+        while self.pending.len() > 8 {
+            self.pending.pop_front();
         }
     }
 

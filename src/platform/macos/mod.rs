@@ -5,12 +5,14 @@ mod capture;
 mod render;
 mod surface;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::video::picture::PictureSettings;
+use crate::video::timing::{DelaySettings, Summary};
+use crate::video::{VideoShared, lock};
 use crate::video::slot::FrameSlot;
 use capture::{Capture, PixelBuffer};
 
@@ -18,7 +20,7 @@ use capture::{Capture, PixelBuffer};
 pub struct VideoPipeline {
     capture: Capture,
     slot: Arc<FrameSlot<PixelBuffer>>,
-    settings: Arc<Mutex<PictureSettings>>,
+    shared: Arc<VideoShared>,
     video_thread: Option<JoinHandle<()>>,
 }
 
@@ -33,22 +35,33 @@ impl VideoPipeline {
         let target = surface::attach_below(appkit.ns_view)?;
 
         let slot = Arc::new(FrameSlot::new());
-        let settings = Arc::new(Mutex::new(PictureSettings::default()));
+        let shared = Arc::new(VideoShared::default());
         let video_thread = {
-            let (slot, settings) = (slot.clone(), settings.clone());
+            let (slot, shared) = (slot.clone(), shared.clone());
             std::thread::Builder::new()
                 .name("xreveal-video".into())
-                .spawn(move || render::run(target, &slot, settings))
+                .spawn(move || render::run(target, &slot, shared))
                 .map_err(|e| format!("could not start the video thread: {e}"))?
         };
         let capture = Capture::start(slot.clone())?;
-        Ok(Self { capture, slot, settings, video_thread: Some(video_thread) })
+        Ok(Self { capture, slot, shared, video_thread: Some(video_thread) })
     }
 
     /// Changes how the picture is drawn; applies from the next frame.
     #[expect(dead_code, reason = "called by the Settings drawer (its own slice)")]
     pub fn set_picture(&self, settings: PictureSettings) {
-        *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
+        *lock(&self.shared.picture) = settings;
+    }
+
+    /// Changes Buffering / the negative A/V sync offset; applies from the next frame.
+    #[expect(dead_code, reason = "called by the Settings drawer (its own slice)")]
+    pub fn set_delay(&self, delay: DelaySettings) {
+        *lock(&self.shared.delay) = delay;
+    }
+
+    /// Timing for the Stats overlay.
+    pub fn stats(&self) -> Summary {
+        lock(&self.shared.stats).summary(self.slot.replaced_total())
     }
 
     /// A one-line description of what is being shown, e.g. `USB2 Video · 1280x720 @ 60 · 420v`.

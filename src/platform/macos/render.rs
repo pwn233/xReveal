@@ -3,7 +3,9 @@
 //! presents on arrival (docs/spec/v1.md §3.3, §3.4).
 
 use std::ptr::{self, NonNull};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
+
+use block2::RcBlock;
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
@@ -18,11 +20,13 @@ use objc2_metal::{
     MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
     MTLRenderPipelineState, MTLStoreAction, MTLTexture, MTLViewport,
 };
-use objc2_quartz_core::CAMetalDrawable;
+use objc2_metal::MTLDrawable;
+use objc2_quartz_core::{CACurrentMediaTime, CAMetalDrawable};
 
 use super::capture::{PixelBuffer, fourcc};
 use super::surface::RenderTarget;
-use crate::video::picture::{self, FrameInfo, Layout, PictureSettings, Plan, ShaderParams};
+use crate::video::picture::{self, FrameInfo, Layout, Plan, ShaderParams};
+use crate::video::{VideoShared, lock, timing};
 use crate::video::slot::FrameSlot;
 
 const SHADER: &str = include_str!("video.metal");
@@ -37,8 +41,8 @@ const YUY2: u32 = u32::from_be_bytes(*b"yuvs");
 type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 
 /// Runs until the slot is closed.
-pub fn run(target: RenderTarget, slot: &FrameSlot<PixelBuffer>, settings: Arc<Mutex<PictureSettings>>) {
-    let renderer = match Renderer::new(target, settings) {
+pub fn run(target: RenderTarget, slot: &FrameSlot<PixelBuffer>, shared: Arc<VideoShared>) {
+    let renderer = match Renderer::new(target, shared.clone()) {
         Ok(renderer) => renderer,
         Err(error) => {
             eprintln!("video: {error}");
@@ -47,10 +51,10 @@ pub fn run(target: RenderTarget, slot: &FrameSlot<PixelBuffer>, settings: Arc<Mu
     };
     let mut in_flight: Option<InFlight> = None;
     let mut reported = false;
-    while let Some(frame) = slot.take() {
+    timing::run_video_loop(slot, &shared.delay, &shared.stats, || CACurrentMediaTime(), |frame| {
         autoreleasepool(|_| match renderer.draw(frame) {
             Ok(Some(next)) => {
-                crate::video::FIRST_PRESENT.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::video::mark_first_present();
                 // Keep the previous frame's buffers alive until the GPU is done with them.
                 if let Some(previous) = in_flight.replace(next) {
                     previous.command_buffer.waitUntilCompleted();
@@ -63,8 +67,8 @@ pub fn run(target: RenderTarget, slot: &FrameSlot<PixelBuffer>, settings: Arc<Mu
                     reported = true;
                 }
             }
-        });
-    }
+        })
+    });
     if let Some(last) = in_flight {
         last.command_buffer.waitUntilCompleted();
     }
@@ -128,7 +132,7 @@ struct Renderer {
     target: RenderTarget,
     pass: VideoPass,
     texture_cache: CFRetained<CVMetalTextureCache>,
-    settings: Arc<Mutex<PictureSettings>>,
+    shared: Arc<VideoShared>,
 }
 
 /// Everything a submitted frame still needs until the GPU has finished with it.
@@ -139,7 +143,7 @@ struct InFlight {
 }
 
 impl Renderer {
-    fn new(target: RenderTarget, settings: Arc<Mutex<PictureSettings>>) -> Result<Self, String> {
+    fn new(target: RenderTarget, shared: Arc<VideoShared>) -> Result<Self, String> {
         let pass = VideoPass::new(&target.device)?;
         let mut cache: *mut CVMetalTextureCache = ptr::null_mut();
         let status = unsafe { CVMetalTextureCache::create(None, None, &target.device, None, NonNull::from(&mut cache)) };
@@ -147,12 +151,12 @@ impl Renderer {
             .filter(|_| status == kCVReturnSuccess)
             .map(|cache| unsafe { CFRetained::from_raw(cache) })
             .ok_or(format!("CVMetalTextureCache failed ({status})"))?;
-        Ok(Self { target, pass, texture_cache, settings })
+        Ok(Self { target, pass, texture_cache, shared })
     }
 
     /// Draws one frame and presents it. `Ok(None)` when there is nothing to draw into yet.
     fn draw(&self, frame: PixelBuffer) -> Result<Option<InFlight>, String> {
-        let image = &*frame.0;
+        let image = &*frame.image;
         let (info, planes) = match CVPixelBufferGetPixelFormatType(image) {
             format @ (NV12_VIDEO_RANGE | NV12_FULL_RANGE) => {
                 let luma = self.plane(&frame, 0, MTLPixelFormat::R8Unorm, 1)?;
@@ -186,11 +190,18 @@ impl Renderer {
             return Ok(None);
         };
 
-        let settings = *self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        let settings = *lock(&self.shared.picture);
         let plan = picture::plan(info, &settings, (size.width, size.height));
         let command_buffer = self.pass.queue.commandBuffer().ok_or("no command buffer")?;
         let second = textures.get(1).unwrap_or(&textures[0]);
         self.pass.encode(&command_buffer, &drawable.texture(), [&textures[0], second], &plan)?;
+        // Record when the frame actually reached the screen (Metal's host-time present time).
+        let (shared, stamps) = (self.shared.clone(), frame.stamps);
+        let on_presented = RcBlock::new(move |presented: NonNull<ProtocolObject<dyn MTLDrawable>>| {
+            let at = unsafe { presented.as_ref() }.presentedTime();
+            lock(&shared.stats).presented(stamps, at, false);
+        });
+        unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&on_presented)) };
         command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
         command_buffer.commit();
 
@@ -200,7 +211,7 @@ impl Renderer {
     /// Wraps one plane of the frame as a Metal texture without copying. `texel_pixels` is how many
     /// image pixels one texel holds across (2 for packed YUY2 viewed as RGBA).
     fn plane(&self, frame: &PixelBuffer, index: usize, format: MTLPixelFormat, texel_pixels: usize) -> Result<CFRetained<CVMetalTexture>, String> {
-        let image = &*frame.0;
+        let image = &*frame.image;
         let (width, height) = if CVPixelBufferIsPlanar(image) {
             (CVPixelBufferGetWidthOfPlane(image, index), CVPixelBufferGetHeightOfPlane(image, index))
         } else {
