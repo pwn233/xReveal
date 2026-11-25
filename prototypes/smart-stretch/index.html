@@ -1,0 +1,182 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. Not part of xReveal.
+  Question (ticket "How should Smart stretch look and be tuned?"): what shape should Smart stretch have
+  when fitting a 16:9 Source into a wider (or narrower) Target ratio?
+  Four variants of the Smart stretch mapping, switchable via ?variant=A|B|C|D (bottom bar or ← →).
+  Open this file in a browser. Drop any 16:9 screenshot on the page to judge it on real content.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE · Smart stretch</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0c0e; --panel:#16181c; --line:#2a2e35; --text:#e7e9ee; --muted:#8b919c; --accent:#6aa9ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 system-ui, sans-serif; padding:16px 16px 120px; }
+  header { display:flex; flex-wrap:wrap; gap:12px 20px; align-items:center; margin-bottom:12px; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header .tag { font-size:11px; padding:2px 8px; border-radius:999px; background:#3b2a12; color:#ffc76a; }
+  label { color:var(--muted); display:flex; gap:8px; align-items:center; }
+  select, input[type=range] { accent-color:var(--accent); }
+  select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 6px; }
+  #stage { width:100%; background:#000; border:1px solid var(--line); display:block; }
+  #state { margin:10px 0 6px; font-variant-numeric:tabular-nums; }
+  #state b { color:var(--accent); font-weight:600; }
+  #graph { width:100%; height:120px; display:block; background:var(--panel); border:1px solid var(--line); border-radius:6px; }
+  .hint { color:var(--muted); font-size:12px; margin-top:6px; }
+  #switcher { position:fixed; left:50%; bottom:calc(16px + env(safe-area-inset-bottom, 0px)); transform:translateX(-50%);
+    display:flex; align-items:center; gap:6px; background:#fff; color:#111; border-radius:999px; padding:6px;
+    box-shadow:0 6px 24px rgba(0,0,0,.5); font-weight:600; z-index:10; }
+  #switcher button { border:0; background:#111; color:#fff; width:34px; height:34px; border-radius:999px; font-size:16px; cursor:pointer; }
+  #switcher span { padding:0 12px; min-width:220px; text-align:center; }
+  #drop { position:fixed; inset:0; background:rgba(106,169,255,.15); border:3px dashed var(--accent); display:none; z-index:20;
+    align-items:center; justify-content:center; font-size:20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Smart stretch</h1><span class="tag">PROTOTYPE, throwaway</span>
+  <label>Target ratio
+    <select id="ratio">
+      <option>21:9</option><option>32:9</option><option>16:10</option><option>4:3</option><option>16:9</option>
+    </select>
+  </label>
+  <label id="paramWrap"><span id="paramLabel"></span>
+    <input id="param" type="range"><span id="paramVal"></span>
+  </label>
+  <label>Picture
+    <select id="pic"><option value="pattern">Test pattern</option></select>
+  </label>
+  <label><input id="guides" type="checkbox" checked> Source grid</label>
+</header>
+
+<canvas id="stage"></canvas>
+<div id="state"></div>
+<canvas id="graph"></canvas>
+<div class="hint">Graph: how much wider than true each part of the screen is drawn (1.0× = undistorted, dashed = plain Stretch). Drop a 16:9 screenshot anywhere to use it.</div>
+
+<div id="switcher"><button id="prev" aria-label="Previous variant">←</button><span id="vlabel"></span><button id="next" aria-label="Next variant">→</button></div>
+<div id="drop">Drop a 16:9 screenshot</div>
+
+<script>
+// ---------- Variants: each is a different Smart stretch shape ----------
+// Coordinates: v = destination position from centre (0..1 of half-width), u = source position (0..1 of half-width).
+// k = how much wider the Target ratio is than the Source region. "Undistorted" means du/dv = k.
+const VARIANTS = [
+  { key:'A', name:'Three strips', param:{ label:'Undistorted centre', min:0, max:1, step:0.01, def:0.55, fmt:v=>`${Math.round(v*100)}% of width` },
+    map(k, p) { const c = Math.min(p, k > 1 ? 0.95 / k : 0.95);
+      return { zoom:1, centre:c, g:v => v <= c ? k*v : c*k + (v-c)*(1-c*k)/(1-c) }; } },
+  { key:'B', name:'Smooth curve', param:{ label:'Curve strength', min:0, max:1, step:0.01, def:1, fmt:v=>`${Math.round(v*100)}%` },
+    map(k, t) { return { zoom:1, g:smooth(k, t) }; } },
+  { key:'C', name:'Zoom + curve', param:{ label:'Zoom (crops top/bottom)', min:0, max:1, step:0.01, def:0.4, fmt:null },
+    map(k, t) { const z = k > 1 ? 1 + t*(k-1) : 1;            // z = k would be plain Crop
+      const kz = k / z; return { zoom:z, k:kz, g:smooth(kz, 1) }; } },
+  { key:'D', name:'Plain Stretch (baseline)', param:null,
+    map(k) { return { zoom:1, g:v => v }; } },
+];
+// Smooth monotonic curve with undistorted centre: g(v) = k·v − (k−1)·v^p, blended with plain stretch by t.
+function smooth(k, t) {
+  const p = k > 1 ? Math.min(3, 0.95 * k / (k - 1)) : 3;
+  return v => (1 - t) * v + t * (k*v - (k-1) * Math.pow(v, p));
+}
+
+// ---------- State (URL-backed so a variant is shareable) ----------
+const qs = new URLSearchParams(location.search);
+let vi = Math.max(0, VARIANTS.findIndex(v => v.key === (qs.get('variant') || 'A')));
+const params = Object.fromEntries(VARIANTS.filter(v => v.param).map(v => [v.key, v.param.def]));
+const $ = id => document.getElementById(id);
+$('ratio').value = qs.get('ratio') || '21:9';
+
+// ---------- Pictures ----------
+const pictures = { pattern: makePattern() };
+if (window.PRELOAD_IMAGE) addPicture('ps5', 'PS5 frame (from the card)', window.PRELOAD_IMAGE, true);
+function addPicture(id, label, src, select) {
+  const img = new Image();
+  img.onload = () => { pictures[id] = img; if (![...$('pic').options].some(o => o.value === id)) $('pic').add(new Option(label, id));
+    if (select) $('pic').value = id; render(); };
+  img.src = src;
+}
+function makePattern() {
+  const c = document.createElement('canvas'); c.width = 1920; c.height = 1080; const x = c.getContext('2d');
+  const sky = x.createLinearGradient(0, 0, 0, 1080); sky.addColorStop(0, '#1d3557'); sky.addColorStop(.62, '#457b9d'); sky.addColorStop(.62, '#2d4a22'); sky.addColorStop(1, '#1b2e15');
+  x.fillStyle = sky; x.fillRect(0, 0, 1920, 1080);
+  x.fillStyle = '#e9c46a'; for (let i = 0; i < 9; i++) { x.beginPath(); x.arc(120 + i * 210, 560, 70, 0, 7); x.fill(); }   // should stay round
+  x.fillStyle = '#f4a261'; x.fillRect(900, 520, 120, 260); x.beginPath(); x.arc(960, 480, 55, 0, 7); x.fill();     // "player"
+  x.strokeStyle = '#fff'; x.lineWidth = 4; x.beginPath(); x.moveTo(940, 600); x.lineTo(980, 600); x.moveTo(960, 580); x.lineTo(960, 620); x.stroke();
+  x.fillStyle = 'rgba(0,0,0,.55)'; x.beginPath(); x.arc(150, 150, 110, 0, 7); x.fill();                          // minimap
+  x.strokeStyle = '#8ecae6'; x.lineWidth = 6; x.stroke();
+  x.fillStyle = 'rgba(0,0,0,.55)'; x.fillRect(50, 960, 420, 56); x.fillStyle = '#e63946'; x.fillRect(60, 970, 300, 36); // health
+  x.fillStyle = '#fff'; x.font = 'bold 64px system-ui'; x.textAlign = 'right'; x.fillText('30 / 120', 1860, 1010);
+  x.font = '600 48px system-ui'; x.textAlign = 'left'; x.fillText('OBJECTIVE: reach the gate', 1300, 90);
+  return c;
+}
+addEventListener('dragover', e => { e.preventDefault(); $('drop').style.display = 'flex'; });
+addEventListener('dragleave', e => { if (e.target === $('drop')) $('drop').style.display = 'none'; });
+addEventListener('drop', e => { e.preventDefault(); $('drop').style.display = 'none';
+  const f = e.dataTransfer.files[0]; if (f) addPicture('dropped', f.name, URL.createObjectURL(f), true); });
+
+// ---------- Render ----------
+function ratio() { const [a, b] = $('ratio').value.split(':').map(Number); return a / b; }
+function render() {
+  const V = VARIANTS[vi], src = pictures[$('pic').value] || pictures.pattern;
+  const sw = src.width, sh = src.height, rs = sw / sh, rt = ratio(), k = rt / rs;
+  const m = V.map(k, params[V.key]); const kk = m.k ?? k;
+  const cv = $('stage'), H = 720, W = Math.round(H * rt); cv.width = W; cv.height = H;
+  const x = cv.getContext('2d'); x.imageSmoothingQuality = 'high';
+  const regionH = sh / m.zoom, sy = (sh - regionH) / 2, step = 2;
+  for (let px = 0; px < W; px += step) {                       // draw column by column through the mapping
+    const v0 = (px - W/2) / (W/2), v1 = (px + step - W/2) / (W/2);
+    const u0 = Math.sign(v0) * m.g(Math.abs(v0)), u1 = Math.sign(v1) * m.g(Math.abs(v1));
+    const sx0 = sw/2 + u0 * sw/2, sx1 = sw/2 + u1 * sw/2;
+    x.drawImage(src, sx0, sy, Math.max(0.01, sx1 - sx0), regionH, px, 0, step, H);
+  }
+  if ($('guides').checked) {                                    // where every 1/16 of the source lands
+    x.strokeStyle = 'rgba(255,255,255,.35)'; x.lineWidth = 1;
+    for (let i = 1; i < 16; i++) { const u = Math.abs(i/8 - 1), v = invert(m.g, u) * Math.sign(i/8 - 1);
+      const px = W/2 + v * W/2; x.beginPath(); x.moveTo(px, 0); x.lineTo(px, H); x.stroke(); }
+    if (m.centre !== undefined) { x.strokeStyle = '#6aa9ff'; x.setLineDash([8, 6]); x.lineWidth = 2;
+      for (const s of [-1, 1]) { const px = W/2 + s * m.centre * W/2; x.beginPath(); x.moveTo(px, 0); x.lineTo(px, H); x.stroke(); } x.setLineDash([]); }
+  }
+  // state readout
+  const stretchAt = v => kk / deriv(m.g, v);
+  const centre = stretchAt(0.001), edge = stretchAt(0.999);
+  const crop = Math.round((1 - 1 / m.zoom) * 100);
+  $('state').innerHTML = `<b>${V.key} · ${V.name}</b> · Target ${$('ratio').value} (needs ${k.toFixed(2)}× the Source's width) · ` +
+    `centre drawn <b>${centre.toFixed(2)}×</b> wide · edges <b>${edge.toFixed(2)}×</b> wide · top/bottom cropped <b>${crop}%</b>`;
+  drawGraph(stretchAt, k);
+  // controls
+  $('vlabel').textContent = `${V.key} (${V.name})`;
+  $('paramWrap').style.display = V.param ? '' : 'none';
+  if (V.param) { const p = $('param'); Object.assign(p, { min:V.param.min, max:V.param.max, step:V.param.step }); p.value = params[V.key];
+    $('paramLabel').textContent = V.param.label;
+    $('paramVal').textContent = V.param.fmt ? V.param.fmt(params[V.key]) : `${m.zoom.toFixed(2)}× (${crop}% cropped)`; }
+  const q = new URLSearchParams({ variant:V.key, ratio:$('ratio').value }); history.replaceState(null, '', '?' + q);
+}
+function deriv(g, v) { const h = 1e-3, a = Math.max(0, v - h), b = Math.min(1, v + h); return (g(b) - g(a)) / (b - a); }
+function invert(g, u) { let lo = 0, hi = 1; for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; g(mid) < u ? lo = mid : hi = mid; } return (lo + hi) / 2; }
+function drawGraph(stretchAt, k) {
+  const c = $('graph'), W = c.width = c.clientWidth * devicePixelRatio, H = c.height = 120 * devicePixelRatio, x = c.getContext('2d');
+  const pts = []; for (let i = 0; i <= 200; i++) { const v = i / 100 - 1; pts.push(stretchAt(Math.min(0.999, Math.abs(v)))); }
+  const top = Math.max(1.5, ...pts.filter(Number.isFinite), k) * 1.1, Y = s => H - 8 - (s / top) * (H - 24);
+  x.font = `${11 * devicePixelRatio}px system-ui`; x.fillStyle = '#8b919c';
+  x.strokeStyle = '#5c6370'; x.beginPath(); x.moveTo(0, Y(1)); x.lineTo(W, Y(1)); x.stroke(); x.fillText('1.0× undistorted', 6, Y(1) + 14 * devicePixelRatio);
+  x.setLineDash([6, 5]); x.strokeStyle = '#8b919c'; x.beginPath(); x.moveTo(0, Y(k)); x.lineTo(W, Y(k)); x.stroke(); x.setLineDash([]);
+  x.textAlign = 'right'; x.fillText(`plain Stretch ${k.toFixed(2)}×`, W - 6, Y(k) - 4); x.textAlign = 'left';
+  x.strokeStyle = '#6aa9ff'; x.lineWidth = 2 * devicePixelRatio; x.beginPath();
+  pts.forEach((s, i) => { const px = (i / 200) * W; i ? x.lineTo(px, Y(Math.min(s, top))) : x.moveTo(px, Y(Math.min(s, top))); }); x.stroke();
+}
+
+// ---------- Switcher + controls ----------
+const go = d => { vi = (vi + d + VARIANTS.length) % VARIANTS.length; render(); };
+$('prev').onclick = () => go(-1); $('next').onclick = () => go(1);
+addEventListener('keydown', e => { if (e.target.closest('input, textarea, select, [contenteditable]')) return;
+  if (e.key === 'ArrowLeft') go(-1); if (e.key === 'ArrowRight') go(1); });
+$('param').oninput = e => { params[VARIANTS[vi].key] = Number(e.target.value); render(); };
+['ratio', 'pic', 'guides'].forEach(id => $(id).onchange = render);
+addEventListener('resize', render);
+render();
+</script>
+</body>
+</html>
