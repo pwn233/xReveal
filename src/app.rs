@@ -7,6 +7,7 @@ use gpui_kit::*;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::platform::VideoPipeline;
+use crate::setup::Store;
 use crate::video::timing::Summary;
 
 pub struct XReveal {
@@ -16,28 +17,71 @@ pub struct XReveal {
     video: Option<VideoPipeline>,
     /// Redraws the Stats overlay while it is shown; dropping it stops the refresh.
     stats_refresh: Option<Task<()>>,
+    /// The Remembered setup (docs/spec/v1.md §3.7).
+    store: Store,
+    _save_on_quit: Subscription,
 }
 
 impl XReveal {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, mut store: Store) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let save_on_quit = cx.on_app_quit(|this, _| {
+            this.store.flush();
+            async {}
+        });
+
+        // Remember the monitor xReveal opened on (by the display's own identity).
+        if let Some(display) = window.display(cx)
+            && let Ok(uuid) = display.uuid()
+        {
+            store.update(|s| s.monitor = Some(uuid.to_string()));
+        }
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            let (video, status) = match VideoPipeline::start(window) {
+            let remembered = store.setup.source.clone();
+            let (video, mut status) = match VideoPipeline::start(window, remembered.as_ref().map(|s| (s, store.setup.video_format))) {
                 Ok(video) => {
+                    // Apply and remember what is on screen.
+                    if let Some((identity, choice)) = video.current().cloned() {
+                        video.set_picture(store.setup.picture_for(&identity));
+                        video.set_delay(store.setup.delay);
+                        store.update(|s| {
+                            s.source_entry(&identity);
+                            s.source = Some(identity);
+                            s.video_format = Some(choice);
+                        });
+                    }
                     let status = video.description().to_owned();
                     (Some(video), status)
                 }
                 Err(error) => (None, error),
             };
-            Self { focus, status, video, stats_refresh: None }
+            if let Some(notice) = store.notice.take() {
+                status = format!("{notice} {status}");
+            }
+            Self { focus, status, video, stats_refresh: None, store, _save_on_quit: save_on_quit }
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            Self { focus, status: "The live picture isn't implemented on this OS yet.".into(), stats_refresh: None }
+            Self {
+                focus,
+                status: "The live picture isn't implemented on this OS yet.".into(),
+                stats_refresh: None,
+                store,
+                _save_on_quit: save_on_quit,
+            }
         }
+    }
+
+    /// Reset all settings (docs/spec/v1.md §2.3): forget everything and start as on first run.
+    #[expect(dead_code, reason = "the button lives in the Settings drawer (its own slice)")]
+    pub fn reset_all_settings(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.store.reset_all() {
+            self.status = format!("Couldn't reset settings: {error}");
+        }
+        cx.notify();
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {

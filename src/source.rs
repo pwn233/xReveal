@@ -23,7 +23,7 @@ pub struct NativeFormat {
 }
 
 /// What the user picks: resolution + FPS (the **Video format**, minus the hidden pixel format).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VideoFormat {
     pub width: u32,
     pub height: u32,
@@ -79,7 +79,8 @@ pub fn default_choice(formats: &[NativeFormat]) -> Option<VideoFormat> {
 
 /// How a Source is identified: the OS's own ID (depends on the USB port for cards without a
 /// serial), the card's serial number if it has one, and its model (USB vendor + product ID).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct SourceIdentity {
     pub os_id: String,
     pub serial: Option<String>,
@@ -106,8 +107,37 @@ pub fn initial_pick(sources: &[SourceInfo]) -> Option<(usize, VideoFormat, Nativ
     Some((index, choice, native))
 }
 
+/// What to show at launch.
+#[derive(Debug, PartialEq)]
+pub enum LaunchPick {
+    /// Show this Source (index) at this Video format.
+    Show(usize, VideoFormat),
+    /// The remembered Source isn't plugged in: the Card-not-found picker waits for a click
+    /// (docs/spec/v1.md §2.1). Holds its name.
+    NotConnected(String),
+    /// Nothing to show.
+    Nothing,
+}
+
+/// Decides what to show at launch from the Remembered setup's Source and Video format: that
+/// Source if it's recognised (at the remembered format, or its default if that format is gone);
+/// nothing if it isn't plugged in; with no Remembered setup, [`initial_pick`].
+pub fn launch_pick(sources: &[SourceInfo], remembered: Option<(&SourceIdentity, Option<VideoFormat>)>) -> LaunchPick {
+    let Some((identity, format)) = remembered else {
+        return initial_pick(sources).map_or(LaunchPick::Nothing, |(i, choice, _)| LaunchPick::Show(i, choice));
+    };
+    let identities: Vec<SourceIdentity> = sources.iter().map(|s| s.identity.clone()).collect();
+    match match_source(identity, &identities) {
+        SourceMatch::Found(i) => {
+            let formats = &sources[i].formats;
+            let choice = format.filter(|f| best_native(formats, *f).is_some()).or_else(|| default_choice(formats));
+            choice.map_or(LaunchPick::Nothing, |c| LaunchPick::Show(i, c))
+        }
+        SourceMatch::Ask => LaunchPick::NotConnected(identity.name.clone()),
+    }
+}
+
 /// Result of recognising the remembered Source among those plugged in.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the Remembered setup at launch (its own slice)"))]
 #[derive(Debug, PartialEq, Eq)]
 pub enum SourceMatch {
     /// Index into the available Sources.
@@ -119,7 +149,6 @@ pub enum SourceMatch {
 /// Recognises the remembered Source (docs/spec/v1.md §2.1): the same OS ID, then the same serial
 /// on any port, then the same model if exactly one such card is plugged in; otherwise ask.
 /// Two identical cards without serials: the one on the remembered port (the OS ID) or ask.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the Remembered setup at launch (its own slice)"))]
 pub fn match_source(remembered: &SourceIdentity, available: &[SourceIdentity]) -> SourceMatch {
     if let Some(i) = available.iter().position(|s| s.os_id == remembered.os_id) {
         return SourceMatch::Found(i);
@@ -303,6 +332,25 @@ mod tests {
         assert_eq!(native.pixel, PixelKind::Nv12);
         assert_eq!(initial_pick(&[camera]).unwrap().0, 0, "no card: the camera is still offered");
         assert_eq!(initial_pick(&[]), None);
+    }
+
+    #[test]
+    fn launch_pick_uses_the_remembered_setup() {
+        let onten = SourceInfo { identity: card("port-A", Some("93869598"), Some((0x345f, 0x2131))), external: true, formats: reference_card() };
+        let sources = [onten.clone()];
+        let p1080 = VideoFormat { width: 1920, height: 1080, fps: 50.0 };
+        // Remembered card and format.
+        assert_eq!(launch_pick(&sources, Some((&onten.identity, Some(p1080)))), LaunchPick::Show(0, p1080));
+        // Remembered format no longer offered: the card's default.
+        let gone = VideoFormat { width: 3840, height: 2160, fps: 60.0 };
+        let LaunchPick::Show(0, choice) = launch_pick(&sources, Some((&onten.identity, Some(gone)))) else { panic!() };
+        assert_eq!(choice.to_string(), "1280x720 @ 60");
+        // Remembered card unplugged, another device present: don't start it, wait for a click.
+        let camera = SourceInfo { identity: card("facetime", None, None), external: false, formats: vec![] };
+        assert_eq!(launch_pick(&[camera], Some((&onten.identity, Some(p1080)))), LaunchPick::NotConnected("USB2 Video".into()));
+        // No Remembered setup: the initial pick.
+        assert_eq!(launch_pick(&sources, None), LaunchPick::Show(0, choice));
+        assert_eq!(launch_pick(&[], None), LaunchPick::Nothing);
     }
 
     #[test]

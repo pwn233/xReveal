@@ -25,7 +25,8 @@ pub trait Timed {
 
 /// How much the picture is held back (docs/spec/v1.md §3.3): Buffering in whole frames plus a
 /// negative A/V sync offset. Both zero (the default) bypasses the delay stage entirely.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct DelaySettings {
     /// Off (0), 1 or 2 frames.
     pub buffering_frames: u8,

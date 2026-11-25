@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::HWND;
 
-use crate::source::{self, SourceInfo, VideoFormat};
+use crate::source::{self, LaunchPick, SourceIdentity, SourceInfo, VideoFormat};
 use crate::video::picture::PictureSettings;
 use crate::video::slot::FrameSlot;
 use crate::video::timing::{DelaySettings, Summary};
@@ -24,6 +24,8 @@ pub struct VideoPipeline {
     capture: Option<DeviceCapture>,
     status: String,
     sources: Vec<SourceInfo>,
+    /// The Source and Video format on screen.
+    current: Option<(SourceIdentity, VideoFormat)>,
     slot: Arc<FrameSlot<Frame>>,
     shared: Arc<VideoShared>,
     video_thread: Option<JoinHandle<()>>,
@@ -33,7 +35,7 @@ impl VideoPipeline {
     /// Puts a video surface over GPUI's content in `window` and starts showing a Source: the
     /// first device at its default Video format. The surface comes up even without a card (it
     /// shows black). Main thread only.
-    pub fn start(window: &gpui_kit::Window) -> Result<Self, String> {
+    pub fn start(window: &gpui_kit::Window, remembered: Option<(&SourceIdentity, Option<VideoFormat>)>) -> Result<Self, String> {
         let handle = HasWindowHandle::window_handle(window).map_err(|e| format!("no native window: {e}"))?;
         let RawWindowHandle::Win32(win32) = handle.as_raw() else {
             return Err("expected a Win32 window".into());
@@ -54,6 +56,7 @@ impl VideoPipeline {
         let started = media::startup();
         let mut pipeline = Self {
             capture: None,
+            current: None,
             status: "No capture card found.".into(),
             sources: if started.is_ok() { media::list_sources() } else { Vec::new() },
             slot,
@@ -62,13 +65,28 @@ impl VideoPipeline {
         };
         if let Err(error) = started {
             pipeline.status = format!("Media Foundation didn't start: {error}");
-        } else if let Some((index, choice, _)) = source::initial_pick(&pipeline.sources) {
-            let os_id = pipeline.sources[index].identity.os_id.clone();
-            if let Err(error) = pipeline.switch_to(&os_id, choice) {
-                pipeline.status = error;
-            }
+        } else {
+            pipeline.show(source::launch_pick(&pipeline.sources, remembered));
         }
         Ok(pipeline)
+    }
+
+    fn show(&mut self, pick: LaunchPick) {
+        match pick {
+            LaunchPick::Show(index, choice) => {
+                let os_id = self.sources[index].identity.os_id.clone();
+                if let Err(error) = self.switch_to(&os_id, choice) {
+                    self.status = error;
+                }
+            }
+            LaunchPick::NotConnected(name) => self.status = format!("{name} isn't connected."),
+            LaunchPick::Nothing => {}
+        }
+    }
+
+    /// The Source and Video format on screen, if any.
+    pub fn current(&self) -> Option<&(SourceIdentity, VideoFormat)> {
+        self.current.as_ref()
     }
 
     /// Every capture device and its formats, as listed at start or the last [`refresh_sources`].
@@ -89,23 +107,23 @@ impl VideoPipeline {
         let info = self.sources.iter().find(|s| s.identity.os_id == os_id).ok_or("That capture card isn't connected.")?;
         let native = source::best_native(&info.formats, choice).ok_or(format!("{} doesn't offer {choice}.", info.identity.name))?;
         let name = info.identity.name.clone();
+        let identity = info.identity.clone();
         if let Some(old) = self.capture.take() {
             old.stop();
         }
         let capture = DeviceCapture::start(os_id, name.clone(), native, self.slot.clone()).map_err(|e| format!("Couldn't open {name}: {e}"))?;
+        self.current = Some((identity, choice));
         self.status = capture.description();
         self.capture = Some(capture);
         Ok(())
     }
 
     /// Changes how the picture is drawn; applies from the next frame.
-    #[expect(dead_code, reason = "called by the Settings drawer (its own slice)")]
     pub fn set_picture(&self, settings: PictureSettings) {
         *lock(&self.shared.picture) = settings;
     }
 
     /// Changes Buffering / the negative A/V sync offset; applies from the next frame.
-    #[expect(dead_code, reason = "called by the Settings drawer (its own slice)")]
     pub fn set_delay(&self, delay: DelaySettings) {
         *lock(&self.shared.delay) = delay;
     }

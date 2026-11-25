@@ -94,7 +94,8 @@ unsafe fn native_formats(device: &AVCaptureDevice) -> Vec<NativeFormat> {
         let (width, height) = unsafe { dimensions(&format) };
         let pixel = pixel_kind(unsafe { format.formatDescription().media_sub_type() });
         for range in unsafe { format.videoSupportedFrameRateRanges() }.iter() {
-            let fps = unsafe { range.maxFrameRate() };
+            // macOS reports e.g. 60.00024; keep the rate a person would read.
+            let fps = (unsafe { range.maxFrameRate() } * 100.0).round() / 100.0;
             out.push(NativeFormat { width: width as u32, height: height as u32, fps, pixel });
         }
     }

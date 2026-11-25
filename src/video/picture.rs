@@ -12,29 +12,31 @@
 use super::fill::{self, Rect};
 
 /// User choice for a setting that has an automatic value.
-#[cfg_attr(not(test), expect(dead_code, reason = "chosen in the Settings drawer (its own slice)"))]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Choice<T> {
     #[default]
     Auto,
     Manual(T),
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "chosen in the Settings drawer (its own slice)"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ColourRange {
     Full,
     Limited,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ColourSpace {
     Bt709,
     Bt601,
 }
 
 /// xReveal's own Picture adjustments. Neutral values leave the picture unchanged.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Adjustments {
     /// Added to luma, −0.5..=0.5. Neutral 0.
     pub brightness: f32,
@@ -54,8 +56,8 @@ impl Default for Adjustments {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "chosen in the Settings drawer (its own slice)"))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FillMode {
     #[default]
     Fit,
@@ -65,7 +67,8 @@ pub enum FillMode {
 }
 
 /// The shape xReveal fills on screen, as width ÷ height.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct TargetRatio(pub f64);
 
 impl TargetRatio {
@@ -78,7 +81,7 @@ impl TargetRatio {
         ("32:9", TargetRatio(32.0 / 9.0)),
     ];
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "chosen in the Settings drawer (its own slice)"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "the Custom Target ratio in the Settings drawer (its own slice)"))]
     pub fn custom(width: f64, height: f64) -> Self {
         Self(width / height)
     }
@@ -91,9 +94,13 @@ impl Default for TargetRatio {
 }
 
 /// The settings that shape the picture (part of the Remembered setup).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct PictureSettings {
+    /// Per Source: saved in that Source's entry of the Remembered setup, not with the rest.
+    #[serde(skip)]
     pub colour_range: Choice<ColourRange>,
+    #[serde(skip)]
     pub colour_space: Choice<ColourSpace>,
     pub adjustments: Adjustments,
     pub target_ratio: TargetRatio,

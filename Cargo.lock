@@ -8470,6 +8470,8 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "raw-window-handle",
+ "serde",
+ "toml 1.2.3+spec-1.1.0",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "zune-core 0.5.3",
