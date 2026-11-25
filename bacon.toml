@@ -1,0 +1,31 @@
+# Auto-reload for development: `bacon` (or `bacon run`).
+# On every save (src/, Cargo.toml, ...), bacon rebuilds and relaunches the app window.
+# Other jobs: press `c` for clippy, `t` for tests, `?` for all shortcuts.
+# Docs: https://dystroy.org/bacon/config/
+
+default_job = "run"
+
+[jobs.run]
+command = ["cargo", "run", "--color", "always"]
+need_stdout = true
+allow_warnings = true
+# The app keeps running until the next change; then it is killed and relaunched.
+background = false
+on_change_strategy = "kill_then_restart"
+
+[jobs.check]
+command = ["cargo", "check", "--color", "always"]
+need_stdout = false
+
+[jobs.clippy]
+command = ["cargo", "clippy", "--all-targets", "--color", "always"]
+need_stdout = false
+
+[jobs.test]
+command = ["cargo", "test", "--color", "always"]
+need_stdout = true
+
+[keybindings]
+c = "job:clippy"
+t = "job:test"
+r = "job:run"
