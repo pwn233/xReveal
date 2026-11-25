@@ -11,10 +11,10 @@ cbuffer Params : register(b0) {
     float4 mapping;   // xy offset, zw scale: source UV = offset + UV × scale
     float4 smart;     // k, t, p, enabled
     float4 sizes;     // luma size (texels), chroma size (texels)
-    float4 misc;      // 1 / gamma, layout (0 NV12, 1 YUY2)
+    float4 misc;      // 1 / gamma, layout (0 NV12, 1 YUY2, 2 Y-Cb-Cr 4:4:4)
 };
 
-Texture2D<float4> first : register(t0);  // NV12: luma (R8). YUY2: packed (Y0, Cb, Y1, Cr).
+Texture2D<float4> first : register(t0);  // NV12: luma (R8). YUY2: packed (Y0, Cb, Y1, Cr). 4:4:4: R8, 3 texels per pixel.
 Texture2D<float4> second : register(t1); // NV12: CbCr (R8G8). YUY2: unused.
 
 struct VertexOut {
@@ -49,23 +49,29 @@ float4 weights(float t) {
     return 0.5 * float4(-t3 + 2.0 * t2 - t, 3.0 * t3 - 5.0 * t2 + 2.0, -3.0 * t3 + 4.0 * t2 + t, t3 - t2);
 }
 
-float fetch_luma(int x, int y, bool yuy2) {
-    if (yuy2) {
+float fetch_luma(int x, int y, int layout) {
+    if (layout == 2) {
+        return first.Load(int3(x * 3, y, 0)).r;
+    }
+    if (layout == 1) {
         float4 texel = first.Load(int3(x / 2, y, 0));
         return (x & 1) ? texel.b : texel.r;
     }
     return first.Load(int3(x, y, 0)).r;
 }
 
-float2 fetch_chroma(int x, int y, bool yuy2) {
-    if (yuy2) {
+float2 fetch_chroma(int x, int y, int layout) {
+    if (layout == 2) {
+        return float2(first.Load(int3(x * 3 + 1, y, 0)).r, first.Load(int3(x * 3 + 2, y, 0)).r);
+    }
+    if (layout == 1) {
         return first.Load(int3(x, y, 0)).ga;
     }
     return second.Load(int3(x, y, 0)).rg;
 }
 
 float4 ps_main(VertexOut i) : SV_Target {
-    bool yuy2 = misc.y > 0.5;
+    int layout = int(misc.y + 0.5);
     float2 src = source_uv(i.uv);
 
     // Luma: 4×4 Catmull-Rom taps, clamped at the edges.
@@ -79,7 +85,7 @@ float4 ps_main(VertexOut i) : SV_Target {
         float row = 0.0;
         [unroll] for (int k = 0; k < 4; k++) {
             int x = clamp(int(li.x) + k - 1, 0, lmax.x);
-            row += lwx[k] * fetch_luma(x, y, yuy2);
+            row += lwx[k] * fetch_luma(x, y, layout);
         }
         luma += lwy[j] * row;
     }
@@ -95,7 +101,7 @@ float4 ps_main(VertexOut i) : SV_Target {
         float2 row = 0.0;
         [unroll] for (int n = 0; n < 4; n++) {
             int x = clamp(int(ci.x) + n - 1, 0, cmax.x);
-            row += cwx[n] * fetch_chroma(x, y, yuy2);
+            row += cwx[n] * fetch_chroma(x, y, layout);
         }
         chroma += cwy[m] * row;
     }

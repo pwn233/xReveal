@@ -11,6 +11,8 @@ publish = false
 # https://gpui-kit.com
 gpui-kit = "0.11.0"
 raw-window-handle = "0.6"
+zune-core = "0.5.3"
+zune-jpeg = "0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Capture (AVFoundation) and the video surface (Metal under GPUI's view). docs/spec/v1.md §3.1, §3.4.

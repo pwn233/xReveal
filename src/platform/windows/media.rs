@@ -21,11 +21,13 @@ const FIRST_VIDEO_STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 /// The Reference card's best live mode; used when the device offers it.
 const PREFERRED: (u32, u32, u32) = (1280, 720, 60);
 
-/// Pixel layouts the renderer draws.
+/// What the reader delivers, as the renderer receives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelFormat {
     Nv12,
     Yuy2,
+    /// Compressed JPEG frames; the video thread decodes them with zune-jpeg (docs/spec/v1.md §3.2).
+    Mjpeg,
 }
 
 impl PixelFormat {
@@ -33,6 +35,7 @@ impl PixelFormat {
         match subtype {
             s if s == MFVideoFormat_NV12 => Some(Self::Nv12),
             s if s == MFVideoFormat_YUY2 => Some(Self::Yuy2),
+            s if s == MFVideoFormat_MJPG => Some(Self::Mjpeg),
             _ => None,
         }
     }
@@ -41,6 +44,7 @@ impl PixelFormat {
         match self {
             Self::Nv12 => "NV12",
             Self::Yuy2 => "YUY2",
+            Self::Mjpeg => "MJPEG",
         }
     }
 }
@@ -72,7 +76,12 @@ impl Frame {
     pub fn with_pixels<R>(&self, f: impl FnOnce(&[u8], usize) -> R) -> Result<R> {
         unsafe {
             let buffer = self.sample.ConvertToContiguousBuffer()?;
-            if let Ok(buffer_2d) = buffer.cast::<IMF2DBuffer>() {
+            // Compressed frames are a plain byte stream; only uncompressed ones are 2D images.
+            let buffer_2d = match self.format.pixel_format {
+                PixelFormat::Mjpeg => None,
+                _ => buffer.cast::<IMF2DBuffer>().ok(),
+            };
+            if let Some(buffer_2d) = buffer_2d {
                 let mut scanline0 = std::ptr::null_mut();
                 let mut pitch = 0i32;
                 buffer_2d.Lock2D(&mut scanline0, &mut pitch)?;
@@ -103,7 +112,7 @@ impl Frame {
         let h = self.format.height as usize;
         match self.format.pixel_format {
             PixelFormat::Nv12 => h + h.div_ceil(2),
-            PixelFormat::Yuy2 => h,
+            PixelFormat::Yuy2 | PixelFormat::Mjpeg => h,
         }
     }
 
@@ -112,6 +121,8 @@ impl Frame {
         match self.format.pixel_format {
             PixelFormat::Nv12 => w,
             PixelFormat::Yuy2 => w * 2,
+            // Not rows at all: the whole buffer is one JPEG.
+            PixelFormat::Mjpeg => 0,
         }
     }
 }
@@ -315,8 +326,9 @@ fn negotiate(reader: &IMFSourceReader, want: Option<(u32, u32, u32)>) -> Result<
             let fps = frame_rate(t).unwrap_or_default().round() as u32;
             let matches_want = want.is_some_and(|(ww, wh, wf)| (w, h, fps) == (ww, wh, wf));
             let format_rank = match t.GetGUID(&MF_MT_SUBTYPE).ok().and_then(PixelFormat::from_subtype) {
-                Some(PixelFormat::Nv12) => 2,
-                Some(PixelFormat::Yuy2) => 1,
+                Some(PixelFormat::Nv12) => 3,
+                Some(PixelFormat::Yuy2) => 2,
+                Some(PixelFormat::Mjpeg) => 1,
                 None => 0,
             };
             (matches_want, format_rank)
@@ -395,6 +407,7 @@ mod tests {
                                 let p = row * pitch + x * 2; // x is even: Y0 U Y1 V
                                 (bytes[p], bytes[p + 1], bytes[p + 3])
                             }
+                            PixelFormat::Mjpeg => unreachable!("MJPEG frames are decoded before sampling"),
                         }
                     })
                     .collect()
@@ -442,18 +455,23 @@ mod tests {
     }
 
     #[test]
-    fn mjpeg_is_decoded_by_media_foundation() {
+    fn mjpeg_arrives_compressed_and_xreveal_decodes_it() {
         let frame = first_frame("bars-1280x720p60-mjpeg-full.avi");
-        assert!(frame.format.decoded);
-        assert_eq!((frame.format.width, frame.format.height), (1280, 720));
-        let samples = bar_samples(&frame);
-        // Which range Windows' MJPEG decoder outputs is unknown (spec §8): accept either, report it.
-        let full = std::panic::catch_unwind(|| assert_bars(&samples, &FULL, 8, "MJPEG"));
-        if full.is_err() {
-            assert_bars(&samples, &LIMITED, 8, "MJPEG (limited)");
-            eprintln!("MJPEG decoder output: {:?}, LIMITED range", frame.format.pixel_format);
-        } else {
-            eprintln!("MJPEG decoder output: {:?}, FULL range", frame.format.pixel_format);
-        }
+        assert_eq!(frame.format.pixel_format, PixelFormat::Mjpeg);
+        assert!(!frame.format.decoded, "Media Foundation must not decode MJPEG (spec §3.2)");
+        let mut decoder = crate::video::mjpeg::MjpegDecoder::default();
+        let samples = frame
+            .with_pixels(|jpeg, _| {
+                let decoded = decoder.decode(jpeg).expect("zune-jpeg decodes the card's frame");
+                assert_eq!((decoded.width, decoded.height), (1280, 720));
+                (0..5)
+                    .map(|bar| {
+                        let p = (360 * 1280 + 1280 * (2 * bar + 1) / 10) * 3;
+                        (decoded.ycbcr[p], decoded.ycbcr[p + 1], decoded.ycbcr[p + 2])
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .expect("frame bytes");
+        assert_bars(&samples, &FULL, 8, "MJPEG via zune-jpeg");
     }
 }

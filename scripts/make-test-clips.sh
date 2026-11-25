@@ -37,6 +37,12 @@ ffmpeg $(bars 1280 720 60 6 "scale=out_color_matrix=bt709:out_range=pc,format=yu
   -c:v mjpeg -q:v 2 \
   "$out/bars-1280x720p60-mjpeg-full.avi"
 
+# One MJPEG frame on its own, for decoder unit tests that run on any OS.
+# shellcheck disable=SC2046
+ffmpeg $(bars 1280 720 60 1 "scale=out_color_matrix=bt709:out_range=pc,format=yuvj422p") "${common[@]}" \
+  -color_range pc -frames:v 1 -c:v mjpeg -q:v 2 \
+  "$out/bars-1280x720-full.jpg"
+
 # Raw YUY2, limited range: no decoder at all, like an uncompressed USB capture.
 # shellcheck disable=SC2046
 ffmpeg $(bars 640 360 60 2 "scale=out_color_matrix=bt709:out_range=tv,format=yuyv422") "${common[@]}" \
