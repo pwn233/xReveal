@@ -42,7 +42,9 @@ impl std::fmt::Display for VideoFormat {
     }
 }
 
-/// The resolution + FPS choices a Source offers (formats xReveal can draw), largest first.
+/// The resolution + FPS choices a Source offers (formats xReveal can draw): the console's 16:9
+/// modes first, then the card's other (PC) modes, each group largest first. Odd modes such as
+/// 1920×2160 stay available without sitting at the top of the list.
 pub fn choices(formats: &[NativeFormat]) -> Vec<VideoFormat> {
     let mut out: Vec<VideoFormat> = Vec::new();
     for f in formats.iter().filter(|f| f.pixel != PixelKind::Other) {
@@ -50,7 +52,10 @@ pub fn choices(formats: &[NativeFormat]) -> Vec<VideoFormat> {
             out.push(VideoFormat { width: f.width, height: f.height, fps: f.fps });
         }
     }
-    out.sort_by(|a, b| (b.width * b.height).cmp(&(a.width * a.height)).then(b.fps.total_cmp(&a.fps)));
+    let widescreen = |c: &VideoFormat| c.width * 9 == c.height * 16;
+    out.sort_by(|a, b| {
+        widescreen(b).cmp(&widescreen(a)).then((b.width * b.height).cmp(&(a.width * a.height))).then(b.fps.total_cmp(&a.fps))
+    });
     out
 }
 
@@ -279,6 +284,15 @@ mod tests {
         let all = choices(&formats);
         assert_eq!(all.len(), 1, "one 720p60 entry, no undrawable 1080p30: {all:?}");
         assert_eq!(all[0].to_string(), "1280x720 @ 60");
+    }
+
+    #[test]
+    fn console_modes_are_listed_before_pc_modes() {
+        let all = choices(&reference_card());
+        let first_pc = all.iter().position(|c| c.width * 9 != c.height * 16).unwrap();
+        assert!(all[..first_pc].iter().all(|c| c.width * 9 == c.height * 16));
+        assert_eq!(all[0].to_string(), "2560x1440 @ 30", "largest 16:9 first");
+        assert!(all[first_pc..].iter().any(|c| c.to_string() == "2560x1600 @ 30"), "PC modes still offered");
     }
 
     #[test]

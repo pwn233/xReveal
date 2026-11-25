@@ -439,9 +439,17 @@ mod tests {
         }
         std::thread::sleep(Duration::from_millis(50));
         assert!(!dir.file().exists(), "not written while changes are still coming");
-        std::thread::sleep(Duration::from_millis(400));
-        let Loaded::Setup(saved) = load(&dir.file()) else { panic!("written after the quiet period") };
-        assert_eq!(saved.delay.av_sync_offset_ms, -3);
+        // Then written once things are quiet. Poll rather than sleep a fixed time: busy CI
+        // machines (GPU tests on the software renderer) can wake the saver thread late.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let saved = loop {
+            if let Loaded::Setup(saved) = load(&dir.file()) {
+                break saved;
+            }
+            assert!(std::time::Instant::now() < deadline, "written after the quiet period");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(saved.delay.av_sync_offset_ms, -3, "only the latest change is written");
 
         setup.delay.av_sync_offset_ms = -4;
         autosave.changed(&setup);
