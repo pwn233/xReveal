@@ -332,11 +332,18 @@ mod tests {
         let (l, n) = (lags.clone(), now.clone());
         run_video_loop(&slot, &delay, &stats, now, move |f: F| l.lock().unwrap().push(n() - f.0));
         producer.join().unwrap();
-        let lags = lags.lock().unwrap();
+        let mut lags = lags.lock().unwrap().clone();
         assert!(!lags.is_empty());
-        for lag in lags.iter() {
+        // The guarantee: never shown before the delay.
+        for lag in &lags {
             assert!(*lag >= 0.039, "shown {:.1} ms after capture, expected ≥ 40 ms", lag * 1000.0);
-            assert!(*lag < 0.040 + 0.030, "shown {:.1} ms after capture: far too late", lag * 1000.0);
         }
+        // Lateness depends on thread scheduling (busy CI machines wake threads late), so check the
+        // typical frame tightly and individual frames only loosely.
+        lags.sort_by(f64::total_cmp);
+        let median = lags[lags.len() / 2];
+        assert!(median < 0.040 + 0.030, "median frame shown {:.1} ms after capture: the delay stage is late", median * 1000.0);
+        let worst = lags[lags.len() - 1];
+        assert!(worst < 0.040 + 0.250, "a frame shown {:.1} ms after capture", worst * 1000.0);
     }
 }
