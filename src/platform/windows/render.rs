@@ -61,6 +61,9 @@ pub struct VideoPass {
     vertex_shader: ID3D11VertexShader,
     pixel_shader: ID3D11PixelShader,
     params: ID3D11Buffer,
+    // Culling off: Direct3D culls counter-clockwise triangles by default, and the fullscreen
+    // triangle's winding is counter-clockwise (Metal doesn't cull, so the shaders share it).
+    rasterizer: ID3D11RasterizerState,
 }
 
 impl VideoPass {
@@ -68,7 +71,7 @@ impl VideoPass {
         unsafe {
             let vertex_bytes = compile(s!("vs_main"), s!("vs_4_0"))?;
             let pixel_bytes = compile(s!("ps_main"), s!("ps_4_0"))?;
-            let (mut vertex_shader, mut pixel_shader, mut params) = (None, None, None);
+            let (mut vertex_shader, mut pixel_shader, mut params, mut rasterizer) = (None, None, None, None);
             device.CreateVertexShader(&vertex_bytes, None, Some(&mut vertex_shader))?;
             device.CreatePixelShader(&pixel_bytes, None, Some(&mut pixel_shader))?;
             device.CreateBuffer(
@@ -82,10 +85,20 @@ impl VideoPass {
                 None,
                 Some(&mut params),
             )?;
+            device.CreateRasterizerState(
+                &D3D11_RASTERIZER_DESC {
+                    FillMode: D3D11_FILL_SOLID,
+                    CullMode: D3D11_CULL_NONE,
+                    DepthClipEnable: true.into(),
+                    ..Default::default()
+                },
+                Some(&mut rasterizer),
+            )?;
             Ok(Self {
                 vertex_shader: vertex_shader.expect("created"),
                 pixel_shader: pixel_shader.expect("created"),
                 params: params.expect("created"),
+                rasterizer: rasterizer.expect("created"),
             })
         }
     }
@@ -112,6 +125,7 @@ impl VideoPass {
                 MinDepth: 0.0,
                 MaxDepth: 1.0,
             }]));
+            context.RSSetState(&self.rasterizer);
             context.OMSetRenderTargets(Some(&[Some(target.clone())]), None);
             context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             context.VSSetShader(&self.vertex_shader, None);
