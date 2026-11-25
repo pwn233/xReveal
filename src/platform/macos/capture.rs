@@ -9,7 +9,8 @@ use std::sync::Arc;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
+use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
+use std::sync::OnceLock;
 use objc2_av_foundation::{
     AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceFormat,
     AVCaptureDeviceInput, AVCaptureDevicePosition, AVCaptureDeviceTypeExternal, AVCaptureOutput,
@@ -17,18 +18,36 @@ use objc2_av_foundation::{
     AVMediaTypeVideo,
 };
 use objc2_core_foundation::CFRetained;
-use objc2_core_media::{CMSampleBuffer, CMVideoFormatDescriptionGetDimensions};
+use objc2_core_media::{CMClock, CMSampleBuffer, CMSyncConvertTime, CMVideoFormatDescriptionGetDimensions};
+use objc2_quartz_core::CACurrentMediaTime;
 use objc2_core_video::CVPixelBuffer;
 use objc2_foundation::{NSArray, NSDictionary, NSObject, NSObjectProtocol};
 
 use crate::video::slot::FrameSlot;
+use crate::video::timing::{Stamps, Timed};
 
 /// One captured frame, as handed to the video thread.
-pub struct PixelBuffer(pub CFRetained<CVPixelBuffer>);
+pub struct PixelBuffer {
+    pub image: CFRetained<CVPixelBuffer>,
+    pub stamps: Stamps,
+}
 
 // SAFETY: CVPixelBuffer is a reference-counted CoreFoundation object that is safe to retain,
 // release and read from any thread; the video thread only reads it.
 unsafe impl Send for PixelBuffer {}
+
+impl Timed for PixelBuffer {
+    fn stamps(&self) -> Stamps {
+        self.stamps
+    }
+}
+
+/// The session's clock, to convert sample times to host time.
+struct SessionClock(CFRetained<CMClock>);
+
+// SAFETY: CMClock is a thread-safe CoreFoundation object; it is only read (converted against).
+unsafe impl Send for SessionClock {}
+unsafe impl Sync for SessionClock {}
 
 /// The Reference card's best live mode; used when the device offers it.
 const PREFERRED: (i32, i32, f64) = (1280, 720, 60.0);
@@ -77,6 +96,12 @@ impl Capture {
                     device.setActiveVideoMinFrameDuration(duration);
                     device.setActiveVideoMaxFrameDuration(duration);
                 }
+            }
+            // Sample times are on the session's clock; keep it to convert them to host time.
+            if session.respondsToSelector(sel!(synchronizationClock))
+                && let Some(clock) = session.synchronizationClock()
+            {
+                let _ = sink.ivars().clock.set(SessionClock(CFRetained::from(&*clock)));
             }
             session.startRunning();
             if locked {
@@ -151,6 +176,7 @@ pub fn fourcc(code: u32) -> String {
 
 struct SinkIvars {
     slot: Arc<FrameSlot<PixelBuffer>>,
+    clock: OnceLock<SessionClock>,
 }
 
 define_class!(
@@ -166,8 +192,10 @@ define_class!(
         // Runs on the capture queue for every frame: only hand the frame over.
         #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
         fn capture_output(&self, _output: &AVCaptureOutput, sample_buffer: &CMSampleBuffer, _connection: &AVCaptureConnection) {
+            let arrival = CACurrentMediaTime();
             if let Some(image) = unsafe { sample_buffer.image_buffer() } {
-                self.ivars().slot.put(PixelBuffer(image));
+                let capture = self.capture_time(sample_buffer, arrival);
+                self.ivars().slot.put(PixelBuffer { image, stamps: Stamps { capture, arrival } });
             }
         }
     }
@@ -175,7 +203,21 @@ define_class!(
 
 impl VideoSink {
     fn new(slot: Arc<FrameSlot<PixelBuffer>>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(SinkIvars { slot });
+        let this = Self::alloc().set_ivars(SinkIvars { slot, clock: OnceLock::new() });
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// The sample's capture time in host seconds; the arrival time when it can't be trusted.
+    fn capture_time(&self, sample_buffer: &CMSampleBuffer, arrival: f64) -> f64 {
+        let pts = unsafe { sample_buffer.presentation_time_stamp() };
+        let seconds = match self.ivars().clock.get() {
+            Some(SessionClock(clock)) => unsafe {
+                let host = CMClock::host_time_clock();
+                CMSyncConvertTime(pts, clock, &host).seconds()
+            },
+            None => unsafe { pts.seconds() },
+        };
+        // A capture time in the future, or seconds in the past, means a clock we don't understand.
+        if seconds.is_finite() && seconds <= arrival && arrival - seconds < 2.0 { seconds } else { arrival }
     }
 }

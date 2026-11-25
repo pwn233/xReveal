@@ -7,6 +7,7 @@ use gpui_kit::*;
 use crate::app::XReveal;
 
 fn main() {
+    let _ = crate::video::LAUNCH.set(std::time::Instant::now());
     if std::env::var_os("XREVEAL_SMOKE_TEST").is_some() {
         watch_smoke_test();
     }
@@ -49,14 +50,13 @@ fn main() {
 /// CI smoke launch (docs/spec/v1.md §5): exit 0 once the video surface has presented a frame, or
 /// 1 if it hasn't within 20 s. Works with no capture card attached.
 fn watch_smoke_test() {
-    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     std::thread::spawn(|| {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(20) {
-            if crate::video::FIRST_PRESENT.load(Ordering::SeqCst) {
-                println!("smoke test: video surface presented after {:?}", started.elapsed());
+            if let Some(after_launch) = crate::video::FIRST_PRESENT.get() {
+                println!("smoke test: video surface presented {after_launch:?} after launch");
                 std::process::exit(0);
             }
             std::thread::sleep(Duration::from_millis(50));
