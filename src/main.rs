@@ -1,5 +1,6 @@
 mod app;
 mod platform;
+mod setup;
 mod source;
 mod video;
 
@@ -16,9 +17,10 @@ fn main() {
     gpui_kit::application().run(|cx| {
         gpui_kit::init(cx);
 
+        let store = setup::Store::open();
         // The monitor to go fullscreen on: the remembered one, recognised by the display's own
-        // identity, else the primary (docs/spec/v1.md §2.1). Nothing is remembered yet.
-        let display_id = fullscreen_display(None, cx);
+        // identity, else the primary (docs/spec/v1.md §2.1).
+        let display_id = fullscreen_display(store.setup.monitor.as_deref(), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(display_id, size(px(1280.), px(720.)), cx)),
             display_id,
@@ -30,7 +32,7 @@ fn main() {
 
         let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
             window.set_window_title("xReveal");
-            cx.new(|cx| XReveal::new(window, cx))
+            cx.new(|cx| XReveal::new(window, cx, store))
         })
         .expect("failed to open the main window");
 

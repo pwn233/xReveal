@@ -11,6 +11,8 @@ publish = false
 # https://gpui-kit.com
 gpui-kit = "0.11.0"
 raw-window-handle = "0.6"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.3"
 zune-core = "0.5.3"
 zune-jpeg = "0.5"
 
