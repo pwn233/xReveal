@@ -50,6 +50,15 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # No capture card on CI: the app must still open its window and present a frame through its
+      # own video surface (Direct3D 11 on WARP). Exits 0 on the first present, 1 after 20 s.
+      - name: Smoke launch (no card)
+        if: runner.os == 'Windows'
+        run: cargo run --locked
+        env:
+          XREVEAL_SMOKE_TEST: "1"
+        timeout-minutes: 5
+
       - name: Upload Windows build
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
