@@ -57,6 +57,10 @@ _Avoid_: filters, colour correction, card settings
 The settings window supplied by the capture card's maker, opened from xReveal only where the operating system offers one.
 _Avoid_: vendor dialog, properties
 
+**Settings drawer**
+The see-through panel that slides in over the live picture (it floats on top, never pushes or shrinks the picture) to change settings. Opens from the right by default; the side can be changed. Looks the same on every OS.
+_Avoid_: sidebar, settings window, overlay menu
+
 **Audio route**
 Which audio input (usually the Source's own audio) xReveal plays, and which output device it plays to.
 
