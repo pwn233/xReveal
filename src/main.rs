@@ -3,6 +3,7 @@ mod drawer;
 mod platform;
 mod setup;
 mod source;
+mod theme;
 mod video;
 
 use gpui_kit::*;
@@ -15,8 +16,9 @@ fn main() {
         watch_smoke_test();
     }
 
-    gpui_kit::application().run(|cx| {
+    gpui_kit::application().with_assets(theme::AppAssets).run(|cx| {
         gpui_kit::init(cx);
+        theme::apply(cx);
         app::bind_keys(cx);
 
         let store = setup::Store::open();
