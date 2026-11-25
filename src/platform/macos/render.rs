@@ -44,6 +44,7 @@ pub fn run(target: RenderTarget, slot: &FrameSlot<PixelBuffer>) {
     while let Some(frame) = slot.take() {
         autoreleasepool(|_| match renderer.draw(frame) {
             Ok(Some(next)) => {
+                crate::video::FIRST_PRESENT.store(true, std::sync::atomic::Ordering::SeqCst);
                 // Keep the previous frame's buffers alive until the GPU is done with them.
                 if let Some(previous) = in_flight.replace(next) {
                     previous.command_buffer.waitUntilCompleted();

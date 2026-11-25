@@ -3,13 +3,13 @@
 
 use gpui_kit::*;
 
-#[cfg(target_os = "macos")]
-use crate::platform::macos::VideoPipeline;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use crate::platform::VideoPipeline;
 
 pub struct XReveal {
     focus: FocusHandle,
     status: String,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     _video: Option<VideoPipeline>,
 }
 
@@ -18,7 +18,7 @@ impl XReveal {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let (video, status) = match VideoPipeline::start(window) {
                 Ok(video) => {
@@ -29,7 +29,7 @@ impl XReveal {
             };
             Self { focus, status, _video: video }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             Self { focus, status: "The live picture isn't implemented on this OS yet.".into() }
         }
