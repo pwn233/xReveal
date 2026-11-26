@@ -14,6 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::{Duration, Instant};
 
+use crate::audio::AudioModel;
 use crate::setup::{Accent, Corner, Density, DrawerSide, Look, StatsBox, ThemeChoice, WindowMode};
 use crate::source::{self, SourceIdentity, SourceInfo, VideoFormat};
 use crate::theme::{self, mono_family};
@@ -84,6 +85,7 @@ pub struct DrawerModel {
     pub window_mode: WindowMode,
     pub stats: StatsBox,
     pub look: Look,
+    pub audio: AudioModel,
     /// The Source's frame interval in seconds, to say how much Buffering costs.
     pub frame_interval: f64,
 }
@@ -99,6 +101,12 @@ pub enum DrawerEvent {
     WindowMode(WindowMode),
     Stats(StatsBox),
     Look(Look),
+    /// The sound input: `None` follows the card (its own audio).
+    AudioInput(Option<String>),
+    /// The sound output: `None` is the system output.
+    AudioOutput(Option<String>),
+    Volume(f32),
+    Mute(bool),
     ResetAll,
     Quit,
 }
@@ -162,7 +170,9 @@ pub mod hints {
     pub const GAMMA: &str = "Brightens or darkens the mid-tones without touching black and white";
     pub const HUE: &str = "Turns every colour around the colour wheel";
     pub const AV_SYNC: &str = "Lines sound up with the picture. Positive delays the sound, negative delays the picture.";
-    pub const AUDIO_LATER: &str = "Sound playback, input and output choice, volume and mute arrive with the audio pipeline";
+    pub const AUDIO_INPUT: &str = "Where the sound comes from. Normally the input device's own audio.";
+    pub const AUDIO_OUTPUT: &str = "Where you hear it. System output follows your computer's sound setting.";
+    pub const VOLUME: &str = "xReveal's own volume, on top of your computer's";
     pub const RESET_ALL: &str = "Puts every setting back to its default";
 }
 
@@ -191,6 +201,8 @@ pub struct SettingsDrawer {
     sliders: Sliders,
     card_select: Entity<SelectState<SearchableVec<String>>>,
     format_select: Entity<SelectState<SearchableVec<String>>>,
+    input_select: Entity<SelectState<SearchableVec<String>>>,
+    output_select: Entity<SelectState<SearchableVec<String>>>,
     /// What the Selects list, in order: OS IDs of the cards, and the Video formats of the current one.
     card_ids: Vec<String>,
     formats: Vec<VideoFormat>,
@@ -207,6 +219,7 @@ struct Sliders {
     hue: Entity<SliderState>,
     av_sync: Entity<SliderState>,
     opacity: Entity<SliderState>,
+    volume: Entity<SliderState>,
 }
 
 impl EventEmitter<DrawerEvent> for SettingsDrawer {}
@@ -226,10 +239,13 @@ impl SettingsDrawer {
             gamma: slider(cx, 50.0, 200.0, 1.0, p.adjustments.gamma * 100.0),
             hue: slider(cx, -180.0, 180.0, 1.0, p.adjustments.hue),
             av_sync: slider(cx, -500.0, 500.0, 1.0, model.delay.av_sync_offset_ms as f32),
+            volume: slider(cx, 0.0, 100.0, 1.0, model.audio.volume * 100.0),
             opacity: slider(cx, Look::OPACITY.0 * 100.0, Look::OPACITY.1 * 100.0, 1.0, model.look.opacity() * 100.0),
         };
         let card_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
         let format_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
+        let input_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
+        let output_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
 
         let mut subscriptions = Vec::new();
         let mut on_picture = |state: &Entity<SliderState>, apply: fn(&mut PictureSettings, f32)| {
@@ -252,6 +268,40 @@ impl SettingsDrawer {
             if let SliderEvent::Change(SliderValue::Single(value)) = event {
                 let delay = DelaySettings { av_sync_offset_ms: value.round() as i32, ..this.model.delay };
                 this.set_delay(delay, cx);
+            }
+        }));
+        subscriptions.push(cx.subscribe(&sliders.volume, |this: &mut Self, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(SliderValue::Single(value)) = event {
+                let volume = value.round() / 100.0;
+                if volume != this.model.audio.volume {
+                    this.model.audio.volume = volume;
+                    cx.emit(DrawerEvent::Volume(volume));
+                    cx.notify();
+                }
+            }
+        }));
+        subscriptions.push(cx.subscribe(&input_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
+            if let SelectEvent::Confirm(Some(_)) = event
+                && let Some(index) = select.read(cx).selected_index(cx)
+                && let Some(device) = this.model.audio.inputs.get(index.row)
+            {
+                // Choosing the card's own audio goes back to following the card.
+                let chosen = (this.model.audio.paired.as_ref() != Some(&device.id)).then(|| device.id.clone());
+                if chosen != this.model.audio.chosen_input {
+                    this.model.audio.chosen_input = chosen.clone();
+                    cx.emit(DrawerEvent::AudioInput(chosen));
+                }
+            }
+        }));
+        subscriptions.push(cx.subscribe(&output_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
+            if let SelectEvent::Confirm(Some(_)) = event
+                && let Some(index) = select.read(cx).selected_index(cx)
+            {
+                let chosen = index.row.checked_sub(1).and_then(|i| this.model.audio.outputs.get(i)).map(|d| d.id.clone());
+                if chosen != this.model.audio.output {
+                    this.model.audio.output = chosen.clone();
+                    cx.emit(DrawerEvent::AudioOutput(chosen));
+                }
             }
         }));
         subscriptions.push(cx.subscribe(&sliders.opacity, |this: &mut Self, _, event: &SliderEvent, cx| {
@@ -290,6 +340,8 @@ impl SettingsDrawer {
             sliders,
             card_select,
             format_select,
+            input_select,
+            output_select,
             card_ids: Vec::new(),
             formats: Vec::new(),
             _subscriptions: subscriptions,
@@ -318,6 +370,7 @@ impl SettingsDrawer {
             (&self.sliders.hue, p.adjustments.hue),
             (&self.sliders.av_sync, model.delay.av_sync_offset_ms as f32),
             (&self.sliders.opacity, model.look.opacity() * 100.0),
+            (&self.sliders.volume, model.audio.volume * 100.0),
         ];
         for (state, value) in values {
             state.update(cx, |s, cx| s.set_value(value, window, cx));
@@ -341,6 +394,28 @@ impl SettingsDrawer {
         self.format_select.update(cx, |s, cx| {
             s.set_items(SearchableVec::new(labels), window, cx);
             s.set_selected_index(format_index.map(IndexPath::new), window, cx);
+        });
+
+        // Sound inputs (the card's own audio marked) and outputs (the system output first).
+        let audio = &model.audio;
+        let input_names: Vec<String> = audio
+            .inputs
+            .iter()
+            .map(|d| if audio.paired.as_ref() == Some(&d.id) { format!("{} (the input's own audio)", d.name) } else { d.name.clone() })
+            .collect();
+        let input_index = audio.input.as_ref().and_then(|id| audio.inputs.iter().position(|d| &d.id == id));
+        self.input_select.update(cx, |s, cx| {
+            s.set_items(SearchableVec::new(input_names), window, cx);
+            s.set_selected_index(input_index.map(IndexPath::new), window, cx);
+        });
+        let output_names: Vec<String> = std::iter::once("System output".to_owned()).chain(audio.outputs.iter().map(|d| d.name.clone())).collect();
+        let output_index = match &audio.output {
+            None => Some(0),
+            Some(id) => audio.outputs.iter().position(|d| &d.id == id).map(|i| i + 1),
+        };
+        self.output_select.update(cx, |s, cx| {
+            s.set_items(SearchableVec::new(output_names), window, cx);
+            s.set_selected_index(output_index.map(IndexPath::new), window, cx);
         });
 
         self.custom_ratio = self.custom_ratio || preset_label(p.target_ratio).is_none();
@@ -665,11 +740,43 @@ impl SettingsDrawer {
         out
     }
 
-    fn audio_tab(&self) -> Vec<AnyElement> {
+    fn audio_tab(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let delay = self.model.delay;
+        let audio = &self.model.audio;
         let label = format!("{:+} ms", delay.av_sync_offset_ms);
         let warning = input_lag_warning(DelaySettings { buffering_frames: 0, ..delay }, self.model.frame_interval);
+        let input = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(setting("Input", hints::AUDIO_INPUT, Select::new(&self.input_select).placeholder("No sound input").menu_max_h(rems(18.))))
+            .children(audio.notice.clone().map(warn));
+        let output = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(setting("Output", hints::AUDIO_OUTPUT, Select::new(&self.output_select).placeholder("System output").menu_max_h(rems(18.))))
+            .children(audio.latency_hint.clone().map(warn));
+        let mute = toggles(
+            "mute",
+            &["Mute"],
+            &[audio.muted],
+            cx.listener(|this, _: &usize, _, cx| {
+                this.model.audio.muted = !this.model.audio.muted;
+                cx.emit(DrawerEvent::Mute(this.model.audio.muted));
+                cx.notify();
+            }),
+        );
+        let volume = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(slider_setting("Volume", hints::VOLUME, &self.sliders.volume, format!("{:.0}%", audio.volume * 100.0)))
+            .child(mute);
         vec![
+            input.into_any_element(),
+            output.into_any_element(),
+            volume.into_any_element(),
             div()
                 .flex()
                 .flex_col()
@@ -677,7 +784,6 @@ impl SettingsDrawer {
                 .child(slider_setting("A/V sync offset", hints::AV_SYNC, &self.sliders.av_sync, label))
                 .children(warning.map(warn))
                 .into_any_element(),
-            note(hints::AUDIO_LATER),
         ]
     }
 
@@ -756,7 +862,10 @@ impl SettingsDrawer {
                     && !self.custom_ratio
             }
             Tab::Colour => p.colour_range == d.colour_range && p.colour_space == d.colour_space && p.adjustments == d.adjustments,
-            Tab::Audio => self.model.delay.av_sync_offset_ms == 0,
+            Tab::Audio => {
+                let a = &self.model.audio;
+                self.model.delay.av_sync_offset_ms == 0 && a.volume == 1.0 && !a.muted && a.chosen_input.is_none() && a.output.is_none()
+            }
             Tab::Interface => self.model.look == Look::default() && self.model.side == DrawerSide::default(),
         }
     }
@@ -806,6 +915,11 @@ impl SettingsDrawer {
             Tab::Audio => {
                 model.delay.av_sync_offset_ms = 0;
                 events.push(DrawerEvent::Delay(model.delay));
+                model.audio.volume = 1.0;
+                model.audio.muted = false;
+                model.audio.chosen_input = None;
+                model.audio.output = None;
+                events.extend([DrawerEvent::Volume(1.0), DrawerEvent::Mute(false), DrawerEvent::AudioInput(None), DrawerEvent::AudioOutput(None)]);
             }
             Tab::Interface => {
                 model.look = Look::default();
@@ -865,7 +979,7 @@ impl Render for SettingsDrawer {
             Tab::Source => self.source_tab(cx),
             Tab::Display => self.display_tab(cx),
             Tab::Colour => self.colour_tab(cx),
-            Tab::Audio => self.audio_tab(),
+            Tab::Audio => self.audio_tab(cx),
             Tab::Interface => self.interface_tab(cx),
         };
         let header = self.header(cx);
@@ -905,10 +1019,6 @@ impl Render for SettingsDrawer {
 fn hint(text: &'static str) -> Div {
     let pal = theme::palette();
     div().w_full().text_xs().line_height(px(16.)).text_color(pal.muted).child(text)
-}
-
-fn note(text: &'static str) -> AnyElement {
-    hint(text).into_any_element()
 }
 
 fn warn(text: String) -> Div {

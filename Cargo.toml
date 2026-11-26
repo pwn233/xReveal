@@ -7,10 +7,12 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+cpal = "0.18"
 # GPUI Kit: GPUI + gpui-component + default assets behind one dependency.
 # https://gpui-kit.com
 gpui-kit = "0.11.0"
 raw-window-handle = "0.6"
+rubato = "5"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.3"
 zune-core = "0.5.3"

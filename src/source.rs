@@ -192,7 +192,6 @@ pub fn model_from_mac_model_id(model_id: &str) -> Option<(u16, u16)> {
 /// The USB serial from a macOS card's *audio* device ID, such as
 /// `"AppleUSBAudioEngine:MACROSILICON:USB2 Video:93869598:4,3"` (macOS doesn't expose the serial
 /// on the video device; the card's audio carries it, with the video product's name — #25).
-#[cfg_attr(all(target_os = "windows", not(test)), expect(dead_code, reason = "macOS device strings only"))]
 pub fn serial_from_mac_audio_id(audio_id: &str, video_name: &str) -> Option<String> {
     let parts: Vec<&str> = audio_id.split(':').collect();
     let at = parts.iter().position(|p| *p == video_name)?;

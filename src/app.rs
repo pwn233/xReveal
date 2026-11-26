@@ -87,6 +87,8 @@ pub struct XReveal {
     /// The format another app switched the card to, while it differs from xReveal's choice.
     taken_over: Option<VideoFormat>,
     _signal_watch: Option<Task<()>>,
+    /// The sound for the input on screen (docs/spec/v1.md §2.7).
+    sound: crate::audio::Sound,
     /// The Remembered setup (docs/spec/v1.md §3.7).
     store: Store,
     _subscriptions: Vec<Subscription>,
@@ -156,6 +158,7 @@ impl XReveal {
             next_retry: None,
             taken_over: None,
             _signal_watch: None,
+            sound: Default::default(),
             store,
             _subscriptions: vec![save_on_quit, on_drawer],
         };
@@ -276,6 +279,13 @@ impl XReveal {
         };
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let screen = Screen::no_card(&self.status);
+        // A dropout doubles that output's buffer, remembered for next time (docs/spec/v1.md §3.6).
+        if let Some((device, frames)) = self.sound.watch(&self.store.setup) {
+            self.store.update(|s| {
+                s.audio_buffers.insert(device, frames);
+            });
+            self.restart_sound(window, cx);
+        }
         if screen != self.screen {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(video) = &self.video {
@@ -286,6 +296,15 @@ impl XReveal {
             cx.notify();
         }
         let _ = window;
+    }
+
+    /// Plays the input on screen again with the current route (it changed, or the buffer grew).
+    fn restart_sound(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some((identity, _)) = self.video.as_ref().and_then(|v| v.current().cloned()) {
+            self.sound.start_for(Some(&identity), &self.store.setup);
+        }
+        self.refresh_drawer(window, cx);
     }
 
     /// An input chosen on the Welcome screen or the picker: it starts, with the drawer closed.
@@ -359,6 +378,12 @@ impl XReveal {
                 self.show_tip(cx);
             }
         }
+        // The sound follows the input on screen.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        match self.video.as_ref().and_then(|v| v.current().cloned()) {
+            Some((identity, _)) => self.sound.start_for(Some(&identity), &self.store.setup),
+            None => self.sound.stop(),
+        }
         self.refresh_drawer(window, cx);
     }
 
@@ -371,6 +396,7 @@ impl XReveal {
             window_mode: setup.window_mode,
             stats: setup.stats,
             look: setup.look,
+            audio: self.sound.model(setup),
             frame_interval: 1.0 / 60.0,
             ..Default::default()
         };
@@ -516,6 +542,23 @@ impl XReveal {
                     video.set_delay(delay);
                 }
                 self.store.update(|s| s.delay = delay);
+                self.sound.set_mix(&self.store.setup);
+            }
+            DrawerEvent::AudioInput(input) => {
+                self.store.update(|s| s.audio.input = input);
+                self.restart_sound(window, cx);
+            }
+            DrawerEvent::AudioOutput(output) => {
+                self.store.update(|s| s.audio.output = output);
+                self.restart_sound(window, cx);
+            }
+            DrawerEvent::Volume(volume) => {
+                self.store.update(|s| s.audio.volume = volume);
+                self.sound.set_mix(&self.store.setup);
+            }
+            DrawerEvent::Mute(muted) => {
+                self.store.update(|s| s.audio.muted = muted);
+                self.sound.set_mix(&self.store.setup);
             }
             DrawerEvent::Side(side) => {
                 self.store.update(|s| s.drawer_side = side);
@@ -554,6 +597,7 @@ impl XReveal {
         if let Some(video) = &mut self.video {
             video.forget();
         }
+        self.sound.stop();
         self.picker = PickerKind::Welcome;
         self.unplugged = false;
         self.set_drawer_open(false, window, cx);
