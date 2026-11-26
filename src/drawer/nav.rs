@@ -200,13 +200,16 @@ impl SettingsDrawer {
                     s += 1;
                 }
                 let stats = self.model.stats;
-                rows.push(row("Performance box", s, Nav::Choice { len: 2, at: stats.shown as usize, pick: |this, i, _, cx| {
-                    this.set_stats(StatsBox { shown: i == 1, ..this.model.stats }, cx);
+                // Off, then the four corners, as on the little screen.
+                let at = if stats.shown { 1 + Corner::ALL.iter().position(|c| *c == stats.corner).unwrap_or(0) } else { 0 };
+                rows.push(row("Performance box", s, Nav::Choice { len: 5, at, pick: |this, i, _, cx| {
+                    let stats = match i.checked_sub(1) {
+                        None => StatsBox { shown: false, ..this.model.stats },
+                        Some(c) => StatsBox { shown: true, corner: Corner::ALL[c], ..this.model.stats },
+                    };
+                    this.set_stats(stats, cx);
                 } }));
                 if stats.shown {
-                    rows.push(row("Corner", s, Nav::Choice { len: 4, at: Corner::ALL.iter().position(|c| *c == stats.corner).unwrap_or(0), pick: |this, i, _, cx| {
-                        this.set_stats(StatsBox { corner: Corner::ALL[i], ..this.model.stats }, cx);
-                    } }));
                     rows.push(row("Shows", s, Nav::Switches { len: 4, flip: |this, i, cx| this.set_stats(this.model.stats.flip(i), cx) }));
                 }
             }

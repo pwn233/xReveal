@@ -176,8 +176,7 @@ pub mod hints {
     pub const ACCENT: &str = "The colour that marks what's selected";
     pub const OPACITY: &str = "How much of the game shows through this panel and the performance box";
     pub const DENSITY: &str = "How tightly the settings are packed";
-    pub const STATS: &str = "Live timing over the picture. F3 shows or hides it too.";
-    pub const STATS_CORNER: &str = "It moves aside when this panel opens on the same side";
+    pub const STATS: &str = "Live timing over the picture. Click a corner to show it there, or the middle to hide it. F3 shows or hides it too.";
     pub const STATS_SHOWS: &str = "What the box lists";
     pub const RANGE: &str = "Match your console's RGB range. Blacks look grey? Choose Limited, or set your console to Full.";
     pub const SPACE: &str = "The picture's colour formula. Auto picks BT.709 for HD pictures.";
@@ -713,20 +712,9 @@ impl SettingsDrawer {
     /// The performance box: on or off, which corner, and what it lists (one section).
     fn stats_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let stats = self.model.stats;
-        let shown = chips(
-            "stats-shown",
-            &["Off", "On"],
-            stats.shown as usize,
-            cx.listener(|this, i: &usize, _, cx| this.set_stats(StatsBox { shown: *i == 1, ..this.model.stats }, cx)),
-        );
-        let mut section = div().flex().flex_col().gap(px(theme::spacing().gap)).child(setting("Performance box", hints::STATS, shown));
+        let placement = self.stats_placement(cx);
+        let mut section = div().flex().flex_col().gap(px(theme::spacing().gap)).child(setting("Performance box", hints::STATS, placement));
         if stats.shown {
-            let corner = chips(
-                "stats-corner",
-                &["Top left", "Top right", "Bottom left", "Bottom right"],
-                Corner::ALL.iter().position(|c| *c == stats.corner).unwrap_or(0),
-                cx.listener(|this, i: &usize, _, cx| this.set_stats(StatsBox { corner: Corner::ALL[*i], ..this.model.stats }, cx)),
-            );
             let shows = toggles(
                 "stats-shows",
                 &["Latency", "Frame rate", "Dropped frames", "Video format"],
@@ -734,9 +722,68 @@ impl SettingsDrawer {
                 nav::switch_cursor("Shows"),
                 cx.listener(|this, i: &usize, _, cx| this.set_stats(this.model.stats.flip(*i), cx)),
             );
-            section = section.child(setting("Corner", hints::STATS_CORNER, corner)).child(setting("Shows", hints::STATS_SHOWS, shows));
+            section = section.child(setting("Shows", hints::STATS_SHOWS, shows));
         }
         section.into_any_element()
+    }
+
+    /// Where the performance box goes, on a little screen: a tile in each corner, and an "off"
+    /// mark in the middle. The chosen tile holds a miniature of the box.
+    fn stats_placement(&self, cx: &mut Context<Self>) -> AnyElement {
+        let pal = theme::palette();
+        let stats = self.model.stats;
+        let tile = |corner: Corner| {
+            let chosen = stats.shown && stats.corner == corner;
+            let miniature = chosen.then(|| {
+                div().size_full().p(px(6.)).flex().flex_col().gap(px(3.)).children(
+                    [0.9, 0.7, 0.8].map(|w| div().h(px(3.)).w(relative(w)).rounded(px(2.)).bg(pal.accent)),
+                )
+            });
+            div()
+                .id(("stats-corner", Corner::ALL.iter().position(|c| *c == corner).unwrap_or(0)))
+                .absolute()
+                .when(corner.is_left(), |d| d.left(px(8.)))
+                .when(!corner.is_left(), |d| d.right(px(8.)))
+                .when(corner.is_top(), |d| d.top(px(8.)))
+                .when(!corner.is_top(), |d| d.bottom(px(8.)))
+                .w(px(76.))
+                .h(px(40.))
+                .rounded(px(6.))
+                .border_1()
+                .cursor_pointer()
+                .when(chosen, |d| d.bg(pal.accent_fill).border_color(pal.accent))
+                .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line).hover(|d| d.bg(pal.raised_hover).border_color(pal.accent_line)))
+                .children(miniature)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_stats(StatsBox { shown: true, corner, ..this.model.stats }, cx)))
+        };
+        let off = div()
+            .id("stats-off")
+            .absolute()
+            .top(relative(0.5))
+            .left(relative(0.5))
+            .mt(px(-18.))
+            .ml(px(-18.))
+            .size(px(36.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(if stats.shown { pal.muted } else { pal.danger })
+            .hover(|d| d.bg(pal.wash).text_color(if stats.shown { pal.secondary } else { pal.danger }))
+            .child(Icon::new(IconName::Ban).size_6())
+            .on_click(cx.listener(|this, _, _, cx| this.set_stats(StatsBox { shown: false, ..this.model.stats }, cx)));
+        div()
+            .relative()
+            .w_full()
+            .h(px(150.))
+            .rounded(px(10.))
+            .bg(pal.deep)
+            .border_1()
+            .border_color(if stats.shown { pal.line } else { pal.danger.opacity(0.5) })
+            .children(Corner::ALL.map(tile))
+            .child(off)
+            .into_any_element()
     }
 
     fn set_stats(&mut self, stats: StatsBox, cx: &mut Context<Self>) {
