@@ -40,9 +40,15 @@ settings window, and the sound devices with the pairing. It prints the report an
 
 ## Make a release
 
-Push a tag matching the version in `Cargo.toml`, e.g. `git tag v0.1.0 && git push origin v0.1.0`. CI
-builds the `.dmg`, the macOS `.zip`, the Windows installer and the Windows `.zip`
-([`.github/workflows/release.yml`](.github/workflows/release.yml)), and attaches them to a GitHub
+1. Push a tag matching the version in `Cargo.toml`, e.g. `git tag v1.0.0 && git push origin v1.0.0`.
+   Pushing a tag publishes nothing on its own.
+2. In GitHub, open Actions › Release › Run workflow. Enter the tag (`v1.0.0`) and confirm with
+   `release@` and the tag (`release@v1.0.0`). From a terminal:
+   `gh workflow run release.yml -f tag=v1.0.0 -f confirm=release@v1.0.0`.
+
+The workflow checks the tag exists, isn't released yet and matches `Cargo.toml`. It then builds the
+`.dmg`, the macOS `.zip`, the Windows installer and the Windows `.zip`
+([`.github/workflows/release.yml`](.github/workflows/release.yml)) and attaches them to a GitHub
 Release with generated notes. Locally: `scripts/package-macos.sh` or `scripts/package-windows.ps1`
 (output in `dist/`).
 
