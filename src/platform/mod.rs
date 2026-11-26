@@ -30,16 +30,18 @@ pub fn screen_name(display: u64) -> Option<String> {
     }
 }
 
-/// Moves `window` to the middle of screen `display`, keeping its size.
-pub fn move_window(window: &gpui_kit::Window, display: u64) {
+/// Moves `window` to the middle of screen `display`, keeping its size. Call it outside a GPUI
+/// update: on Windows the move happens at once, and GPUI can only take note of it (its observers,
+/// the drawer and overlay windows following) when it isn't in the middle of one.
+pub fn move_window(window: raw_window_handle::RawWindowHandle, display: u64) {
     #[cfg(target_os = "macos")]
-    if let Some(raw_window_handle::RawWindowHandle::AppKit(appkit)) = raw_window(window) {
+    if let raw_window_handle::RawWindowHandle::AppKit(appkit) = window {
         // SAFETY: GPUI's raw window handle on macOS is a valid NSView for the window's lifetime.
         let view: &objc2_app_kit::NSView = unsafe { appkit.ns_view.cast().as_ref() };
         macos::screens::move_window(view, display);
     }
     #[cfg(target_os = "windows")]
-    if let Some(raw_window_handle::RawWindowHandle::Win32(win32)) = raw_window(window) {
+    if let raw_window_handle::RawWindowHandle::Win32(win32) = window {
         windows::screens::move_window(::windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _), display);
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
