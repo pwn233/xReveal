@@ -410,17 +410,21 @@ pub fn open_file(path: &std::path::Path) -> Result<(IMFSourceReader, StreamForma
     }
 }
 
-/// Reads the next frame synchronously; `None` at the end of the stream.
+/// Reads the next frame synchronously; `None` at the end of the stream. Follows a change of
+/// format mid-stream into `format`, the same way the capture callback does (docs/spec/v1.md §2.8).
 #[cfg(test)]
-pub fn read_frame(reader: &IMFSourceReader, format: StreamFormat) -> Result<Option<Frame>> {
+pub fn read_frame(reader: &IMFSourceReader, format: &mut StreamFormat) -> Result<Option<Frame>> {
     unsafe {
         loop {
             let mut flags = 0u32;
             let mut sample = None;
             reader.ReadSample(FIRST_VIDEO_STREAM, 0, None, Some(&mut flags), None, Some(&mut sample))?;
+            if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
+                *format = current_format(reader, format.decoded)?;
+            }
             if let Some(sample) = sample {
                 let now = host_seconds();
-                return Ok(Some(Frame { sample, format, stamps: Stamps { capture: now, arrival: now } }));
+                return Ok(Some(Frame { sample, format: *format, stamps: Stamps { capture: now, arrival: now } }));
             }
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 return Ok(None);
@@ -572,8 +576,23 @@ mod tests {
 
     fn first_frame(name: &str) -> Frame {
         startup().expect("Media Foundation starts");
-        let (reader, format) = open_file(&clip(name)).expect("clip opens");
-        read_frame(&reader, format).expect("frame reads").expect("clip has a frame")
+        let (reader, mut format) = open_file(&clip(name)).expect("clip opens");
+        read_frame(&reader, &mut format).expect("frame reads").expect("clip has a frame")
+    }
+
+    #[test]
+    fn a_size_change_mid_stream_is_followed_silently() {
+        startup().expect("Media Foundation starts");
+        let (reader, mut format) = open_file(&clip("size-change-h264-limited.ts")).expect("clip opens");
+        let mut sizes = Vec::new();
+        while let Some(frame) = read_frame(&reader, &mut format).expect("frame reads") {
+            let size = (frame.format.width, frame.format.height);
+            // Every frame reads correctly at its own size, before and after the change.
+            assert_bars(&bar_samples(&frame), &LIMITED, 6, &format!("{}x{}", size.0, size.1));
+            sizes.push(size);
+        }
+        assert_eq!(sizes.first(), Some(&(960, 544)), "{sizes:?}");
+        assert_eq!(sizes.last(), Some(&(1280, 720)), "{sizes:?}");
     }
 
     #[test]
