@@ -168,7 +168,7 @@ pub mod hints {
     pub const MONITOR: &str = "Which screen xReveal shows on. A window moves there; Fullscreen covers it.";
     pub const WINDOW_MODE: &str = "Fullscreen covers the whole screen with no border. F11 switches between them.";
     pub const TARGET_RATIO: &str = "The shape of the picture on your screen. Pick your monitor's shape, like 21:9 for ultrawide, to fill it.";
-    pub const FILL_MODE: &str = "How the console's 16:9 picture fits that shape: Fit adds black bars, Stretch widens everything, Crop zooms in, Smart stretch keeps the middle natural.";
+    pub const FILL_MODE: &str = "How the console's 16:9 picture fits that shape";
     pub const STRENGTH: &str = "0% looks just like Stretch. Higher keeps the centre more natural and stretches the edges more.";
     pub const CUSTOM_RATIO: &str = "Width ÷ height of your own shape, like 2.39 for a cinema ratio";
     pub const DRAWER_SIDE: &str = "Which side this panel opens from";
@@ -633,9 +633,14 @@ impl SettingsDrawer {
             out.push(slider_setting("Custom ratio", hints::CUSTOM_RATIO, &self.sliders.custom_ratio, format!("{:.2}", p.target_ratio.0)));
         }
         let modes = [FillMode::Fit, FillMode::Stretch, FillMode::Crop, FillMode::SmartStretch];
-        let fill = chips(
+        let fill = radios(
             "fill",
-            &["Fit", "Stretch", "Crop", "Smart stretch"],
+            &[
+                ("Fit", "Black bars, nothing stretched"),
+                ("Stretch", "Fills the shape, everything widened"),
+                ("Crop", "Fills the shape, the edges cut off"),
+                ("Smart stretch", "Fills the shape, the middle stays natural"),
+            ],
             modes.iter().position(|m| *m == p.fill_mode).unwrap_or(0),
             cx.listener(move |this, i: &usize, _, cx| this.set_picture(PictureSettings { fill_mode: modes[*i], ..this.model.picture }, cx)),
         );
@@ -1234,6 +1239,47 @@ fn toggles(id: &'static str, labels: &[&str], on: &[bool], cursor: Option<usize>
             .when(cursor == Some(i), |d| d.border_color(pal.text))
             .child(label.to_string())
             .on_click(move |_, window, cx| on_toggle(&i, window, cx))
+    }))
+}
+
+/// One choice out of a few, as radio rows: a label and a short line saying what it does.
+fn radios(id: &'static str, items: &[(&str, &str)], selected: usize, on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
+    let pal = theme::palette();
+    let on_pick = std::rc::Rc::new(on_pick);
+    div().w_full().flex().flex_col().children(items.iter().enumerate().map(|(i, (label, detail))| {
+        let chosen = i == selected;
+        let on_pick = on_pick.clone();
+        let dot = div()
+            .flex_none()
+            .size(px(16.))
+            .rounded_full()
+            .border_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(chosen, |d| d.border_color(pal.accent).child(div().size(px(8.)).rounded_full().bg(pal.accent)))
+            .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line));
+        div()
+            .id((id, i))
+            .py(px(6.))
+            .px_2()
+            .mx(px(-8.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap_3()
+            .cursor_pointer()
+            .hover(|d| d.bg(pal.wash))
+            .child(dot)
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().text_sm().text_color(if chosen { pal.text } else { pal.secondary }).child(label.to_string()))
+                    .child(div().text_xs().text_color(pal.muted).child(detail.to_string())),
+            )
+            .on_click(move |_, window, cx| on_pick(&i, window, cx))
     }))
 }
 
