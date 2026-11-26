@@ -37,7 +37,8 @@ pub struct Setup {
     pub audio: AudioRoute,
     /// The monitor xReveal was last on (and goes fullscreen on), by the display's own identity.
     pub monitor: Option<String>,
-    /// A normal window (the default) or borderless fullscreen on `monitor` (docs/spec/v1.md §2.2).
+    /// A normal window (the default), a borderless one centred on `monitor`, or borderless
+    /// fullscreen on it (docs/spec/v1.md §2.2).
     pub window_mode: WindowMode,
     /// Where the window last was on `monitor` in Windowed mode.
     pub window: Option<WindowPlacement>,
@@ -105,8 +106,27 @@ pub enum WindowMode {
     /// A normal window with a title bar: close, minimise, maximise, resize.
     #[default]
     Windowed,
+    /// The window's size with no title bar or border, centred on the monitor (Windows only for now).
+    Borderless,
     /// Borderless, covering the whole monitor.
     Fullscreen,
+}
+
+impl WindowMode {
+    /// The modes the Window setting offers, in order.
+    pub const OFFERED: &'static [WindowMode] = if cfg!(target_os = "windows") {
+        &[WindowMode::Windowed, WindowMode::Borderless, WindowMode::Fullscreen]
+    } else {
+        &[WindowMode::Windowed, WindowMode::Fullscreen]
+    };
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WindowMode::Windowed => "Windowed",
+            WindowMode::Borderless => "Borderless",
+            WindowMode::Fullscreen => "Fullscreen",
+        }
+    }
 }
 
 /// How xReveal's own panels look (the Interface tab). The picture is never affected.
@@ -566,6 +586,9 @@ mod tests {
         let Loaded::Setup(setup) = load(&dir.file()) else { panic!("should load") };
         assert_eq!(setup.window_mode, WindowMode::Fullscreen);
         assert!(!setup.window.unwrap().usable());
+        std::fs::write(dir.file(), "window-mode = \"borderless\"\n").unwrap();
+        let Loaded::Setup(setup) = load(&dir.file()) else { panic!("should load") };
+        assert_eq!(setup.window_mode, WindowMode::Borderless);
         assert!(!setup.stats.shown && setup.stats.latency, "the performance box starts hidden, listing everything");
         assert_eq!(setup.look, Look::default(), "graphite dark by default");
         let only_fps = StatsBox { latency: false, frames: false, format: false, ..StatsBox::default() };

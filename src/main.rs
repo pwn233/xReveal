@@ -43,7 +43,7 @@ fn main() {
             Some(p) => WindowBounds::Windowed(Bounds { origin: point(px(p.x), px(p.y)), size: size(px(p.width), px(p.height)) }),
             None => WindowBounds::centered(display_id, size(px(1280.), px(720.)), cx),
         };
-        let fullscreen = store.setup.window_mode == setup::WindowMode::Fullscreen;
+        let mode = store.setup.window_mode;
         let options = WindowOptions {
             window_bounds: Some(window_bounds),
             display_id,
@@ -68,10 +68,12 @@ fn main() {
                 gpui_kit::base::Root::update(window, cx, |root, _, _| {
                     root.style().background = Some(transparent_black().into());
                 });
-                // Fullscreen, if that's the remembered Window mode. Wait for the first frame: the
-                // window has to be on screen first.
-                if fullscreen {
-                    window.on_next_frame(|window, _| app::toggle_borderless(window));
+                // Fullscreen or Borderless, if that's the remembered Window mode. Wait for the first
+                // frame: the window has to be on screen first.
+                match mode {
+                    setup::WindowMode::Fullscreen => window.on_next_frame(|window, _| app::toggle_borderless(window)),
+                    setup::WindowMode::Borderless => window.on_next_frame(|window, cx| app::set_borderless(window, true, None, std::time::Duration::ZERO, cx)),
+                    setup::WindowMode::Windowed => {}
                 }
             })
             .expect("the main window was just opened");

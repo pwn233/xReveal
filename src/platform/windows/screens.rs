@@ -41,6 +41,59 @@ pub fn move_window(hwnd: HWND, monitor: u64) {
     }
 }
 
+/// Borderless (docs/spec/v1.md §2.2): takes window `hwnd`'s title bar and border away, keeping its
+/// content's size, and centres it on `monitor` (else the one it's on), shrunk to fit. With
+/// `borderless` false, gives them back around the same content. Synchronously: call it outside a
+/// GPUI update, so GPUI handles the resize as it happens.
+pub fn set_borderless(hwnd: HWND, borderless: bool, monitor: Option<u64>) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{ClientToScreen, MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+    use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW, IsZoomed, SW_RESTORE, SWP_FRAMECHANGED, SetWindowLongPtrW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+        WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+    };
+    // A normal window's frame: GPUI's main window is a standard overlapped window.
+    let frame = (WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0 as isize;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        if !borderless && style & frame == frame {
+            return;
+        }
+        if IsZoomed(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let (mut origin, mut client) = (POINT::default(), RECT::default());
+        if !ClientToScreen(hwnd, &mut origin).as_bool() || GetClientRect(hwnd, &mut client).is_err() {
+            return;
+        }
+        let mut rect = RECT { left: origin.x, top: origin.y, right: origin.x + client.right, bottom: origin.y + client.bottom };
+        let style = if borderless { style & !frame } else { style | frame };
+        let on = monitor.unwrap_or(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as u64);
+        if borderless {
+            // Centred on the whole monitor, as near as its size allows.
+            if let Some(info) = info(on) {
+                let screen = info.monitorInfo.rcMonitor;
+                let width = (rect.right - rect.left).min(screen.right - screen.left);
+                let height = (rect.bottom - rect.top).min(screen.bottom - screen.top);
+                let (x, y) = (screen.left + (screen.right - screen.left - width) / 2, screen.top + (screen.bottom - screen.top - height) / 2);
+                rect = RECT { left: x, top: y, right: x + width, bottom: y + height };
+            }
+        } else {
+            // The frame around the same content, its title bar kept on the screen.
+            let exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let _ = AdjustWindowRectExForDpi(&mut rect, WINDOW_STYLE(style as u32), false, WINDOW_EX_STYLE(exstyle as u32), GetDpiForWindow(hwnd));
+            if let Some(info) = info(on) {
+                let below = (info.monitorInfo.rcWork.top - rect.top).max(0);
+                rect.top += below;
+                rect.bottom += below;
+            }
+        }
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+        let _ = SetWindowPos(hwnd, None, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+}
+
 /// Turns `overlay` into a layer over `owner` (xReveal's overlays on Windows): owned by it, so it
 /// stays just above it and minimises with it, not over other apps; never takes focus; and lets
 /// every click and mouse move through to `owner` underneath.
