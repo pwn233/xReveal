@@ -947,7 +947,15 @@ impl XReveal {
         if self.drawer_in_own_window {
             match open {
                 true if self.drawer_window.is_none() => self.open_drawer_window(window, cx),
-                false => self.close_drawer_window(cx),
+                false => {
+                    let had_keys = self.drawer_window.as_ref().is_some_and(|(handle, _)| handle.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false));
+                    self.close_drawer_window(cx);
+                    // The keys come back here at once: left with the drawer's window while it slides
+                    // out, the next Tab would be lost, and Windows may give them to another app after.
+                    if had_keys && let Some(main) = crate::platform::window_handle(window) {
+                        cx.spawn(async move |_, _| crate::platform::activate(main)).detach();
+                    }
+                }
                 _ => {}
             }
         }

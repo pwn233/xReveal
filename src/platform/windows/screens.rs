@@ -41,6 +41,14 @@ pub fn move_window(hwnd: HWND, monitor: u64) {
     }
 }
 
+/// Makes `hwnd` (a window of this thread) the active one, so it takes the keys. Synchronously:
+/// call it outside a GPUI update, so GPUI sees the change.
+pub fn activate(hwnd: HWND) {
+    unsafe {
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow(hwnd);
+    }
+}
+
 /// Turns `overlay` into a layer over `owner` (xReveal's overlays on Windows): owned by it, so it
 /// stays just above it and minimises with it, not over other apps; never takes focus; and lets
 /// every click and mouse move through to `owner` underneath.
