@@ -50,4 +50,18 @@ ffmpeg $(bars 640 360 60 2 "scale=out_color_matrix=bt709:out_range=tv,format=yuy
   -c:v rawvideo -pix_fmt yuyv422 -vtag YUY2 \
   "$out/bars-640x360p60-yuy2-limited.avi"
 
+# A mid-stream size change (docs/spec/v1.md §2.8): H.264 in MPEG-TS, which carries a new picture
+# size in-band (MP4 and AVI can't). Three frames at 960x544, then three at 1280x720; both are whole
+# macroblocks, so the decoder reports them unpadded.
+tmp="$(mktemp -d)"
+for size in "960 544" "1280 720"; do
+  set -- $size
+  # shellcheck disable=SC2046
+  ffmpeg $(bars "$1" "$2" 60 3 "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p") "${common[@]}" \
+    -color_range tv -c:v libx264 -preset veryslow -crf 4 -g 3 -bf 0 -x264-params threads=1 \
+    -f mpegts "$tmp/$1x$2.ts"
+done
+ffmpeg -y -loglevel error -i "concat:$tmp/960x544.ts|$tmp/1280x720.ts" -c copy -f mpegts "$out/size-change-h264-limited.ts"
+rm -rf "$tmp"
+
 ls -l "$out"
