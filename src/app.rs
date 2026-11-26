@@ -532,6 +532,9 @@ impl XReveal {
             is_minimizable: false,
             display_id: window.display(cx).map(|d| d.id()),
             window_background: WindowBackgroundAppearance::Transparent,
+            // Full frame rate while sliding out, after the keys have gone back to the main window:
+            // GPUI otherwise draws a window without focus at 30 fps.
+            inactive_frame_interval: None,
             ..Default::default()
         };
         let model = self.drawer_model(cx);
@@ -573,6 +576,9 @@ impl XReveal {
             is_minimizable: false,
             display_id: window.display(cx).map(|d| d.id()),
             window_background: WindowBackgroundAppearance::Transparent,
+            // It never has focus; at GPUI's 30 fps for such windows, the edge handle and performance box
+            // would lag the drawer.
+            inactive_frame_interval: None,
             ..Default::default()
         };
         let Some(owner) = crate::platform::window_handle(window) else { return };
