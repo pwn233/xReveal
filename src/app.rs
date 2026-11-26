@@ -49,6 +49,11 @@ pub fn toggle_borderless(window: &Window) {
 
 /// How close to the drawer's edge the pointer must be for the handle to appear.
 const EDGE: f32 = 48.0;
+/// The edge handle (assets/notch): its body is 24 wide and 96 tall; concave curves 10 tall above and
+/// below flow it out of the edge, so the whole shape is 25 × 116 with 1 px over the edge.
+const NOTCH_BODY: f32 = 24.0;
+const NOTCH_FILLET: f32 = 10.0;
+const NOTCH_HEIGHT: f32 = 96.0 + 2.0 * NOTCH_FILLET;
 /// How long the one-time colour tip stays up.
 const TIP_FOR: Duration = Duration::from_secs(12);
 
@@ -681,12 +686,8 @@ impl Overlays {
             if self.handle.moving() || self.slide.moving() {
                 window.request_animation_frame();
             }
-            // Its body is 24 wide and 96 tall; concave curves 10 tall above and below flow it out of
-            // the edge, so the whole shape (assets/notch) is 25 × 116 with 1 px over the edge.
-            const BODY: f32 = 24.0;
-            const FILLET: f32 = 10.0;
             let drawer_edge = if self.slide.visible() { drawer::width() * self.slide.shown() } else { 0.0 };
-            let inset = px(drawer_edge - BODY * (1.0 - self.handle.shown()) - 1.0);
+            let inset = px(drawer_edge - NOTCH_BODY * (1.0 - self.handle.shown()) - 1.0);
             // Towards the inside to open; back towards the edge to close.
             let points_right = (side == DrawerSide::Left) != self.drawer_open;
             let (fill, line) = match side {
@@ -695,9 +696,9 @@ impl Overlays {
             };
             let chevron = div()
                 .absolute()
-                .top(px(FILLET))
-                .bottom(px(FILLET))
-                .w(px(BODY))
+                .top(px(NOTCH_FILLET))
+                .bottom(px(NOTCH_FILLET))
+                .w(px(NOTCH_BODY))
                 .when(side == DrawerSide::Right, |d| d.left_0())
                 .when(side == DrawerSide::Left, |d| d.right_0())
                 .flex()
@@ -711,9 +712,9 @@ impl Overlays {
             let h = div()
                 .absolute()
                 .top(relative(0.5))
-                .mt(px(-(48.0 + FILLET)))
-                .w(px(BODY + 1.0))
-                .h(px(96.0 + 2.0 * FILLET))
+                .mt(px(-NOTCH_HEIGHT / 2.0))
+                .w(px(NOTCH_BODY + 1.0))
+                .h(px(NOTCH_HEIGHT))
                 .cursor_pointer()
                 // Exactly the drawer's panel, with the outline running on into the drawer's edge.
                 .child(svg().path(fill).absolute().inset_0().size_full().text_color(pal.panel))
@@ -1283,10 +1284,26 @@ impl Render for DrawerWindow {
             window.request_animation_frame();
         }
         let offset = self.slide.offset();
-        let shell = div().absolute().top_0().bottom_0().w(px(drawer::width())).border_color(pal.line).child(self.drawer.clone());
+        // The inner edge's line, open where the notch joins it: the notch is drawn in the overlay
+        // window, under this one, and its outline runs on into the line from either end.
+        let edge = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(1.))
+            .flex()
+            .flex_col()
+            .child(div().flex_1().bg(pal.line))
+            .child(div().h(px(NOTCH_HEIGHT)))
+            .child(div().flex_1().bg(pal.line));
+        let edge = match self.side {
+            DrawerSide::Right => edge.left_0(),
+            DrawerSide::Left => edge.right_0(),
+        };
+        let shell = div().absolute().top_0().bottom_0().w(px(drawer::width())).child(self.drawer.clone()).child(edge);
         let shell = match self.side {
-            DrawerSide::Right => shell.right(offset).border_l_1(),
-            DrawerSide::Left => shell.left(offset).border_r_1(),
+            DrawerSide::Right => shell.right(offset).pl(px(1.)),
+            DrawerSide::Left => shell.left(offset).pr(px(1.)),
         };
         div()
             .size_full()
