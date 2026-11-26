@@ -8,7 +8,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_av_foundation::{
-    AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceFormat,
+    AVError, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceFormat,
     AVCaptureDeviceInput, AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
     AVCaptureDeviceTypeExternal, AVCaptureOutput, AVCaptureSession, AVCaptureVideoDataOutput,
     AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeAudio, AVMediaTypeVideo,
@@ -20,6 +20,7 @@ use objc2_foundation::{NSArray, NSDictionary, NSObject, NSObjectProtocol, NSStri
 use objc2_quartz_core::CACurrentMediaTime;
 
 use crate::source::{self, NativeFormat, PixelKind, SourceIdentity, SourceInfo};
+use crate::video::signal::OpenError;
 use crate::video::slot::FrameSlot;
 use crate::video::timing::{Stamps, Timed};
 
@@ -112,6 +113,7 @@ fn pixel_kind(subtype: u32) -> PixelKind {
 
 pub struct Capture {
     session: Retained<AVCaptureSession>,
+    device: Retained<AVCaptureDevice>,
     // Kept alive for as long as the session runs: the output holds its delegate weakly.
     _output: Retained<AVCaptureVideoDataOutput>,
     _sink: Retained<VideoSink>,
@@ -121,10 +123,12 @@ pub struct Capture {
 
 impl Capture {
     /// Opens the device with OS ID `os_id` at exactly `native` and starts delivering frames.
-    pub fn start(slot: Arc<FrameSlot<PixelBuffer>>, os_id: &str, native: NativeFormat) -> Result<Self, String> {
+    pub fn start(slot: Arc<FrameSlot<PixelBuffer>>, os_id: &str, native: NativeFormat) -> Result<Self, OpenError> {
         unsafe {
             let device = AVCaptureDevice::deviceWithUniqueID(&NSString::from_str(os_id))
-                .ok_or("The capture card is no longer connected.")?;
+                .ok_or(OpenError::Failed("That input is no longer connected.".into()))?;
+            let name = device.localizedName();
+            let busy = || OpenError::Busy(format!("{name} is being used by another app (OBS, Discord, a browser…). Close it to continue."));
             let chosen = device.formats().iter().find_map(|format| {
                 let (w, h) = dimensions(&format);
                 let same_kind = pixel_kind(format.formatDescription().media_sub_type()) == native.pixel;
@@ -135,10 +139,16 @@ impl Capture {
             let session = AVCaptureSession::new();
             session.beginConfiguration();
 
-            let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device)
-                .map_err(|e| format!("Couldn't open {}: {}", device.localizedName(), e.localizedDescription()))?;
+            let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device).map_err(|e| {
+                let code = e.code();
+                if code == AVError::DeviceInUseByAnotherApplication.0 || code == AVError::DeviceAlreadyUsedByAnotherSession.0 {
+                    busy()
+                } else {
+                    OpenError::Failed(format!("Couldn't open {name}: {}", e.localizedDescription()))
+                }
+            })?;
             if !session.canAddInput(&input) {
-                return Err(format!("{} can't be used right now.", device.localizedName()));
+                return Err(if device.isInUseByAnotherApplication() { busy() } else { OpenError::Failed(format!("{name} can't be used right now.")) });
             }
             session.addInput(&input);
 
@@ -183,13 +193,29 @@ impl Capture {
                 fourcc(active.formatDescription().media_sub_type())
             );
 
-            Ok(Self { session, _output: output, _sink: sink, _queue: queue, description })
+            Ok(Self { session, device, _output: output, _sink: sink, _queue: queue, description })
         }
     }
 
     pub fn stop(&self) {
         unsafe { self.session.stopRunning() };
     }
+
+    /// The format the card is running at now: another app can change it, because macOS shares
+    /// cards and the last app to set a format wins (docs/spec/v1.md §2.8).
+    pub fn running_format(&self) -> (u32, u32, f64) {
+        unsafe {
+            let (w, h) = dimensions(&self.device.activeFormat());
+            let duration = self.device.activeVideoMinFrameDuration().seconds();
+            let fps = if duration > 0.0 { ((1.0 / duration) * 100.0).round() / 100.0 } else { 0.0 };
+            (w as u32, h as u32, fps)
+        }
+    }
+}
+
+/// Whether the device with OS ID `os_id` is plugged in.
+pub fn is_connected(os_id: &str) -> bool {
+    unsafe { AVCaptureDevice::deviceWithUniqueID(&NSString::from_str(os_id)).is_some_and(|d| d.isConnected()) }
 }
 
 /// The frame duration for `fps` if `format` supports that rate.

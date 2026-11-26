@@ -7,11 +7,13 @@ mod surface;
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::source::{self, LaunchPick, SourceIdentity, SourceInfo, VideoFormat};
 use crate::video::picture::PictureSettings;
+use crate::video::signal::{Observed, OpenError};
 use crate::video::slot::FrameSlot;
 use crate::video::timing::{DelaySettings, Summary};
 use crate::video::{VideoShared, lock};
@@ -25,6 +27,11 @@ pub struct VideoPipeline {
     sources: Vec<SourceInfo>,
     /// The Source and Video format on screen.
     current: Option<(SourceIdentity, VideoFormat)>,
+    /// The Source and Video format xReveal is trying to show, even while it can't (busy, unplugged).
+    wanted: Option<(SourceIdentity, VideoFormat)>,
+    open_error: Option<OpenError>,
+    /// When the current capture started.
+    started: Option<Instant>,
     slot: Arc<FrameSlot<PixelBuffer>>,
     shared: Arc<VideoShared>,
     video_thread: Option<JoinHandle<()>>,
@@ -52,7 +59,10 @@ impl VideoPipeline {
         let mut pipeline = Self {
             capture: None,
             current: None,
-            status: "No capture card found.".into(),
+            wanted: None,
+            open_error: None,
+            started: None,
+            status: "No input found.".into(),
             sources: capture::list_sources(),
             slot,
             shared,
@@ -86,7 +96,6 @@ impl VideoPipeline {
     }
 
     /// Lists the capture devices again (e.g. after a card is plugged in).
-    #[expect(dead_code, reason = "called by the pickers (their own slices)")]
     pub fn refresh_sources(&mut self) {
         self.sources = capture::list_sources();
     }
@@ -94,18 +103,63 @@ impl VideoPipeline {
     /// Shows Source `os_id` at `choice`, replacing the current capture. The video surface stays;
     /// the picture restarts briefly (docs/spec/v1.md §2.3).
     pub fn switch_to(&mut self, os_id: &str, choice: VideoFormat) -> Result<(), String> {
-        let info = self.sources.iter().find(|s| s.identity.os_id == os_id).ok_or("That capture card isn't connected.")?;
+        let info = self.sources.iter().find(|s| s.identity.os_id == os_id).ok_or("That input isn't connected.")?;
         let native = source::best_native(&info.formats, choice).ok_or(format!("{} doesn't offer {choice}.", info.identity.name))?;
         let identity = info.identity.clone();
-        if let Some(old) = self.capture.take() {
-            old.stop();
-        }
-        let capture = Capture::start(self.slot.clone(), os_id, native)?;
+        self.wanted = Some((identity.clone(), choice));
+        self.release();
+        let capture = Capture::start(self.slot.clone(), os_id, native).inspect_err(|e| self.open_error = Some(e.clone())).map_err(|e| e.message().to_owned())?;
+        self.open_error = None;
         self.current = Some((identity, choice));
+        self.started = Some(Instant::now());
         self.status = capture.description.clone();
         self.capture = Some(capture);
         Ok(())
     }
+
+    /// Stops the capture (the card is gone); the Source stays wanted.
+    pub fn release(&mut self) {
+        if let Some(old) = self.capture.take() {
+            old.stop();
+        }
+        self.current = None;
+        self.started = None;
+    }
+
+    /// Opens the wanted Source again (it came back, or is no longer busy).
+    pub fn retry(&mut self) -> Result<(), String> {
+        let (identity, choice) = self.wanted.clone().ok_or("Nothing to show.")?;
+        self.refresh_sources();
+        self.switch_to(&identity.os_id, choice)
+    }
+
+    /// The Source xReveal is trying to show, even while it can't.
+    pub fn wanted(&self) -> Option<&(SourceIdentity, VideoFormat)> {
+        self.wanted.as_ref()
+    }
+
+    /// What can be known for certain about the wanted Source (docs/spec/v1.md §2.8).
+    pub fn observe(&self) -> Option<Observed> {
+        let (identity, _) = self.wanted.as_ref()?;
+        let started = self.started;
+        Some(Observed {
+            connected: capture::is_connected(&identity.os_id),
+            busy: matches!(self.open_error, Some(OpenError::Busy(_))),
+            since_start: started.map_or_else(Default::default, |t| t.elapsed()),
+            since_frame: self.slot.last_put().filter(|t| started.is_some_and(|s| *t >= s)).map(|t| t.elapsed()),
+        })
+    }
+
+    /// The Video format the card is running at, when another app changed it from xReveal's choice.
+    pub fn taken_over(&self) -> Option<VideoFormat> {
+        let (_, choice) = self.current.as_ref()?;
+        let (width, height, fps) = self.capture.as_ref()?.running_format();
+        let running = VideoFormat { width, height, fps };
+        ((width, height) != (choice.width, choice.height) || (fps - choice.fps).abs() > 0.5).then_some(running)
+    }
+
+    /// The video surface is under GPUI's view here, so GPUI's screens already cover it.
+    pub fn set_surface_visible(&self, _visible: bool) {}
 
     /// Changes how the picture is drawn; applies from the next frame.
     pub fn set_picture(&self, settings: PictureSettings) {

@@ -7,12 +7,14 @@ mod surface;
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::HWND;
 
 use crate::source::{self, LaunchPick, SourceIdentity, SourceInfo, VideoFormat};
 use crate::video::picture::PictureSettings;
+use crate::video::signal::{Observed, OpenError};
 use crate::video::slot::FrameSlot;
 use crate::video::timing::{DelaySettings, Summary};
 use crate::video::{VideoShared, lock};
@@ -26,6 +28,13 @@ pub struct VideoPipeline {
     sources: Vec<SourceInfo>,
     /// The Source and Video format on screen.
     current: Option<(SourceIdentity, VideoFormat)>,
+    /// The Source and Video format xReveal is trying to show, even while it can't (busy, unplugged).
+    wanted: Option<(SourceIdentity, VideoFormat)>,
+    open_error: Option<OpenError>,
+    /// When the current capture started.
+    started: Option<Instant>,
+    /// The video surface's child window, hidden while a screen without a picture shows.
+    child: HWND,
     slot: Arc<FrameSlot<Frame>>,
     shared: Arc<VideoShared>,
     video_thread: Option<JoinHandle<()>>,
@@ -42,6 +51,7 @@ impl VideoPipeline {
         };
         let parent = HWND(win32.hwnd.get() as *mut _);
         let surface = surface::attach_over(parent).map_err(|e| format!("video surface: {e}"))?;
+        let child = surface.child;
 
         let slot = Arc::new(FrameSlot::new());
         let shared = Arc::new(VideoShared::default());
@@ -57,7 +67,11 @@ impl VideoPipeline {
         let mut pipeline = Self {
             capture: None,
             current: None,
-            status: "No capture card found.".into(),
+            wanted: None,
+            open_error: None,
+            started: None,
+            child,
+            status: "No input found.".into(),
             sources: if started.is_ok() { media::list_sources() } else { Vec::new() },
             slot,
             shared,
@@ -95,7 +109,6 @@ impl VideoPipeline {
     }
 
     /// Lists the capture devices again (e.g. after a card is plugged in).
-    #[expect(dead_code, reason = "called by the pickers (their own slices)")]
     pub fn refresh_sources(&mut self) {
         self.sources = media::list_sources();
     }
@@ -103,18 +116,76 @@ impl VideoPipeline {
     /// Shows Source `os_id` at `choice`, replacing the current capture. The video surface stays;
     /// the picture restarts briefly (docs/spec/v1.md §2.3).
     pub fn switch_to(&mut self, os_id: &str, choice: VideoFormat) -> Result<(), String> {
-        let info = self.sources.iter().find(|s| s.identity.os_id == os_id).ok_or("That capture card isn't connected.")?;
+        let info = self.sources.iter().find(|s| s.identity.os_id == os_id).ok_or("That input isn't connected.")?;
         let native = source::best_native(&info.formats, choice).ok_or(format!("{} doesn't offer {choice}.", info.identity.name))?;
         let name = info.identity.name.clone();
         let identity = info.identity.clone();
-        if let Some(old) = self.capture.take() {
-            old.stop();
-        }
-        let capture = DeviceCapture::start(os_id, name.clone(), native, self.slot.clone()).map_err(|e| format!("Couldn't open {name}: {e}"))?;
+        self.wanted = Some((identity.clone(), choice));
+        self.release();
+        let capture = DeviceCapture::start(os_id, name.clone(), native, self.slot.clone()).map_err(|e| {
+            let error = if media::is_busy(e.code()) {
+                OpenError::Busy(format!("{name} is being used by another app (OBS, Discord, a browser…). Close it to continue."))
+            } else {
+                OpenError::Failed(format!("Couldn't open {name}: {e}"))
+            };
+            let message = error.message().to_owned();
+            self.open_error = Some(error);
+            message
+        })?;
+        self.open_error = None;
         self.current = Some((identity, choice));
+        self.started = Some(Instant::now());
         self.status = capture.description();
         self.capture = Some(capture);
         Ok(())
+    }
+
+    /// Stops the capture (the card is gone); the Source stays wanted.
+    pub fn release(&mut self) {
+        if let Some(old) = self.capture.take() {
+            old.stop();
+        }
+        self.current = None;
+        self.started = None;
+    }
+
+    /// Opens the wanted Source again (it came back, or is no longer busy).
+    pub fn retry(&mut self) -> Result<(), String> {
+        let (identity, choice) = self.wanted.clone().ok_or("Nothing to show.")?;
+        self.refresh_sources();
+        self.switch_to(&identity.os_id, choice)
+    }
+
+    /// The Source xReveal is trying to show, even while it can't.
+    pub fn wanted(&self) -> Option<&(SourceIdentity, VideoFormat)> {
+        self.wanted.as_ref()
+    }
+
+    /// What can be known for certain about the wanted Source (docs/spec/v1.md §2.8).
+    pub fn observe(&self) -> Option<Observed> {
+        let (identity, _) = self.wanted.as_ref()?;
+        let started = self.started;
+        let failure = self.capture.as_ref().and_then(DeviceCapture::failure);
+        Some(Observed {
+            connected: !failure.is_some_and(media::is_gone) && media::is_connected(&identity.os_id),
+            busy: matches!(self.open_error, Some(OpenError::Busy(_))) || failure.is_some_and(media::is_busy),
+            since_start: started.map_or_else(Default::default, |t| t.elapsed()),
+            since_frame: self.slot.last_put().filter(|t| started.is_some_and(|s| *t >= s)).map(|t| t.elapsed()),
+        })
+    }
+
+    /// Windows gives a card to one app at a time, so no other app can change its format under us.
+    pub fn taken_over(&self) -> Option<VideoFormat> {
+        None
+    }
+
+    /// Shows or hides the video surface. It covers everything GPUI draws in the window, so it is
+    /// hidden while a screen without a picture (No signal, Source busy…) shows.
+    pub fn set_surface_visible(&self, visible: bool) {
+        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNA, ShowWindow};
+        unsafe {
+            let _ = ShowWindow(self.child, if visible { SW_SHOWNA } else { SW_HIDE });
+        }
     }
 
     /// Changes how the picture is drawn; applies from the next frame.

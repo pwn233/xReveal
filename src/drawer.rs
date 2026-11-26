@@ -138,8 +138,8 @@ impl Tab {
 
 /// Plain-language hint lines, one per setting (docs/spec/v1.md §2.3).
 pub mod hints {
-    pub const CARD: &str = "The capture card your console is plugged into. Black picture on a PS5? Turn off HDCP in its HDMI settings.";
-    pub const VIDEO_FORMAT: &str = "What the card sends. Changing it restarts the picture for a moment.";
+    pub const CARD: &str = "The device your console is plugged into. Black picture on a PS5? Turn off HDCP in its HDMI settings.";
+    pub const VIDEO_FORMAT: &str = "What the input sends. Changing it restarts the picture for a moment.";
     pub const BUFFERING: &str = "Holds frames back to smooth uneven delivery. Off is fastest.";
     pub const WINDOW_MODE: &str = "Fullscreen covers the whole screen with no border. F11 switches between them.";
     pub const TARGET_RATIO: &str = "The shape of the picture on your screen. Pick your monitor's shape, like 21:9 for ultrawide, to fill it.";
@@ -298,6 +298,13 @@ impl SettingsDrawer {
         this
     }
 
+    /// Switches to `tab` (e.g. Source, for "Pick another input").
+    pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        self.confirm_reset = false;
+        cx.notify();
+    }
+
     /// Replaces the snapshot (e.g. after a Source switch or a reset) and moves the controls to match.
     pub fn set_model(&mut self, model: DrawerModel, window: &mut Window, cx: &mut Context<Self>) {
         let p = model.picture;
@@ -401,7 +408,7 @@ impl SettingsDrawer {
     fn live(&self) -> AnyElement {
         let pal = theme::palette();
         let Some((identity, format)) = &self.model.current else {
-            return div().text_sm().text_color(pal.secondary).child("No capture card on screen").into_any_element();
+            return div().text_sm().text_color(pal.secondary).child("No input on screen").into_any_element();
         };
         div()
             .p_3()
@@ -436,7 +443,7 @@ impl SettingsDrawer {
         let warning = input_lag_warning(DelaySettings { av_sync_offset_ms: 0, ..delay }, self.model.frame_interval);
         vec![
             self.live(),
-            setting("Capture card", hints::CARD, Select::new(&self.card_select).placeholder("No capture card").menu_max_h(rems(18.))),
+            setting("Input", hints::CARD, Select::new(&self.card_select).placeholder("No input").menu_max_h(rems(18.))),
             setting("Video format", hints::VIDEO_FORMAT, Select::new(&self.format_select).placeholder("No formats").menu_max_h(rems(18.))),
             setting("Buffering", hints::BUFFERING, div().flex().flex_col().gap_2().child(buffering).children(warning.map(warn))),
         ]
