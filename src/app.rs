@@ -72,6 +72,10 @@ pub struct XReveal {
     overlay_window: Option<(AnyWindowHandle, Entity<OverlayWindow>)>,
     /// The pointer is near the drawer's edge: show the handle.
     near_edge: bool,
+    /// The edge handle sliding in from the edge or back out.
+    handle_slide: drawer::Slide,
+    /// The side the drawer is drawn on: it follows the setting after sliding out on the old side.
+    shown_side: DrawerSide,
     /// The one-time "Blacks look grey?" tip, while it is up.
     tip: Option<Task<()>>,
     /// Redraws the performance box while it is shown; dropping it stops the refresh.
@@ -147,6 +151,8 @@ impl XReveal {
             overlays_in_own_window: cfg!(target_os = "windows") || std::env::var_os("XREVEAL_OVERLAY_WINDOW").is_some(),
             overlay_window: None,
             near_edge: false,
+            handle_slide: drawer::Slide::closed(),
+            shown_side: store.setup.drawer_side,
             tip: None,
             stats_refresh: None,
             screen: Screen::Starting,
@@ -579,8 +585,8 @@ impl XReveal {
             stats: stats.shown.then(|| (stats, stats_rows(self.stats(), &self.status, crate::video::FIRST_PRESENT.get().copied(), stats))),
             slide: self.slide,
             drawer_open: self.drawer_open,
-            side: self.store.setup.drawer_side,
-            handle: !self.drawer_open && self.near_edge,
+            side: self.shown_side,
+            handle: self.handle_slide,
         }
     }
 }
@@ -596,7 +602,7 @@ struct Overlays {
     slide: drawer::Slide,
     drawer_open: bool,
     side: DrawerSide,
-    handle: bool,
+    handle: drawer::Slide,
 }
 
 impl Overlays {
@@ -665,31 +671,54 @@ impl Overlays {
         }
         // The edge handle. A click on it lands on the window's own mouse handler (which opens the
         // drawer), also when it's drawn in the click-through overlay window.
-        if self.handle {
-            let h = div()
+        // The notch: a tab attached to the edge (the window's, or the drawer's while it's open).
+        // Closed, it slides out as the pointer nears the edge and opens the drawer; open, it
+        // rides on the drawer's inner edge and closes it. Its clicks land on the main window.
+        if self.handle.visible() || self.slide.visible() {
+            if self.handle.moving() || self.slide.moving() {
+                window.request_animation_frame();
+            }
+            // Its body is 24 wide and 96 tall; concave curves 10 tall above and below flow it out of
+            // the edge, so the whole shape (assets/notch) is 25 × 116 with 1 px over the edge.
+            const BODY: f32 = 24.0;
+            const FILLET: f32 = 10.0;
+            let drawer_edge = if self.slide.visible() { drawer::width() * self.slide.shown() } else { 0.0 };
+            let inset = px(drawer_edge - BODY * (1.0 - self.handle.shown()) - 1.0);
+            // Towards the inside to open; back towards the edge to close.
+            let points_right = (side == DrawerSide::Left) != self.drawer_open;
+            let (fill, line) = match side {
+                DrawerSide::Right => ("xreveal/notch/fill-right.svg", "xreveal/notch/line-right.svg"),
+                DrawerSide::Left => ("xreveal/notch/fill-left.svg", "xreveal/notch/line-left.svg"),
+            };
+            let chevron = div()
                 .absolute()
-                .top(relative(0.5))
-                .mt(px(-36.))
-                .w(px(20.))
-                .h(px(64.))
-                .rounded(px(10.))
-                .bg(pal.panel)
-                .border_1()
-                .border_color(pal.line)
+                .top(px(FILLET))
+                .bottom(px(FILLET))
+                .w(px(BODY))
+                .when(side == DrawerSide::Right, |d| d.left_0())
+                .when(side == DrawerSide::Left, |d| d.right_0())
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(pal.secondary)
                 .child(
-                    gpui_kit::component::Icon::new(match side {
-                        DrawerSide::Right => gpui_kit::assets::IconName::ChevronLeft,
-                        DrawerSide::Left => gpui_kit::assets::IconName::ChevronRight,
-                    })
-                    .size_4(),
+                    gpui_kit::component::Icon::new(if points_right { gpui_kit::assets::IconName::ChevronRight } else { gpui_kit::assets::IconName::ChevronLeft })
+                        .size_4(),
                 );
+            let h = div()
+                .absolute()
+                .top(relative(0.5))
+                .mt(px(-(48.0 + FILLET)))
+                .w(px(BODY + 1.0))
+                .h(px(96.0 + 2.0 * FILLET))
+                .cursor_pointer()
+                // Exactly the drawer's panel, with the outline running on into the drawer's edge.
+                .child(svg().path(fill).absolute().inset_0().size_full().text_color(pal.panel))
+                .child(svg().path(line).absolute().inset_0().size_full().text_color(pal.line))
+                .child(chevron);
             out.push(match side {
-                DrawerSide::Right => h.right_1(),
-                DrawerSide::Left => h.left_1(),
+                DrawerSide::Right => h.right(inset),
+                DrawerSide::Left => h.left(inset),
             }
             .into_any_element());
         }
@@ -761,10 +790,39 @@ impl XReveal {
             }
             DrawerEvent::Side(side) => {
                 self.store.update(|s| s.drawer_side = side);
-                // A drawer in its own window moves to the other edge.
                 if self.drawer_window.is_some() {
+                    // A drawer in its own window slides out, then a new one slides in on the
+                    // other edge.
                     self.close_drawer_window(cx);
-                    self.open_drawer_window(window, cx);
+                    self.shown_side = side;
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(drawer::SLIDE_OUT).await;
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            if this.drawer_open && this.drawer_window.is_none() {
+                                this.open_drawer_window(window, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                } else if self.drawer_open {
+                    // Slide out on the old side, then in on the new one; the drawer's rail moves
+                    // across while it's out of sight.
+                    self.slide = self.slide.toward(false);
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(drawer::SLIDE_OUT).await;
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.shown_side = side;
+                            this.refresh_drawer(window, cx);
+                            if this.drawer_open {
+                                this.slide = this.slide.toward(true);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                } else {
+                    self.shown_side = side;
+                    self.refresh_drawer(window, cx);
                 }
             }
             DrawerEvent::Source(os_id, choice) => self.switch_source(os_id, choice, window, cx),
@@ -904,6 +962,8 @@ impl XReveal {
         }
         self.drawer_open = open;
         self.near_edge = false;
+        // The notch stays while the drawer is open (to close it), and tucks away after it closes.
+        self.handle_slide = if open { drawer::Slide::opened() } else { drawer::Slide::opened().toward(false) };
         cx.notify();
     }
 
@@ -999,7 +1059,7 @@ impl Render for XReveal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette();
         let panel = |child: Div| child.px_2().py_1().rounded(px(8.)).bg(pal.panel).border_1().border_color(pal.line).text_color(pal.text).text_sm();
-        let side = self.store.setup.drawer_side;
+        let side = self.shown_side;
         let width = window.bounds().size.width.as_f32();
 
         let drawer = (!self.drawer_in_own_window && self.slide.visible()).then(|| {
@@ -1089,9 +1149,12 @@ impl Render for XReveal {
                 }
             }))
             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                let near = near_drawer_edge(event.position.x.as_f32(), width, this.store.setup.drawer_side);
+                let near = near_drawer_edge(event.position.x.as_f32(), width, this.shown_side);
                 if near != this.near_edge {
                     this.near_edge = near;
+                    if !this.drawer_open {
+                        this.handle_slide = this.handle_slide.toward(near);
+                    }
                     cx.notify();
                 }
             }))
@@ -1101,8 +1164,9 @@ impl Render for XReveal {
             .children(screen)
             .children(top_notices)
             .children(taken_over)
-            .children(passive)
             .children(drawer)
+            // After the drawer, so the notch can cover the drawer's border where they meet.
+            .children(passive)
     }
 }
 

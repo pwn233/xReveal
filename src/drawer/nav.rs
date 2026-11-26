@@ -330,9 +330,7 @@ impl SettingsDrawer {
                 rows.push(row("Drawer side", 4, Nav::Choice { len: 2, at: (self.model.side == DrawerSide::Right) as usize, pick: |this, i, _, cx| {
                     let side = [DrawerSide::Left, DrawerSide::Right][i];
                     if side != this.model.side {
-                        this.model.side = side;
                         cx.emit(DrawerEvent::Side(side));
-                        cx.notify();
                     }
                 } }));
             }

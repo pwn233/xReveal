@@ -244,6 +244,17 @@ pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        // The drawer's notch: its fill and its outline, for either side (assets/notch).
+        let notch: Option<&'static [u8]> = match path {
+            "xreveal/notch/fill-right.svg" => Some(include_bytes!("../assets/notch/fill-right.svg")),
+            "xreveal/notch/line-right.svg" => Some(include_bytes!("../assets/notch/line-right.svg")),
+            "xreveal/notch/fill-left.svg" => Some(include_bytes!("../assets/notch/fill-left.svg")),
+            "xreveal/notch/line-left.svg" => Some(include_bytes!("../assets/notch/line-left.svg")),
+            _ => None,
+        };
+        if let Some(bytes) = notch {
+            return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
+        }
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
