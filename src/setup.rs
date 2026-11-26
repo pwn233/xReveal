@@ -170,6 +170,22 @@ pub enum Density {
     Spacious,
 }
 
+impl StatsBox {
+    /// Switches item `index` (latency, fps, frames, format) on or off, except the last one on:
+    /// the box always shows something.
+    pub fn flip(self, index: usize) -> StatsBox {
+        let mut next = self;
+        let flag = match index {
+            0 => &mut next.latency,
+            1 => &mut next.fps,
+            2 => &mut next.frames,
+            _ => &mut next.format,
+        };
+        *flag = !*flag;
+        if [next.latency, next.fps, next.frames, next.format].iter().any(|on| *on) { next } else { self }
+    }
+}
+
 /// The performance box over the picture (docs/spec/v1.md §3.3). Hidden by default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -543,6 +559,9 @@ mod tests {
         assert!(!setup.window.unwrap().usable());
         assert!(!setup.stats.shown && setup.stats.latency, "the performance box starts hidden, listing everything");
         assert_eq!(setup.look, Look::default(), "graphite dark by default");
+        let only_fps = StatsBox { latency: false, frames: false, format: false, ..StatsBox::default() };
+        assert_eq!(only_fps.flip(1), only_fps, "the last item stays on");
+        assert!(only_fps.flip(0).latency && only_fps.flip(0).fps, "others still switch on");
         assert_eq!(Look { opacity: 0.1, ..Look::default() }.opacity(), 0.6, "never fully see-through");
         assert!(WindowPlacement { x: -1900.0, y: 30.0, width: 1280.0, height: 720.0 }.usable(), "a monitor left of the primary");
     }
