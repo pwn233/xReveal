@@ -451,15 +451,17 @@ impl XReveal {
         let Some(display) = cx.displays().into_iter().find(|d| d.uuid().is_ok_and(|u| u.to_string() == uuid)) else { return };
         let id = u64::from(display.id());
         self.store.update(|s| s.monitor = Some(uuid));
+        let Some(handle) = crate::platform::window_handle(window) else { return };
+        // The move itself runs outside this update (see `platform::move_window`).
         if self.store.setup.window_mode == WindowMode::Windowed {
-            crate::platform::move_window(window, id);
+            cx.spawn(async move |_, _| crate::platform::move_window(handle, id)).detach();
             return;
         }
         // Fullscreen switches happen a moment after they're asked for: leave, move, come back.
         toggle_borderless(window);
         cx.spawn_in(window, async move |_, cx| {
             cx.background_executor().timer(Duration::from_millis(350)).await;
-            let _ = cx.update(|window, _| crate::platform::move_window(window, id));
+            crate::platform::move_window(handle, id);
             cx.background_executor().timer(Duration::from_millis(350)).await;
             let _ = cx.update(|window, _| toggle_borderless(window));
         })

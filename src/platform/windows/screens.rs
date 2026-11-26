@@ -2,7 +2,7 @@
 
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{DISPLAY_DEVICEW, EnumDisplayDevicesW, GetMonitorInfoW, HMONITOR, MONITORINFO, MONITORINFOEXW};
-use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
 use windows::core::PCWSTR;
 
 fn info(monitor: u64) -> Option<MONITORINFOEXW> {
@@ -35,9 +35,10 @@ pub fn move_window(hwnd: HWND, monitor: u64) {
     let x = area.left + (area.right - area.left - width) / 2;
     let y = area.top + (area.bottom - area.top - height) / 2;
     unsafe {
-        // Asynchronously: the window's messages are handled after GPUI finishes the click that
-        // asked for the move, not in the middle of it (#82).
-        let _ = SetWindowPos(hwnd, None, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+        // Synchronously, from outside a GPUI update (see `platform::move_window`): with
+        // SWP_ASYNCWINDOWPOS on its own thread the move still happened at once, inside the update
+        // that asked for it, so GPUI missed it and nothing followed the window.
+        let _ = SetWindowPos(hwnd, None, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
