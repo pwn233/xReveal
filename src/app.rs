@@ -242,7 +242,7 @@ impl XReveal {
         cx.notify();
     }
 
-    /// "Pick another card": the drawer, on the Source tab.
+    /// "Pick another input": the drawer, on the Source tab.
     fn pick_another_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.drawer.update(cx, |d, cx| d.show_tab(Tab::Source, cx));
         self.set_drawer_open(true, window, cx);
@@ -716,7 +716,7 @@ impl Render for XReveal {
         let backdrop = self.screen.backdrop();
         let screen = self.screen.render(screen_palette, cx.listener(|this, _, window, cx| this.pick_another_card(window, cx)));
         let taken_over = self.taken_over.map(|format| {
-            let card = self.status.split(" · ").next().unwrap_or("The card").to_owned();
+            let card = self.status.split(" · ").next().unwrap_or("The input").to_owned();
             div().absolute().top_3().w_full().flex().justify_center().child(
                 panel(div().flex().items_center().gap_3())
                     .child(format!("Another app changed {card} to {}", drawer::readout(format)))
@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn stats_rows_show_timings_or_dashes() {
         let all = StatsBox::default();
-        let empty = stats_rows(None, "No capture card found.", None, all);
+        let empty = stats_rows(None, "No input found.", None, all);
         assert_eq!(value(&empty, "capture → screen"), "–");
         assert_eq!(value(&empty, "fps"), "–");
         assert_eq!(value(&empty, "dropped · late"), "0 · 0");

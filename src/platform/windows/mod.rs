@@ -71,7 +71,7 @@ impl VideoPipeline {
             open_error: None,
             started: None,
             child,
-            status: "No capture card found.".into(),
+            status: "No input found.".into(),
             sources: if started.is_ok() { media::list_sources() } else { Vec::new() },
             slot,
             shared,
@@ -116,7 +116,7 @@ impl VideoPipeline {
     /// Shows Source `os_id` at `choice`, replacing the current capture. The video surface stays;
     /// the picture restarts briefly (docs/spec/v1.md §2.3).
     pub fn switch_to(&mut self, os_id: &str, choice: VideoFormat) -> Result<(), String> {
-        let info = self.sources.iter().find(|s| s.identity.os_id == os_id).ok_or("That capture card isn't connected.")?;
+        let info = self.sources.iter().find(|s| s.identity.os_id == os_id).ok_or("That input isn't connected.")?;
         let native = source::best_native(&info.formats, choice).ok_or(format!("{} doesn't offer {choice}.", info.identity.name))?;
         let name = info.identity.name.clone();
         let identity = info.identity.clone();

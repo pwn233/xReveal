@@ -126,7 +126,7 @@ impl Capture {
     pub fn start(slot: Arc<FrameSlot<PixelBuffer>>, os_id: &str, native: NativeFormat) -> Result<Self, OpenError> {
         unsafe {
             let device = AVCaptureDevice::deviceWithUniqueID(&NSString::from_str(os_id))
-                .ok_or(OpenError::Failed("The capture card is no longer connected.".into()))?;
+                .ok_or(OpenError::Failed("That input is no longer connected.".into()))?;
             let name = device.localizedName();
             let busy = || OpenError::Busy(format!("{name} is being used by another app (OBS, Discord, a browser…). Close it to continue."));
             let chosen = device.formats().iter().find_map(|format| {

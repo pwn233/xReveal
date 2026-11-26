@@ -41,7 +41,7 @@ impl Screen {
     pub fn no_card(reason: &str) -> Screen {
         Screen::NoCard {
             title: reason.trim_end_matches('.').to_owned(),
-            hint: "Plug in your capture card, then choose it in Settings",
+            hint: "Plug in your input device, then choose it in Settings",
         }
     }
 
@@ -60,7 +60,7 @@ impl Screen {
         }
     }
 
-    /// Icon, title, hint, and whether it offers "Pick another card".
+    /// Icon, title, hint, and whether it offers "Pick another input".
     fn content(&self) -> Option<(IconName, String, String, bool)> {
         Some(match self {
             Screen::Picture | Screen::Starting => return None,
@@ -86,7 +86,7 @@ impl Screen {
         let (icon, title, hint, pick) = self.content()?;
         let action = pick.then(|| {
             div()
-                .id("pick-card")
+                .id("pick-input")
                 .mt_2()
                 .h(px(32.))
                 .px_4()
@@ -100,7 +100,7 @@ impl Screen {
                 .border_color(pal.line)
                 .text_color(pal.text)
                 .hover(|d| d.bg(pal.raised_hover))
-                .child("Pick another card")
+                .child("Pick another input")
                 .on_click(on_pick)
         });
         Some(
@@ -151,7 +151,7 @@ mod tests {
         assert_eq!(Screen::NoSignal { card: "x".into() }.backdrop().map(|c| c.a), Some(1.0));
         assert_eq!(Screen::no_card("USB2 Video isn't connected."), Screen::NoCard {
             title: "USB2 Video isn't connected".into(),
-            hint: "Plug in your capture card, then choose it in Settings"
+            hint: "Plug in your input device, then choose it in Settings"
         });
     }
 }

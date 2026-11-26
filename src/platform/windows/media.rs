@@ -178,7 +178,7 @@ pub fn list_sources() -> Vec<SourceInfo> {
     devices
         .into_iter()
         .map(|device| {
-            let name = string_attribute(&device, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME).unwrap_or_else(|| "Capture card".into());
+            let name = string_attribute(&device, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME).unwrap_or_else(|| "Input device".into());
             let link = string_attribute(&device, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK).unwrap_or_default();
             let (model, serial) = source::identity_from_windows_link(&link);
             // Every USB device is "external" here; built-in laptop cameras are USB too, so this
