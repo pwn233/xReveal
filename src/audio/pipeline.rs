@@ -102,6 +102,10 @@ struct Shared {
     underruns: AtomicU64,
     /// Frames of resampled sound played (not silence).
     played: AtomicU64,
+    /// The loudest sample per channel (left, right) since the UI last read it, as `f32` bits:
+    /// the Input level meter.
+    peak_left: AtomicU32,
+    peak_right: AtomicU32,
     /// Microseconds since `started` when the input last delivered sound.
     input_seen_us: AtomicU64,
     /// The output's own delay (its buffer, latency and safety offset), in microseconds.
@@ -179,6 +183,9 @@ impl AudioPipeline {
                     in_config,
                     move |data, _| {
                         to_stereo(data, in_channels, &mut stereo);
+                        let (left, right) = peaks(&stereo);
+                        raise(&shared.peak_left, left);
+                        raise(&shared.peak_right, right);
                         writer_push(&mut writer, &stereo);
                         shared.input_seen_us.store(started.elapsed().as_micros() as u64, Ordering::Relaxed);
                     },
@@ -214,6 +221,12 @@ impl AudioPipeline {
         self.shared.volume_bits.store(mix.volume.to_bits(), Ordering::Relaxed);
         self.shared.muted.store(mix.muted, Ordering::Relaxed);
         self.shared.offset_ms.store(mix.offset_ms, Ordering::Relaxed);
+    }
+
+    /// The loudest sample per channel (0 to 1) since the last call, for the level meter.
+    pub fn take_peaks(&self) -> (f32, f32) {
+        let take = |a: &AtomicU32| f32::from_bits(a.swap(0, Ordering::Relaxed));
+        (take(&self.shared.peak_left), take(&self.shared.peak_right))
     }
 
     /// Dropouts so far (the ring ran dry while sound was arriving).
@@ -255,6 +268,22 @@ fn stream_config(mut config: StreamConfig, range: &SupportedBufferSize, wanted: 
 
 fn writer_push(writer: &mut Writer, samples: &[f32]) {
     writer.push(samples);
+}
+
+/// The loudest sample on each side of interleaved stereo.
+pub fn peaks(stereo: &[f32]) -> (f32, f32) {
+    stereo.as_chunks::<2>().0.iter().fold((0.0f32, 0.0f32), |(l, r), f| (l.max(f[0].abs()), r.max(f[1].abs())))
+}
+
+/// Keeps the larger of what `slot` holds and `value` (both non-negative `f32`s, as bits).
+fn raise(slot: &AtomicU32, value: f32) {
+    let mut old = slot.load(Ordering::Relaxed);
+    while value > f32::from_bits(old) {
+        match slot.compare_exchange_weak(old, value.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(now) => old = now,
+        }
+    }
 }
 
 /// Interleaved `channels`-channel sound as interleaved stereo (mono is doubled; extra channels
@@ -383,7 +412,13 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioDevice, by_serial, same_container, to_stereo};
+    use super::{AudioDevice, by_serial, peaks, same_container, to_stereo};
+
+    #[test]
+    fn peaks_per_side() {
+        assert_eq!(peaks(&[0.1, -0.5, -0.8, 0.2, 0.3, 0.0]), (0.8, 0.5));
+        assert_eq!(peaks(&[]), (0.0, 0.0));
+    }
 
     /// Real devices: the default input played (muted) on the default output for 3 s. Run by hand
     /// with `cargo test -- --ignored live_sound`; needs a microphone and an output.

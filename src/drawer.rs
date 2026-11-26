@@ -14,6 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::{Duration, Instant};
 
+mod meter;
 mod nav;
 
 pub use nav::bind_keys;
@@ -231,6 +232,8 @@ pub struct SettingsDrawer {
     keyboard: bool,
     scroll: ScrollHandle,
     focus: FocusHandle,
+    /// The Input level meter (Audio tab), fed while the drawer is open.
+    meter: meter::Meter,
     confirm_reset: bool,
     custom_ratio: bool,
     sliders: Sliders,
@@ -386,6 +389,7 @@ impl SettingsDrawer {
             keyboard: false,
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
+            meter: meter::Meter::default(),
             confirm_reset: false,
             custom_ratio,
             sliders,
@@ -408,6 +412,15 @@ impl SettingsDrawer {
         self.cursor = 0;
         self.switch = 0;
         cx.notify();
+    }
+
+    /// A new reading for the Input level meter: the loudest samples since the last, or `None`
+    /// when nothing plays. Redraws only while the Audio tab shows.
+    pub fn set_peaks(&mut self, peaks: Option<(f32, f32)>, cx: &mut Context<Self>) {
+        self.meter.update(peaks);
+        if self.tab == Tab::Audio {
+            cx.notify();
+        }
     }
 
     /// Focus this to give the drawer the arrow keys.
@@ -462,7 +475,10 @@ impl SettingsDrawer {
             .iter()
             .map(|d| if audio.paired.as_ref() == Some(&d.id) { format!("{} (the input's own audio)", d.name) } else { d.name.clone() })
             .collect();
-        let input_index = audio.input.as_ref().and_then(|id| audio.inputs.iter().position(|d| &d.id == id));
+        // What you chose, else the input device's own audio, else whatever plays: a choice made
+        // while nothing plays (no input on screen) still shows as chosen.
+        let shown_input = audio.chosen_input.as_ref().or(audio.paired.as_ref()).or(audio.input.as_ref());
+        let input_index = shown_input.and_then(|id| audio.inputs.iter().position(|d| &d.id == id));
         self.input_select.update(cx, |s, cx| {
             s.set_items(SearchableVec::new(input_names), window, cx);
             s.set_selected_index(input_index.map(IndexPath::new), window, cx);
@@ -888,7 +904,16 @@ impl SettingsDrawer {
             .flex()
             .flex_col()
             .gap_2()
-            .child(setting("Input", hints::AUDIO_INPUT, Select::new(&self.input_select).placeholder("No sound input").menu_max_h(rems(18.))))
+            .child(setting(
+                "Input",
+                hints::AUDIO_INPUT,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(Select::new(&self.input_select).placeholder("No sound input").menu_max_h(rems(18.)))
+                    .child(self.meter.render()),
+            ))
             .children(audio.notice.clone().map(warn));
         let output = div()
             .flex()
@@ -896,23 +921,46 @@ impl SettingsDrawer {
             .gap_2()
             .child(setting("Output", hints::AUDIO_OUTPUT, Select::new(&self.output_select).placeholder("System output").menu_max_h(rems(18.))))
             .children(audio.latency_hint.clone().map(warn));
-        let mute = toggles(
-            "mute",
-            &["Mute"],
-            &[audio.muted],
-            None,
-            cx.listener(|this, _: &usize, _, cx| {
+        let pal = theme::palette();
+        let muted = audio.muted;
+        // Mute and Volume on one row: the speaker button, then the slider, which fades while muted.
+        let mute = div()
+            .id("mute")
+            .flex_none()
+            .size(px(theme::spacing().chip))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .border_1()
+            .when(muted, |d| d.bg(pal.accent_fill).border_color(pal.accent_line).text_color(pal.accent))
+            .when(!muted, |d| d.bg(pal.raised).border_color(pal.line).text_color(pal.secondary).hover(|d| d.bg(pal.raised_hover).text_color(pal.text)))
+            .child(Icon::new(if muted { IconName::VolumeX } else { IconName::Volume2 }).size_4())
+            .on_click(cx.listener(|this, _, _, cx| {
                 this.model.audio.muted = !this.model.audio.muted;
                 cx.emit(DrawerEvent::Mute(this.model.audio.muted));
                 cx.notify();
-            }),
-        );
-        let volume = div()
+            }));
+        let control = div()
+            .w_full()
             .flex()
-            .flex_col()
+            .items_center()
             .gap_3()
-            .child(slider_setting("Volume", hints::VOLUME, &self.sliders.volume, format!("{:.0}%", audio.volume * 100.0)))
-            .child(mute);
+            .child(mute)
+            .child(div().flex_1().min_w_0().when(muted, |d| d.opacity(0.4)).child(Slider::new(&self.sliders.volume)))
+            .child(
+                div()
+                    .w(px(44.))
+                    .flex_none()
+                    .text_xs()
+                    .font_family(mono_family())
+                    .text_right()
+                    .text_color(pal.secondary)
+                    .when(muted, |d| d.opacity(0.4))
+                    .child(format!("{:.0}%", audio.volume * 100.0)),
+            );
+        let volume = setting("Volume", hints::VOLUME, control);
         vec![
             input.into_any_element(),
             output.into_any_element(),
@@ -1261,33 +1309,6 @@ fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&u
         chip.with_animation(anim_id, animation, move |el, t| {
             if chosen { el.bg(mix(pal.raised, pal.accent_fill, t)).text_color(mix(pal.secondary, pal.accent, t)) } else { el }
         })
-    }))
-}
-
-/// Like [`chips`], but each one switches on and off by itself.
-fn toggles(id: &'static str, labels: &[&str], on: &[bool], cursor: Option<usize>, on_toggle: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
-    let pal = theme::palette();
-    let on_toggle = std::rc::Rc::new(on_toggle);
-    div().w_full().flex().flex_wrap().gap(px(6.)).children(labels.iter().enumerate().map(|(i, label)| {
-        let chosen = on.get(i).copied().unwrap_or(false);
-        let on_toggle = on_toggle.clone();
-        div()
-            .id((id, i))
-            .h(px(theme::spacing().chip))
-            .px_3()
-            .rounded(px(8.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .text_sm()
-            .cursor_pointer()
-            .border_1()
-            .when(chosen, |d| d.bg(pal.accent_fill).border_color(pal.accent_line).text_color(pal.accent).child(Icon::new(IconName::Check).size_3p5()))
-            .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line).text_color(pal.secondary).hover(|d| d.bg(pal.raised_hover).text_color(pal.text)))
-            // The switch under the arrow-key cursor.
-            .when(cursor == Some(i), |d| d.border_color(pal.text))
-            .child(label.to_string())
-            .on_click(move |_, window, cx| on_toggle(&i, window, cx))
     }))
 }
 

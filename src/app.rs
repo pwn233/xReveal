@@ -93,6 +93,8 @@ pub struct XReveal {
     /// The format another app switched the card to, while it differs from xReveal's choice.
     taken_over: Option<VideoFormat>,
     _signal_watch: Option<Task<()>>,
+    /// Feeds the Input level meter while the drawer is open; dropping it stops that.
+    meter_feed: Option<Task<()>>,
     /// The sound for the input on screen (docs/spec/v1.md §2.7).
     sound: crate::audio::Sound,
     /// The Remembered setup (docs/spec/v1.md §3.7).
@@ -162,6 +164,7 @@ impl XReveal {
             next_retry: None,
             taken_over: None,
             _signal_watch: None,
+            meter_feed: None,
             sound: Default::default(),
             store,
             _subscriptions: vec![save_on_quit, on_drawer],
@@ -948,6 +951,25 @@ impl XReveal {
                 _ => {}
             }
         }
+        // The Input level meter reads the sound about 20 times a second, only while it can be seen.
+        self.meter_feed = open.then(|| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(50)).await;
+                    let fed = this.update(cx, |this, cx| {
+                        let peaks = this.sound.take_peaks();
+                        this.drawer.update(cx, |d, cx| d.set_peaks(peaks, cx));
+                        if let Some((_, host)) = &this.drawer_window {
+                            let drawer = host.read(cx).drawer.clone();
+                            drawer.update(cx, |d, cx| d.set_peaks(peaks, cx));
+                        }
+                    });
+                    if fed.is_err() {
+                        break;
+                    }
+                }
+            })
+        });
         // Also kept for a drawer in its own window: the performance box moves aside with it.
         if open != self.drawer_open {
             self.slide = self.slide.toward(open);

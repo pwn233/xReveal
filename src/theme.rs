@@ -237,7 +237,7 @@ pub fn appearance_is_dark(appearance: WindowAppearance) -> bool {
     matches!(appearance, WindowAppearance::Dark | WindowAppearance::VibrantDark)
 }
 
-gpui_kit::assets::icon_assets!(pub ExtraIcons, [Cable, Monitor, Palette, Volume2, SunMoon, MonitorOff, Unplug, Lock, ChevronDown, ChevronRight, ChevronLeft, RotateCcw, X, Check, Settings, Ban]);
+gpui_kit::assets::icon_assets!(pub ExtraIcons, [Cable, Monitor, Palette, Volume2, SunMoon, MonitorOff, Unplug, Lock, ChevronDown, ChevronRight, ChevronLeft, RotateCcw, X, Check, Settings, Ban, VolumeX]);
 
 /// GPUI Kit's component icons plus the few extra lucide icons xReveal uses.
 pub struct AppAssets;
