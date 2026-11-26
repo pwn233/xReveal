@@ -1304,13 +1304,16 @@ impl DrawerWindow {
             if window.is_window_active() {
                 return;
             }
-            let (main, main_window) = (this.main.clone(), this.main_window);
+            let (main, main_window, me) = (this.main.clone(), this.main_window, window.window_handle());
             cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
                 let _ = main_window.update(cx, |_, window, cx| {
-                    if !window.is_window_active()
-                        && let Some(main) = main.upgrade()
-                    {
+                    let Some(main) = main.upgrade() else { return };
+                    // Only the drawer on screen, and only once focus has left xReveal: a drawer window
+                    // being replaced (Side, Density) loses focus to the new one, which stays open.
+                    let current = main.read(cx).drawer_window.as_ref().is_some_and(|(handle, _)| *handle == me);
+                    let active = me.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false);
+                    if current && !active && !window.is_window_active() {
                         main.update(cx, |main, cx| main.set_drawer_open(false, window, cx));
                     }
                 });
