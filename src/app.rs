@@ -72,6 +72,10 @@ pub struct XReveal {
     overlay_window: Option<(AnyWindowHandle, Entity<OverlayWindow>)>,
     /// The pointer is near the drawer's edge: show the handle.
     near_edge: bool,
+    /// The edge handle sliding in from the edge or back out.
+    handle_slide: drawer::Slide,
+    /// The side the drawer is drawn on: it follows the setting after sliding out on the old side.
+    shown_side: DrawerSide,
     /// The one-time "Blacks look grey?" tip, while it is up.
     tip: Option<Task<()>>,
     /// Redraws the performance box while it is shown; dropping it stops the refresh.
@@ -147,6 +151,8 @@ impl XReveal {
             overlays_in_own_window: cfg!(target_os = "windows") || std::env::var_os("XREVEAL_OVERLAY_WINDOW").is_some(),
             overlay_window: None,
             near_edge: false,
+            handle_slide: drawer::Slide::closed(),
+            shown_side: store.setup.drawer_side,
             tip: None,
             stats_refresh: None,
             screen: Screen::Starting,
@@ -579,8 +585,8 @@ impl XReveal {
             stats: stats.shown.then(|| (stats, stats_rows(self.stats(), &self.status, crate::video::FIRST_PRESENT.get().copied(), stats))),
             slide: self.slide,
             drawer_open: self.drawer_open,
-            side: self.store.setup.drawer_side,
-            handle: !self.drawer_open && self.near_edge,
+            side: self.shown_side,
+            handle: self.handle_slide,
         }
     }
 }
@@ -596,7 +602,7 @@ struct Overlays {
     slide: drawer::Slide,
     drawer_open: bool,
     side: DrawerSide,
-    handle: bool,
+    handle: drawer::Slide,
 }
 
 impl Overlays {
@@ -665,9 +671,16 @@ impl Overlays {
         }
         // The edge handle. A click on it lands on the window's own mouse handler (which opens the
         // drawer), also when it's drawn in the click-through overlay window.
-        if self.handle {
+        if self.handle.visible() {
+            // It slides out from the edge and fades in as the pointer nears it, and back.
+            if self.handle.moving() {
+                window.request_animation_frame();
+            }
+            let shown = self.handle.shown();
+            let inset = px(4. - 28. * (1. - shown));
             let h = div()
                 .absolute()
+                .opacity(shown)
                 .top(relative(0.5))
                 .mt(px(-36.))
                 .w(px(20.))
@@ -688,8 +701,8 @@ impl Overlays {
                     .size_4(),
                 );
             out.push(match side {
-                DrawerSide::Right => h.right_1(),
-                DrawerSide::Left => h.left_1(),
+                DrawerSide::Right => h.right(inset),
+                DrawerSide::Left => h.left(inset),
             }
             .into_any_element());
         }
@@ -761,10 +774,39 @@ impl XReveal {
             }
             DrawerEvent::Side(side) => {
                 self.store.update(|s| s.drawer_side = side);
-                // A drawer in its own window moves to the other edge.
                 if self.drawer_window.is_some() {
+                    // A drawer in its own window slides out, then a new one slides in on the
+                    // other edge.
                     self.close_drawer_window(cx);
-                    self.open_drawer_window(window, cx);
+                    self.shown_side = side;
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(drawer::SLIDE_OUT).await;
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            if this.drawer_open && this.drawer_window.is_none() {
+                                this.open_drawer_window(window, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                } else if self.drawer_open {
+                    // Slide out on the old side, then in on the new one; the drawer's rail moves
+                    // across while it's out of sight.
+                    self.slide = self.slide.toward(false);
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(drawer::SLIDE_OUT).await;
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.shown_side = side;
+                            this.refresh_drawer(window, cx);
+                            if this.drawer_open {
+                                this.slide = this.slide.toward(true);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                } else {
+                    self.shown_side = side;
+                    self.refresh_drawer(window, cx);
                 }
             }
             DrawerEvent::Source(os_id, choice) => self.switch_source(os_id, choice, window, cx),
@@ -904,6 +946,7 @@ impl XReveal {
         }
         self.drawer_open = open;
         self.near_edge = false;
+        self.handle_slide = self.handle_slide.toward(false);
         cx.notify();
     }
 
@@ -999,7 +1042,7 @@ impl Render for XReveal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette();
         let panel = |child: Div| child.px_2().py_1().rounded(px(8.)).bg(pal.panel).border_1().border_color(pal.line).text_color(pal.text).text_sm();
-        let side = self.store.setup.drawer_side;
+        let side = self.shown_side;
         let width = window.bounds().size.width.as_f32();
 
         let drawer = (!self.drawer_in_own_window && self.slide.visible()).then(|| {
@@ -1089,9 +1132,10 @@ impl Render for XReveal {
                 }
             }))
             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                let near = near_drawer_edge(event.position.x.as_f32(), width, this.store.setup.drawer_side);
+                let near = near_drawer_edge(event.position.x.as_f32(), width, this.shown_side);
                 if near != this.near_edge {
                     this.near_edge = near;
+                    this.handle_slide = this.handle_slide.toward(near && !this.drawer_open);
                     cx.notify();
                 }
             }))

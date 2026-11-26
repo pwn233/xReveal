@@ -63,6 +63,11 @@ impl Slide {
         self.from + (self.to - self.from) * eased
     }
 
+    /// How much shows right now, 0 to 1.
+    pub fn shown(&self) -> f32 {
+        self.shown_at(Instant::now())
+    }
+
     /// Whether it is still moving (keep asking for frames).
     pub fn moving(&self) -> bool {
         self.started.elapsed() < self.duration()
@@ -701,11 +706,11 @@ impl SettingsDrawer {
             "side",
             &["Left", "Right"],
             sides.iter().position(|s| *s == self.model.side).unwrap_or(1),
+            // The app moves the drawer (sliding out, then in on the new side) and then updates the
+            // model, so the rail doesn't jump across while the drawer is still on screen.
             cx.listener(move |this, i: &usize, _, cx| {
                 if sides[*i] != this.model.side {
-                    this.model.side = sides[*i];
                     cx.emit(DrawerEvent::Side(sides[*i]));
-                    cx.notify();
                 }
             }),
         );
@@ -1209,6 +1214,22 @@ fn slider_setting(title: &'static str, hint_text: &'static str, state: &Entity<S
     setting(title, hint_text, control)
 }
 
+/// How long a control takes to ease into its new state.
+const EASE: Duration = Duration::from_millis(180);
+
+/// `a` blended towards `b` by `t` (0 to 1), alpha included.
+fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+    let (a, b) = (a.to_rgb(), b.to_rgb());
+    let l = |x: f32, y: f32| x + (y - x) * t;
+    Hsla::from(Rgba { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) })
+}
+
+/// The animation that eases a just-chosen control in. Its ID carries the chosen state, so it
+/// plays when that changes (and once when the control first appears chosen).
+fn ease_in(group: &'static str, index: usize, chosen: bool) -> (ElementId, Animation) {
+    ((SharedString::from(format!("{group}-ease")), index * 2 + chosen as usize).into(), Animation::new(EASE).with_easing(ease_out_quint()))
+}
+
 /// A group of choices that wraps onto a second row instead of overflowing.
 fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
     let pal = theme::palette();
@@ -1216,7 +1237,7 @@ fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&u
     div().w_full().flex().flex_wrap().gap(px(6.)).children(labels.iter().enumerate().map(|(i, label)| {
         let chosen = i == selected;
         let on_pick = on_pick.clone();
-        div()
+        let chip = div()
             .id((id, i))
             .h(px(theme::spacing().chip))
             .px_3()
@@ -1229,7 +1250,12 @@ fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&u
             .when(chosen, |d| d.bg(pal.accent_fill).border_color(pal.accent_line).text_color(pal.accent))
             .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line).text_color(pal.secondary).hover(|d| d.bg(pal.raised_hover).text_color(pal.text)))
             .child(label.to_string())
-            .on_click(move |_, window, cx| on_pick(&i, window, cx))
+            .on_click(move |_, window, cx| on_pick(&i, window, cx));
+        // The newly chosen chip eases from plain into its accent fill.
+        let (anim_id, animation) = ease_in(id, i, chosen);
+        chip.with_animation(anim_id, animation, move |el, t| {
+            if chosen { el.bg(mix(pal.raised, pal.accent_fill, t)).text_color(mix(pal.secondary, pal.accent, t)) } else { el }
+        })
     }))
 }
 
@@ -1275,7 +1301,12 @@ fn radios(id: &'static str, items: &[(&str, &str)], selected: usize, on_pick: im
             .flex()
             .items_center()
             .justify_center()
-            .when(chosen, |d| d.border_color(pal.accent).child(div().size(px(8.)).rounded_full().bg(pal.accent)))
+            .when(chosen, |d| {
+                // The dot grows into place.
+                let (anim_id, animation) = ease_in(id, i, true);
+                d.border_color(pal.accent)
+                    .child(div().size(px(8.)).rounded_full().bg(pal.accent).with_animation(anim_id, animation, |dot, t| dot.size(px(2. + 6. * t))))
+            })
             .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line));
         div()
             .id((id, i))
@@ -1309,16 +1340,18 @@ fn checkboxes(id: &'static str, items: &[(&str, &str)], on: &[bool], cursor: Opt
     div().w_full().flex().flex_col().children(items.iter().enumerate().map(|(i, (label, detail))| {
         let checked = on.get(i).copied().unwrap_or(false);
         let on_toggle = on_toggle.clone();
-        let mark = div()
-            .flex_none()
-            .size(px(16.))
-            .rounded(px(4.))
-            .border_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(checked, |d| d.bg(pal.accent).border_color(pal.accent).text_color(if pal.dark { pal.deep } else { gpui_kit::white() }).child(Icon::new(IconName::Check).size_3()))
-            .when(!checked, |d| d.bg(pal.raised).border_color(pal.line));
+        let mark = div().flex_none().size(px(16.)).rounded(px(4.)).border_1().flex().items_center().justify_center();
+        let mark: AnyElement = if checked {
+            // The box fills with the accent as it's ticked.
+            let (anim_id, animation) = ease_in(id, i, true);
+            mark.border_color(pal.accent)
+                .text_color(if pal.dark { pal.deep } else { gpui_kit::white() })
+                .child(Icon::new(IconName::Check).size_3())
+                .with_animation(anim_id, animation, move |el, t| el.bg(mix(pal.raised, pal.accent, t)))
+                .into_any_element()
+        } else {
+            mark.bg(pal.raised).border_color(pal.line).into_any_element()
+        };
         div()
             .id((id, i))
             .py(px(6.))
@@ -1387,6 +1420,21 @@ mod tests {
         closing = Slide { started: midway, from: closing.shown_at(midway), to: 0.0 };
         assert!(closing.shown_at(midway) < 1.0);
         assert_eq!(closing.shown_at(midway + SLIDE_OUT + Duration::from_millis(1)), 0.0);
+    }
+
+    #[test]
+    fn controls_blend_from_plain_to_chosen() {
+        use super::mix;
+        use gpui_kit::{Hsla, rgb, rgba};
+        let (from, to): (Hsla, Hsla) = (rgb(0x232325).into(), rgba(0x6aa9ff24).into());
+        let close = |a: Hsla, b: Hsla| {
+            let (a, b) = (a.to_rgb(), b.to_rgb());
+            (a.r - b.r).abs() < 1e-3 && (a.g - b.g).abs() < 1e-3 && (a.b - b.b).abs() < 1e-3 && (a.a - b.a).abs() < 1e-3
+        };
+        assert!(close(mix(from, to, 0.0), from), "starts plain");
+        assert!(close(mix(from, to, 1.0), to), "ends chosen");
+        let half = mix(from, to, 0.5).to_rgb();
+        assert!((half.a - (1.0 + to.a) / 2.0).abs() < 1e-3, "alpha blends too");
     }
 
     #[test]
