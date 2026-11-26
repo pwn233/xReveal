@@ -1146,11 +1146,15 @@ impl SettingsDrawer {
             })
             .child(Icon::new(IconName::RotateCcw).size_3p5())
             .child("Reset");
+        // The page's title, set apart from its settings: a size up from their titles, and a
+        // full-width line below (the lines between settings stop short at the padding).
         div()
             .flex_none()
             .px_5()
             .pt_5()
-            .pb_1()
+            .pb_4()
+            .border_b_1()
+            .border_color(pal.line)
             .flex()
             .items_center()
             .justify_between()
@@ -1159,7 +1163,7 @@ impl SettingsDrawer {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_base().font_weight(FontWeight::MEDIUM).child(self.tab.label()))
+                    .child(div().text_xl().line_height(rems(1.75)).font_weight(FontWeight::SEMIBOLD).child(self.tab.label()))
                     // On the title, ←/→ switch tabs.
                     .when(nav::focused(self.tab.label()), |d| d.child(div().text_xs().text_color(pal.muted).child("‹ ›"))),
             )
