@@ -7,6 +7,37 @@ macOS. Written in Rust; the UI is built with [GPUI Kit](https://gpui-kit.com), w
 What v1 does and how: [`docs/spec/v1.md`](docs/spec/v1.md). Terms: [`GLOSSARY.md`](GLOSSARY.md).
 Architecture decisions: [`docs/adr/`](docs/adr/).
 
+## Install
+
+Download the latest release from [GitHub Releases](https://github.com/pwn233/xReveal/releases). xReveal isn't
+signed with a paid certificate yet, so each OS asks you to confirm it once.
+
+**macOS** (Apple silicon, macOS 12 or later): open `xReveal-…-macos-arm64.dmg` and drag xReveal into
+Applications, or unzip the `.zip`. The first time you open it, macOS says it can't check the app:
+1. Click **Done** (or Cancel).
+2. Open **System Settings › Privacy & Security**, scroll down, and click **Open Anyway** next to xReveal.
+3. Confirm with **Open**. Allow Camera and Microphone when xReveal asks.
+
+After an update macOS may ask for Camera and Microphone again.
+
+**Windows** (64-bit): run `xReveal-…-windows-x64-setup.exe`. It installs for you only, without admin,
+into `%LOCALAPPDATA%\Programs\xReveal`, and adds xReveal to the Start menu. Or unzip the portable `.zip`
+and run `xreveal.exe` from anywhere.
+- **SmartScreen** says "Windows protected your PC": click **More info**, then **Run anyway**.
+- **Smart App Control** (on new Windows 11 installs) blocks unsigned apps outright and has no
+  "run anyway". xReveal can't run while it's on. Turning it off is a one-way switch in Windows Security
+  › App & browser control, so decide carefully.
+
+xReveal never connects to the internet. Your settings stay in `setup.toml` on this computer.
+
+## Make a release
+
+Push a tag matching the version in `Cargo.toml`, e.g. `git tag v0.1.0 && git push origin v0.1.0`. CI
+builds the `.dmg`, the macOS `.zip`, the Windows installer and the Windows `.zip`
+([`.github/workflows/release.yml`](.github/workflows/release.yml)), and attaches them to a GitHub
+Release with generated notes. Locally: `scripts/package-macos.sh` or `scripts/package-windows.ps1`
+(output in `dist/`).
+
 ## Requirements
 
 - Rust 1.93 or newer. `rust-toolchain.toml` pins the version, and rustup installs it on the first build.
