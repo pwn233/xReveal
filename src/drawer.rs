@@ -25,8 +25,10 @@ use crate::theme::{self, mono_family};
 use crate::video::picture::{Adjustments, Choice, ColourRange, ColourSpace, FillMode, PictureSettings, TargetRatio};
 use crate::video::timing::DelaySettings;
 
-pub const WIDTH: f32 = 380.0;
-const RAIL: f32 = 72.0;
+/// The drawer's width, which follows Density.
+pub fn width() -> f32 {
+    theme::spacing().drawer
+}
 /// How long the drawer takes to slide in (decelerating) and out (accelerating away).
 const SLIDE_IN: Duration = Duration::from_millis(320);
 pub const SLIDE_OUT: Duration = Duration::from_millis(200);
@@ -73,7 +75,7 @@ impl Slide {
 
     /// How far the drawer sits past its edge right now: 0 when fully open, -WIDTH when closed.
     pub fn offset(&self) -> Pixels {
-        px(-WIDTH * (1.0 - self.shown_at(Instant::now())))
+        px(-width() * (1.0 - self.shown_at(Instant::now())))
     }
 }
 
@@ -492,8 +494,9 @@ impl SettingsDrawer {
             let on = tab == self.tab;
             div()
                 .id(SharedString::from(tab.label()))
-                // Square, centred in the rail.
-                .size(px(RAIL - 16.))
+                // Square, centred in the rail; labels stay on one line.
+                .size(px(theme::spacing().rail - 8.))
+                .whitespace_nowrap()
                 .mx_auto()
                 .rounded(px(10.))
                 .flex()
@@ -515,7 +518,7 @@ impl SettingsDrawer {
         });
         let left = self.model.side == DrawerSide::Left;
         div()
-            .w(px(RAIL))
+            .w(px(theme::spacing().rail))
             .flex_none()
             .pt_3()
             .bg(pal.deep)

@@ -30,6 +30,7 @@ fn main() {
     gpui_kit::application().with_assets(theme::AppAssets).run(|cx| {
         gpui_kit::init(cx);
         // The remembered look is applied once the window exists (it may follow the OS appearance).
+        theme::load_fonts(cx);
         theme::apply(&setup::Look::default(), true, cx);
         app::bind_keys(cx);
 

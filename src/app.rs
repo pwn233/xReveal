@@ -183,6 +183,7 @@ impl XReveal {
         }
         // The remembered look; with System it follows the OS's appearance as that changes.
         theme::apply(&this.store.setup.look, theme::appearance_is_dark(window.appearance()), cx);
+        window.set_rem_size(px(theme::spacing().rem));
         let appearance = cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
             theme::apply(&this.store.setup.look, theme::appearance_is_dark(window.appearance()), cx);
         });
@@ -490,7 +491,7 @@ impl XReveal {
         // Over the content only, below the title bar if there is one.
         let content = window.viewport_size();
         let top = main.origin.y + (main.size.height - content.height).max(px(0.));
-        let width = px(drawer::WIDTH);
+        let width = px(drawer::width());
         let x = match self.store.setup.drawer_side {
             DrawerSide::Right => main.origin.x + main.size.width - width,
             DrawerSide::Left => main.origin.x,
@@ -513,7 +514,10 @@ impl XReveal {
         let main_entity = cx.entity().downgrade();
         let main_window = window.window_handle();
         let side = self.store.setup.drawer_side;
-        match gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| DrawerWindow::new(model, side, main_entity, main_window, window, cx))) {
+        match gpui_kit::open_window(options, cx, move |window, cx| {
+            window.set_rem_size(px(theme::spacing().rem));
+            cx.new(|cx| DrawerWindow::new(model, side, main_entity, main_window, window, cx))
+        }) {
             Ok((handle, host)) => {
                 let _ = handle.update(cx, |_, window, cx| {
                     gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
@@ -546,7 +550,10 @@ impl XReveal {
         let Some(owner) = crate::platform::window_handle(window) else { return };
         let main_entity = cx.entity();
         let overlays = self.overlays();
-        if let Ok((handle, host)) = gpui_kit::open_window(options, cx, move |_, cx| cx.new(|cx| OverlayWindow::new(&main_entity, overlays, cx))) {
+        if let Ok((handle, host)) = gpui_kit::open_window(options, cx, move |window, cx| {
+            window.set_rem_size(px(theme::spacing().rem));
+            cx.new(|cx| OverlayWindow::new(&main_entity, overlays, cx))
+        }) {
             let _ = handle.update(cx, |_, window, cx| {
                 gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
                 crate::platform::make_overlay(window, owner);
@@ -622,7 +629,7 @@ impl Overlays {
             if self.slide.moving() {
                 window.request_animation_frame();
             }
-            let shown = 1.0 + self.slide.offset().as_f32() / drawer::WIDTH;
+            let shown = 1.0 + self.slide.offset().as_f32() / drawer::width();
             let (side_inset, vertical_inset) = stats_inset(stats.corner, side, shown, !self.drawer_open);
             let rows = rows.into_iter().map(|(label, value)| {
                 div()
@@ -785,8 +792,19 @@ impl XReveal {
             }
             DrawerEvent::Stats(stats) => self.apply_stats(stats, cx),
             DrawerEvent::Look(look) => {
+                let density_changed = look.density != self.store.setup.look.density;
                 self.store.update(|s| s.look = look);
                 theme::apply(&look, theme::appearance_is_dark(window.appearance()), cx);
+                // Density sets every window's base text size; a drawer window also changes width.
+                let rem = px(theme::spacing().rem);
+                window.set_rem_size(rem);
+                for handle in self.drawer_window.iter().map(|(h, _)| *h).chain(self.overlay_window.iter().map(|(h, _)| *h)) {
+                    let _ = handle.update(cx, |_, w, _| w.set_rem_size(rem));
+                }
+                if density_changed && self.drawer_window.is_some() {
+                    self.close_drawer_window(cx);
+                    self.open_drawer_window(window, cx);
+                }
             }
             DrawerEvent::Quit => cx.quit(),
             DrawerEvent::ResetAll => self.reset_all_settings(window, cx),
@@ -957,7 +975,7 @@ pub fn stats_rows(summary: Option<Summary>, description: &str, launch_to_picture
 pub fn stats_inset(corner: crate::setup::Corner, drawer_side: DrawerSide, drawer_shown: f32, status_shown: bool) -> (f32, f32) {
     const MARGIN: f32 = 12.0;
     let same_side = corner.is_left() == (drawer_side == DrawerSide::Left);
-    let side = MARGIN + if same_side { drawer::WIDTH * drawer_shown } else { 0.0 };
+    let side = MARGIN + if same_side { drawer::width() * drawer_shown } else { 0.0 };
     let vertical = MARGIN + if status_shown && corner == crate::setup::Corner::BottomLeft { 40.0 } else { 0.0 };
     (side, vertical)
 }
@@ -994,7 +1012,7 @@ impl Render for XReveal {
                 .absolute()
                 .top_0()
                 .bottom_0()
-                .w(px(drawer::WIDTH))
+                .w(px(drawer::width()))
                 .border_color(pal.line)
                 .occlude()
                 // Clicks inside the drawer must not reach the picture (which closes it).
@@ -1179,7 +1197,7 @@ impl Render for DrawerWindow {
             window.request_animation_frame();
         }
         let offset = self.slide.offset();
-        let shell = div().absolute().top_0().bottom_0().w(px(drawer::WIDTH)).border_color(pal.line).child(self.drawer.clone());
+        let shell = div().absolute().top_0().bottom_0().w(px(drawer::width())).border_color(pal.line).child(self.drawer.clone());
         let shell = match self.side {
             DrawerSide::Right => shell.right(offset).border_l_1(),
             DrawerSide::Left => shell.left(offset).border_r_1(),
