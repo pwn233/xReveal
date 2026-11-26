@@ -30,16 +30,18 @@ pub fn screen_name(display: u64) -> Option<String> {
     }
 }
 
-/// Moves `window` to the middle of screen `display`, keeping its size.
-pub fn move_window(window: &gpui_kit::Window, display: u64) {
+/// Moves `window` to the middle of screen `display`, keeping its size. Call it outside a GPUI
+/// update: on Windows the move happens at once, and GPUI can only take note of it (its observers,
+/// the drawer and overlay windows following) when it isn't in the middle of one.
+pub fn move_window(window: raw_window_handle::RawWindowHandle, display: u64) {
     #[cfg(target_os = "macos")]
-    if let Some(raw_window_handle::RawWindowHandle::AppKit(appkit)) = raw_window(window) {
+    if let raw_window_handle::RawWindowHandle::AppKit(appkit) = window {
         // SAFETY: GPUI's raw window handle on macOS is a valid NSView for the window's lifetime.
         let view: &objc2_app_kit::NSView = unsafe { appkit.ns_view.cast().as_ref() };
         macos::screens::move_window(view, display);
     }
     #[cfg(target_os = "windows")]
-    if let Some(raw_window_handle::RawWindowHandle::Win32(win32)) = raw_window(window) {
+    if let raw_window_handle::RawWindowHandle::Win32(win32) = window {
         windows::screens::move_window(::windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _), display);
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -62,6 +64,43 @@ pub fn make_overlay(overlay: &gpui_kit::Window, owner: raw_window_handle::RawWin
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (overlay, owner);
+}
+
+/// Gives the keys back to `window` (Windows), from another window of xReveal's that has them.
+/// Call it outside a GPUI update.
+pub fn activate(window: raw_window_handle::RawWindowHandle) {
+    #[cfg(target_os = "windows")]
+    if let raw_window_handle::RawWindowHandle::Win32(win32) = window {
+        windows::screens::activate(::windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _));
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = window;
+}
+
+/// Makes the drawer's window `popup` part of `owner`, so it stays just above it and never floats
+/// over other apps, without the frame and animations Windows gives it (Windows).
+pub fn own_popup(popup: &gpui_kit::Window, owner: raw_window_handle::RawWindowHandle) {
+    #[cfg(target_os = "windows")]
+    if let (Some(raw_window_handle::RawWindowHandle::Win32(top)), raw_window_handle::RawWindowHandle::Win32(below)) = (raw_window(popup), owner) {
+        use ::windows::Win32::Foundation::HWND;
+        windows::screens::own_popup(HWND(top.hwnd.get() as *mut _), HWND(below.hwnd.get() as *mut _));
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (popup, owner);
+}
+
+/// Puts pop-up `popup` exactly over `area` of `owner`'s content (GPUI's pixels from its top-left,
+/// at `scale`), keeping its place in the stack and without focusing it (Windows). Call it outside
+/// a GPUI update.
+pub fn place_popup(popup: raw_window_handle::RawWindowHandle, owner: raw_window_handle::RawWindowHandle, area: gpui_kit::Bounds<gpui_kit::Pixels>, scale: f32) {
+    #[cfg(target_os = "windows")]
+    if let (raw_window_handle::RawWindowHandle::Win32(top), raw_window_handle::RawWindowHandle::Win32(below)) = (popup, owner) {
+        use ::windows::Win32::Foundation::HWND;
+        let edges = [area.left(), area.top(), area.right(), area.bottom()].map(|e| (e.as_f32() * scale).round() as i32);
+        windows::screens::place_popup(HWND(top.hwnd.get() as *mut _), HWND(below.hwnd.get() as *mut _), edges);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (popup, owner, area, scale);
 }
 
 /// The native handle of `window` (for [`make_overlay`]).

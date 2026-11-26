@@ -49,6 +49,11 @@ pub fn toggle_borderless(window: &Window) {
 
 /// How close to the drawer's edge the pointer must be for the handle to appear.
 const EDGE: f32 = 48.0;
+/// The edge handle (assets/notch): its body is 24 wide and 96 tall; concave curves 10 tall above and
+/// below flow it out of the edge, so the whole shape is 25 × 116 with 1 px over the edge.
+const NOTCH_BODY: f32 = 24.0;
+const NOTCH_FILLET: f32 = 10.0;
+const NOTCH_HEIGHT: f32 = 96.0 + 2.0 * NOTCH_FILLET;
 /// How long the one-time colour tip stays up.
 const TIP_FOR: Duration = Duration::from_secs(12);
 
@@ -70,6 +75,10 @@ pub struct XReveal {
     /// (Windows). `XREVEAL_OVERLAY_WINDOW=1` forces it elsewhere, for testing.
     overlays_in_own_window: bool,
     overlay_window: Option<(AnyWindowHandle, Entity<OverlayWindow>)>,
+    /// Where the window and its content were when the drawer and overlay windows were last placed.
+    /// GPUI also reports a bounds change whenever the window gains or loses focus; only a real move,
+    /// resize or scale change places them again.
+    placed: (Bounds<Pixels>, Size<Pixels>, f32),
     /// The pointer is near the drawer's edge: show the handle.
     near_edge: bool,
     /// The edge handle sliding in from the edge or back out.
@@ -152,6 +161,7 @@ impl XReveal {
             drawer_window: None,
             overlays_in_own_window: cfg!(target_os = "windows") || std::env::var_os("XREVEAL_OVERLAY_WINDOW").is_some(),
             overlay_window: None,
+            placed: (window.bounds(), window.viewport_size(), window.scale_factor()),
             near_edge: false,
             handle_slide: drawer::Slide::closed(),
             shown_side: store.setup.drawer_side,
@@ -170,11 +180,24 @@ impl XReveal {
             _subscriptions: vec![save_on_quit, on_drawer],
         };
         let follow = cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+            let placed = (window.bounds(), window.viewport_size(), window.scale_factor());
+            if placed == this.placed {
+                // Only focus changed (the drawer window opening, say): reopening the drawer here
+                // would close it at once.
+                return;
+            }
+            let (_, _, was_scale) = std::mem::replace(&mut this.placed, placed);
             this.remember_placement(window, cx);
             // On another screen the pixel density may differ (Retina and 1×).
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(video) = &this.video {
                 video.set_scale(window.scale_factor());
+            }
+            if cfg!(target_os = "windows") && placed.2 == was_scale {
+                // Moved or resized at the same density: the pop-ups move along with the window.
+                // Reopening them on every step of a drag would flicker and replay the drawer's slide.
+                this.place_popups(window, cx);
+                return;
             }
             // The overlay first, so the drawer (opened after it) stays on top.
             if this.overlay_window.is_some() {
@@ -451,15 +474,17 @@ impl XReveal {
         let Some(display) = cx.displays().into_iter().find(|d| d.uuid().is_ok_and(|u| u.to_string() == uuid)) else { return };
         let id = u64::from(display.id());
         self.store.update(|s| s.monitor = Some(uuid));
+        let Some(handle) = crate::platform::window_handle(window) else { return };
+        // The move itself runs outside this update (see `platform::move_window`).
         if self.store.setup.window_mode == WindowMode::Windowed {
-            crate::platform::move_window(window, id);
+            cx.spawn(async move |_, _| crate::platform::move_window(handle, id)).detach();
             return;
         }
         // Fullscreen switches happen a moment after they're asked for: leave, move, come back.
         toggle_borderless(window);
         cx.spawn_in(window, async move |_, cx| {
             cx.background_executor().timer(Duration::from_millis(350)).await;
-            let _ = cx.update(|window, _| crate::platform::move_window(window, id));
+            crate::platform::move_window(handle, id);
             cx.background_executor().timer(Duration::from_millis(350)).await;
             let _ = cx.update(|window, _| toggle_borderless(window));
         })
@@ -496,16 +521,8 @@ impl XReveal {
 
     /// Opens the drawer as its own borderless, transparent window along the drawer side of this one.
     fn open_drawer_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let main = window.bounds();
-        // Over the content only, below the title bar if there is one.
-        let content = window.viewport_size();
-        let top = main.origin.y + (main.size.height - content.height).max(px(0.));
-        let width = px(drawer::width());
-        let x = match self.store.setup.drawer_side {
-            DrawerSide::Right => main.origin.x + main.size.width - width,
-            DrawerSide::Left => main.origin.x,
-        };
-        let bounds = Bounds { origin: point(x, top), size: size(width, content.height) };
+        let area = drawer_area(window.viewport_size(), self.store.setup.drawer_side);
+        let bounds = Bounds { origin: content_origin(window.bounds(), window.viewport_size()) + area.origin, size: area.size };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
@@ -517,6 +534,9 @@ impl XReveal {
             is_minimizable: false,
             display_id: window.display(cx).map(|d| d.id()),
             window_background: WindowBackgroundAppearance::Transparent,
+            // Full frame rate while sliding out, after the keys have gone back to the main window:
+            // GPUI otherwise draws a window without focus at 30 fps.
+            inactive_frame_interval: None,
             ..Default::default()
         };
         let model = self.drawer_model(cx);
@@ -525,6 +545,7 @@ impl XReveal {
         let main_entity = cx.entity().downgrade();
         let main_window = window.window_handle();
         let side = self.store.setup.drawer_side;
+        let owner = crate::platform::window_handle(window);
         match gpui_kit::open_window(options, cx, move |window, cx| {
             window.set_rem_size(px(theme::spacing().rem));
             cx.new(|cx| DrawerWindow::new(model, tab, side, main_entity, main_window, window, cx))
@@ -532,8 +553,14 @@ impl XReveal {
             Ok((handle, host)) => {
                 let _ = handle.update(cx, |_, window, cx| {
                     gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
+                    if let Some(owner) = owner {
+                        crate::platform::own_popup(window, owner);
+                    }
+                    // Its first frame was drawn before the root was made see-through; draw it again.
+                    window.refresh();
                 });
                 self.drawer_window = Some((handle, host));
+                self.place_popups(window, cx);
             }
             Err(error) => self.status = format!("Couldn't open settings: {error}"),
         }
@@ -541,10 +568,7 @@ impl XReveal {
 
     /// Opens the click-through overlay window over this one's content (see [`OverlayWindow`]).
     fn open_overlay_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let main = window.bounds();
-        let content = window.viewport_size();
-        let top = main.origin.y + (main.size.height - content.height).max(px(0.));
-        let bounds = Bounds { origin: point(main.origin.x, top), size: size(main.size.width, content.height) };
+        let bounds = Bounds { origin: content_origin(window.bounds(), window.viewport_size()), size: window.viewport_size() };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
@@ -556,6 +580,9 @@ impl XReveal {
             is_minimizable: false,
             display_id: window.display(cx).map(|d| d.id()),
             window_background: WindowBackgroundAppearance::Transparent,
+            // It never has focus; at GPUI's 30 fps for such windows, the edge handle and performance box
+            // would lag the drawer.
+            inactive_frame_interval: None,
             ..Default::default()
         };
         let Some(owner) = crate::platform::window_handle(window) else { return };
@@ -568,8 +595,24 @@ impl XReveal {
             let _ = handle.update(cx, |_, window, cx| {
                 gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
                 crate::platform::make_overlay(window, owner);
+                // Its first frame was drawn before the root was made see-through; draw it again.
+                window.refresh();
             });
             self.overlay_window = Some((handle, host));
+            self.place_popups(window, cx);
+        }
+    }
+
+    /// Puts the drawer's and the overlays' windows exactly over this window's content (Windows).
+    fn place_popups(&self, window: &Window, cx: &mut Context<Self>) {
+        let Some(owner) = crate::platform::window_handle(window) else { return };
+        let (content, scale) = (window.viewport_size(), window.scale_factor());
+        let overlay = self.overlay_window.as_ref().map(|(h, _)| (*h, Bounds { origin: Point::default(), size: content }));
+        let drawer = self.drawer_window.as_ref().map(|(h, _)| (*h, drawer_area(content, self.store.setup.drawer_side)));
+        for (handle, area) in overlay.into_iter().chain(drawer) {
+            let Ok(Some(popup)) = handle.update(cx, |_, window, _| crate::platform::window_handle(window)) else { continue };
+            // After this update: GPUI handles a window's move as it happens, which it can't mid-update.
+            cx.spawn(async move |_, _| crate::platform::place_popup(popup, owner, area, scale)).detach();
         }
     }
 
@@ -683,12 +726,8 @@ impl Overlays {
             if self.handle.moving() || self.slide.moving() {
                 window.request_animation_frame();
             }
-            // Its body is 24 wide and 96 tall; concave curves 10 tall above and below flow it out of
-            // the edge, so the whole shape (assets/notch) is 25 × 116 with 1 px over the edge.
-            const BODY: f32 = 24.0;
-            const FILLET: f32 = 10.0;
             let drawer_edge = if self.slide.visible() { drawer::width() * self.slide.shown() } else { 0.0 };
-            let inset = px(drawer_edge - BODY * (1.0 - self.handle.shown()) - 1.0);
+            let inset = px(drawer_edge - NOTCH_BODY * (1.0 - self.handle.shown()) - 1.0);
             // Towards the inside to open; back towards the edge to close.
             let points_right = (side == DrawerSide::Left) != self.drawer_open;
             let (fill, line) = match side {
@@ -697,9 +736,9 @@ impl Overlays {
             };
             let chevron = div()
                 .absolute()
-                .top(px(FILLET))
-                .bottom(px(FILLET))
-                .w(px(BODY))
+                .top(px(NOTCH_FILLET))
+                .bottom(px(NOTCH_FILLET))
+                .w(px(NOTCH_BODY))
                 .when(side == DrawerSide::Right, |d| d.left_0())
                 .when(side == DrawerSide::Left, |d| d.right_0())
                 .flex()
@@ -713,9 +752,9 @@ impl Overlays {
             let h = div()
                 .absolute()
                 .top(relative(0.5))
-                .mt(px(-(48.0 + FILLET)))
-                .w(px(BODY + 1.0))
-                .h(px(96.0 + 2.0 * FILLET))
+                .mt(px(-NOTCH_HEIGHT / 2.0))
+                .w(px(NOTCH_BODY + 1.0))
+                .h(px(NOTCH_HEIGHT))
                 .cursor_pointer()
                 // Exactly the drawer's panel, with the outline running on into the drawer's edge.
                 .child(svg().path(fill).absolute().inset_0().size_full().text_color(pal.panel))
@@ -952,7 +991,15 @@ impl XReveal {
         if self.drawer_in_own_window {
             match open {
                 true if self.drawer_window.is_none() => self.open_drawer_window(window, cx),
-                false => self.close_drawer_window(cx),
+                false => {
+                    let had_keys = self.drawer_window.as_ref().is_some_and(|(handle, _)| handle.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false));
+                    self.close_drawer_window(cx);
+                    // The keys come back here at once: left with the drawer's window while it slides
+                    // out, the next Tab would be lost, and Windows may give them to another app after.
+                    if had_keys && let Some(main) = crate::platform::window_handle(window) {
+                        cx.spawn(async move |_, _| crate::platform::activate(main)).detach();
+                    }
+                }
                 _ => {}
             }
         }
@@ -1072,6 +1119,23 @@ pub fn stats_inset(corner: crate::setup::Corner, drawer_side: DrawerSide, drawer
 /// content area, so saving the frame's size would grow the window by its title bar every launch.
 pub fn saved_placement(frame: Bounds<Pixels>, content: Size<Pixels>) -> WindowPlacement {
     WindowPlacement { x: frame.origin.x.as_f32(), y: frame.origin.y.as_f32(), width: content.width.as_f32(), height: content.height.as_f32() }
+}
+
+/// Where the content area `content` of a window with outer frame `frame` starts on the screen:
+/// below the title bar if there is one.
+pub fn content_origin(frame: Bounds<Pixels>, content: Size<Pixels>) -> Point<Pixels> {
+    point(frame.origin.x, frame.origin.y + (frame.size.height - content.height).max(px(0.)))
+}
+
+/// The drawer window's part of the content area `content`, from its top-left: the full height,
+/// along the `side` edge.
+pub fn drawer_area(content: Size<Pixels>, side: DrawerSide) -> Bounds<Pixels> {
+    let width = px(drawer::width());
+    let x = match side {
+        DrawerSide::Right => content.width - width,
+        DrawerSide::Left => px(0.),
+    };
+    Bounds { origin: point(x, px(0.)), size: size(width, content.height) }
 }
 
 /// Whether the pointer at `x` is near the drawer's edge of a window `width` wide.
@@ -1257,13 +1321,16 @@ impl DrawerWindow {
             if window.is_window_active() {
                 return;
             }
-            let (main, main_window) = (this.main.clone(), this.main_window);
+            let (main, main_window, me) = (this.main.clone(), this.main_window, window.window_handle());
             cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
                 let _ = main_window.update(cx, |_, window, cx| {
-                    if !window.is_window_active()
-                        && let Some(main) = main.upgrade()
-                    {
+                    let Some(main) = main.upgrade() else { return };
+                    // Only the drawer on screen, and only once focus has left xReveal: a drawer window
+                    // being replaced (Side, Density) loses focus to the new one, which stays open.
+                    let current = main.read(cx).drawer_window.as_ref().is_some_and(|(handle, _)| *handle == me);
+                    let active = me.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false);
+                    if current && !active && !window.is_window_active() {
                         main.update(cx, |main, cx| main.set_drawer_open(false, window, cx));
                     }
                 });
@@ -1274,13 +1341,17 @@ impl DrawerWindow {
         Self { drawer, side, slide, focus, main, main_window, _subscriptions: vec![forward, blur] }
     }
 
-    /// Runs `f` on the main window's view, in the main window.
+    /// Runs `f` on the main window's view, in the main window. Deferred until this window's own
+    /// update is over: `f` may reach back into this window (closing the drawer, refreshing it), and
+    /// GPUI can't update an entity while it is already being updated.
     fn with_main(&self, cx: &mut App, f: impl FnOnce(&mut XReveal, &mut Window, &mut Context<XReveal>) + 'static) {
-        let main = self.main.clone();
-        let _ = self.main_window.update(cx, move |_, window, cx| {
-            if let Some(main) = main.upgrade() {
-                main.update(cx, |main, cx| f(main, window, cx));
-            }
+        let (main, main_window) = (self.main.clone(), self.main_window);
+        cx.defer(move |cx| {
+            let _ = main_window.update(cx, move |_, window, cx| {
+                if let Some(main) = main.upgrade() {
+                    main.update(cx, |main, cx| f(main, window, cx));
+                }
+            });
         });
     }
 }
@@ -1292,10 +1363,26 @@ impl Render for DrawerWindow {
             window.request_animation_frame();
         }
         let offset = self.slide.offset();
-        let shell = div().absolute().top_0().bottom_0().w(px(drawer::width())).border_color(pal.line).child(self.drawer.clone());
+        // The inner edge's line, open where the notch joins it: the notch is drawn in the overlay
+        // window, under this one, and its outline runs on into the line from either end.
+        let edge = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(1.))
+            .flex()
+            .flex_col()
+            .child(div().flex_1().bg(pal.line))
+            .child(div().h(px(NOTCH_HEIGHT)))
+            .child(div().flex_1().bg(pal.line));
+        let edge = match self.side {
+            DrawerSide::Right => edge.left_0(),
+            DrawerSide::Left => edge.right_0(),
+        };
+        let shell = div().absolute().top_0().bottom_0().w(px(drawer::width())).child(self.drawer.clone()).child(edge);
         let shell = match self.side {
-            DrawerSide::Right => shell.right(offset).border_l_1(),
-            DrawerSide::Left => shell.left(offset).border_r_1(),
+            DrawerSide::Right => shell.right(offset).pl(px(1.)),
+            DrawerSide::Left => shell.left(offset).pr(px(1.)),
         };
         div()
             .size_full()
@@ -1319,7 +1406,7 @@ impl Render for DrawerWindow {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has its own `test` attribute that would replace std's.
-    use super::{DrawerSide, Duration, Summary, near_drawer_edge, saved_placement, stats_inset, stats_rows};
+    use super::{DrawerSide, Duration, Summary, content_origin, drawer_area, near_drawer_edge, saved_placement, stats_inset, stats_rows};
     use crate::setup::{Corner, StatsBox};
 
     fn value<'a>(rows: &'a [(&str, String)], label: &str) -> &'a str {
@@ -1378,5 +1465,20 @@ mod tests {
         assert!(!near_drawer_edge(20.0, 1920.0, DrawerSide::Right));
         assert!(near_drawer_edge(20.0, 1920.0, DrawerSide::Left));
         assert!(!near_drawer_edge(960.0, 1920.0, DrawerSide::Left));
+    }
+
+    #[test]
+    fn pop_ups_cover_the_content_below_the_title_bar() {
+        use gpui_kit::{Bounds, point, px, size};
+        // A 1280 × 917 content area under a 32 px title bar.
+        let frame = Bounds { origin: point(px(164.), px(33.)), size: size(px(1280.), px(949.)) };
+        let content = size(px(1280.), px(917.));
+        assert_eq!(content_origin(frame, content), point(px(164.), px(65.)));
+        // No title bar (Windows reports the content area as the window's bounds).
+        assert_eq!(content_origin(Bounds { origin: frame.origin, size: content }, content), point(px(164.), px(33.)));
+        let right = drawer_area(content, DrawerSide::Right);
+        let left = drawer_area(content, DrawerSide::Left);
+        assert_eq!((right.right(), right.top(), right.bottom()), (px(1280.), px(0.), px(917.)), "along the right edge, full height");
+        assert_eq!((left.left(), left.size), (px(0.), right.size));
     }
 }
