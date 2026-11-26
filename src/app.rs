@@ -678,37 +678,47 @@ impl Overlays {
             if self.handle.moving() || self.slide.moving() {
                 window.request_animation_frame();
             }
-            const NOTCH: f32 = 24.0;
+            // Its body is 24 wide and 96 tall; concave curves 10 tall above and below flow it out of
+            // the edge, so the whole shape (assets/notch) is 25 × 116 with 1 px over the edge.
+            const BODY: f32 = 24.0;
+            const FILLET: f32 = 10.0;
             let drawer_edge = if self.slide.visible() { drawer::width() * self.slide.shown() } else { 0.0 };
-            // One pixel over the drawer's edge, covering its border there, so the outline runs
-            // round the notch and on along the drawer: one piece, no seam.
-            let inset = px(drawer_edge - NOTCH * (1.0 - self.handle.shown()) - 1.0);
+            let inset = px(drawer_edge - BODY * (1.0 - self.handle.shown()) - 1.0);
             // Towards the inside to open; back towards the edge to close.
             let points_right = (side == DrawerSide::Left) != self.drawer_open;
-            let h = div()
+            let (fill, line) = match side {
+                DrawerSide::Right => ("xreveal/notch/fill-right.svg", "xreveal/notch/line-right.svg"),
+                DrawerSide::Left => ("xreveal/notch/fill-left.svg", "xreveal/notch/line-left.svg"),
+            };
+            let chevron = div()
                 .absolute()
-                .top(relative(0.5))
-                .mt(px(-48.))
-                .w(px(NOTCH + 1.0))
-                .h(px(96.))
-                // Exactly the drawer's panel.
-                .bg(pal.panel)
-                .border_color(pal.line)
-                .border_t_1()
-                .border_b_1()
+                .top(px(FILLET))
+                .bottom(px(FILLET))
+                .w(px(BODY))
+                .when(side == DrawerSide::Right, |d| d.left_0())
+                .when(side == DrawerSide::Left, |d| d.right_0())
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_pointer()
                 .text_color(pal.secondary)
                 .child(
                     gpui_kit::component::Icon::new(if points_right { gpui_kit::assets::IconName::ChevronRight } else { gpui_kit::assets::IconName::ChevronLeft })
                         .size_4(),
                 );
-            // Flush against its edge: rounded and bordered only on the side facing the picture.
+            let h = div()
+                .absolute()
+                .top(relative(0.5))
+                .mt(px(-(48.0 + FILLET)))
+                .w(px(BODY + 1.0))
+                .h(px(96.0 + 2.0 * FILLET))
+                .cursor_pointer()
+                // Exactly the drawer's panel, with the outline running on into the drawer's edge.
+                .child(svg().path(fill).absolute().inset_0().size_full().text_color(pal.panel))
+                .child(svg().path(line).absolute().inset_0().size_full().text_color(pal.line))
+                .child(chevron);
             out.push(match side {
-                DrawerSide::Right => h.right(inset).rounded_l(px(12.)).border_l_1(),
-                DrawerSide::Left => h.left(inset).rounded_r(px(12.)).border_r_1(),
+                DrawerSide::Right => h.right(inset),
+                DrawerSide::Left => h.left(inset),
             }
             .into_any_element());
         }
