@@ -678,17 +678,20 @@ impl Overlays {
             if self.handle.moving() || self.slide.moving() {
                 window.request_animation_frame();
             }
-            const NOTCH: f32 = 16.0;
+            const NOTCH: f32 = 24.0;
             let drawer_edge = if self.slide.visible() { drawer::width() * self.slide.shown() } else { 0.0 };
-            let inset = px(drawer_edge - NOTCH * (1.0 - self.handle.shown()));
+            // One pixel over the drawer's edge, covering its border there, so the outline runs
+            // round the notch and on along the drawer: one piece, no seam.
+            let inset = px(drawer_edge - NOTCH * (1.0 - self.handle.shown()) - 1.0);
             // Towards the inside to open; back towards the edge to close.
             let points_right = (side == DrawerSide::Left) != self.drawer_open;
             let h = div()
                 .absolute()
                 .top(relative(0.5))
-                .mt(px(-36.))
-                .w(px(NOTCH))
-                .h(px(72.))
+                .mt(px(-48.))
+                .w(px(NOTCH + 1.0))
+                .h(px(96.))
+                // Exactly the drawer's panel.
                 .bg(pal.panel)
                 .border_color(pal.line)
                 .border_t_1()
@@ -700,12 +703,12 @@ impl Overlays {
                 .text_color(pal.secondary)
                 .child(
                     gpui_kit::component::Icon::new(if points_right { gpui_kit::assets::IconName::ChevronRight } else { gpui_kit::assets::IconName::ChevronLeft })
-                        .size_3p5(),
+                        .size_4(),
                 );
             // Flush against its edge: rounded and bordered only on the side facing the picture.
             out.push(match side {
-                DrawerSide::Right => h.right(inset).rounded_l(px(8.)).border_l_1(),
-                DrawerSide::Left => h.left(inset).rounded_r(px(8.)).border_r_1(),
+                DrawerSide::Right => h.right(inset).rounded_l(px(12.)).border_l_1(),
+                DrawerSide::Left => h.left(inset).rounded_r(px(12.)).border_r_1(),
             }
             .into_any_element());
         }
@@ -1151,8 +1154,9 @@ impl Render for XReveal {
             .children(screen)
             .children(top_notices)
             .children(taken_over)
-            .children(passive)
             .children(drawer)
+            // After the drawer, so the notch can cover the drawer's border where they meet.
+            .children(passive)
     }
 }
 
