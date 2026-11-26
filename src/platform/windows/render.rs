@@ -70,6 +70,8 @@ pub struct VideoPass {
     // Culling off: Direct3D culls counter-clockwise triangles by default, and the fullscreen
     // triangle's winding is counter-clockwise (Metal doesn't cull, so the shaders share it).
     rasterizer: ID3D11RasterizerState,
+    /// Linear filtering, clamped at the edges: the NV12 path's 9-fetch Catmull-Rom (#56).
+    bilinear: ID3D11SamplerState,
 }
 
 impl VideoPass {
@@ -77,7 +79,7 @@ impl VideoPass {
         unsafe {
             let vertex_bytes = compile(s!("vs_main"), s!("vs_4_0"))?;
             let pixel_bytes = compile(s!("ps_main"), s!("ps_4_0"))?;
-            let (mut vertex_shader, mut pixel_shader, mut params, mut rasterizer) = (None, None, None, None);
+            let (mut vertex_shader, mut pixel_shader, mut params, mut rasterizer, mut bilinear) = (None, None, None, None, None);
             device.CreateVertexShader(&vertex_bytes, None, Some(&mut vertex_shader))?;
             device.CreatePixelShader(&pixel_bytes, None, Some(&mut pixel_shader))?;
             device.CreateBuffer(
@@ -100,11 +102,23 @@ impl VideoPass {
                 },
                 Some(&mut rasterizer),
             )?;
+            device.CreateSamplerState(
+                &D3D11_SAMPLER_DESC {
+                    Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                    AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                    AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                    AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                    MaxLOD: f32::MAX,
+                    ..Default::default()
+                },
+                Some(&mut bilinear),
+            )?;
             Ok(Self {
                 vertex_shader: vertex_shader.expect("created"),
                 pixel_shader: pixel_shader.expect("created"),
                 params: params.expect("created"),
                 rasterizer: rasterizer.expect("created"),
+                bilinear: bilinear.expect("created"),
             })
         }
     }
@@ -139,6 +153,7 @@ impl VideoPass {
             let second = planes.views.get(1).unwrap_or(&planes.views[0]);
             context.PSSetShaderResources(0, Some(&[planes.views[0].clone(), second.clone()]));
             context.PSSetConstantBuffers(0, Some(&[Some(self.params.clone())]));
+            context.PSSetSamplers(0, Some(&[Some(self.bilinear.clone())]));
             context.Draw(3, 0);
         }
         Ok(())

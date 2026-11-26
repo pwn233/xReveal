@@ -69,12 +69,46 @@ static float2 fetch_chroma(texture2d<float> first, texture2d<float> second, int 
     return second.read(uint2(x, y)).rg;
 }
 
+// Hardware bilinear filtering in texel coordinates, clamped at the edges like the reads above.
+constexpr sampler bilinear(coord::pixel, filter::linear, address::clamp_to_edge);
+
+// Catmull-Rom over 4×4 texels in 3×3 filtered fetches (#56): the middle two taps of each axis
+// have positive weights, so one bilinear fetch between them gives both, weighted. Exactly the
+// 16-tap result, give or take the hardware's filtering precision.
+static float4 catmull_rom_9(texture2d<float> plane, float2 position, float2 size) {
+    float2 lp = position * size - 0.5;
+    float2 li = floor(lp);
+    float4 wx = weights(lp.x - li.x), wy = weights(lp.y - li.y);
+    float3 sx = float3(wx.x, wx.y + wx.z, wx.w), sy = float3(wy.x, wy.y + wy.z, wy.w);
+    // Texel centres (+0.5) of the outer taps, and the weighted point between the middle two.
+    float3 px = li.x + 0.5 + float3(-1.0, wx.z / sx.y, 2.0);
+    float3 py = li.y + 0.5 + float3(-1.0, wy.z / sy.y, 2.0);
+    float4 sum = 0.0;
+    for (int j = 0; j < 3; j++) {
+        float4 row = 0.0;
+        for (int i = 0; i < 3; i++) {
+            row += sx[i] * plane.sample(bilinear, float2(px[i], py[j]));
+        }
+        sum += sy[j] * row;
+    }
+    return sum;
+}
+
 fragment float4 video_fragment(VertexOut in [[stage_in]],
                                texture2d<float> first [[texture(0)]],
                                texture2d<float> second [[texture(1)]],
                                constant Params& p [[buffer(0)]]) {
     int layout = int(p.misc.y + 0.5);
     float2 src = source_uv(p, in.uv);
+
+    // NV12 (what macOS cards send): each plane is its own texture, so the hardware can filter.
+    if (layout == 0) {
+        float luma = catmull_rom_9(first, src, p.sizes.xy).r;
+        float2 chroma = catmull_rom_9(second, src, p.sizes.zw).rg;
+        float4 ycc = float4(luma, chroma, 1.0);
+        float3 rgb = saturate(float3(dot(p.colour[0], ycc), dot(p.colour[1], ycc), dot(p.colour[2], ycc)));
+        return float4(pow(rgb, float3(p.misc.x)), 1.0);
+    }
 
     // Luma: 4×4 Catmull-Rom taps, clamped at the edges.
     float2 lp = src * p.sizes.xy - 0.5;
