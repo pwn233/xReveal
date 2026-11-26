@@ -4,6 +4,7 @@
 pub mod access;
 mod capture;
 mod render;
+pub mod screens;
 mod surface;
 
 use std::sync::Arc;

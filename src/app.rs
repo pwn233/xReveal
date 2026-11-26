@@ -388,13 +388,28 @@ impl XReveal {
         self.refresh_drawer(window, cx);
     }
 
-    fn drawer_model(&self) -> DrawerModel {
+    fn drawer_model(&self, cx: &App) -> DrawerModel {
         let setup = &self.store.setup;
+        // Screens, primary first, each by the name the OS gives it.
+        let primary = cx.primary_display().map(|d| d.id());
+        let mut displays = cx.displays();
+        displays.sort_by_key(|d| Some(d.id()) != primary);
+        let monitors = displays
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| {
+                let id = d.uuid().ok()?.to_string();
+                let name = crate::platform::screen_name(u64::from(d.id())).unwrap_or_else(|| format!("Screen {}", i + 1));
+                Some((id, name))
+            })
+            .collect();
         let mut model = DrawerModel {
             picture: setup.picture,
             delay: setup.delay,
             side: setup.drawer_side,
             window_mode: setup.window_mode,
+            monitors,
+            monitor: setup.monitor.clone(),
             stats: setup.stats,
             look: setup.look,
             audio: self.sound.model(setup),
@@ -432,6 +447,27 @@ impl XReveal {
         });
     }
 
+    /// Moves xReveal to the screen with identity `uuid` (docs/spec/v1.md §2.3 Monitor). In
+    /// Fullscreen it leaves fullscreen, moves, and covers the new screen.
+    fn move_to_monitor(&mut self, uuid: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(display) = cx.displays().into_iter().find(|d| d.uuid().is_ok_and(|u| u.to_string() == uuid)) else { return };
+        let id = u64::from(display.id());
+        self.store.update(|s| s.monitor = Some(uuid));
+        if self.store.setup.window_mode == WindowMode::Windowed {
+            crate::platform::move_window(window, id);
+            return;
+        }
+        // Fullscreen switches happen a moment after they're asked for: leave, move, come back.
+        toggle_borderless(window);
+        cx.spawn_in(window, async move |_, cx| {
+            cx.background_executor().timer(Duration::from_millis(350)).await;
+            let _ = cx.update(|window, _| crate::platform::move_window(window, id));
+            cx.background_executor().timer(Duration::from_millis(350)).await;
+            let _ = cx.update(|window, _| toggle_borderless(window));
+        })
+        .detach();
+    }
+
     /// Windowed or Fullscreen (docs/spec/v1.md §2.2): remembered, and applied to the window.
     fn set_window_mode(&mut self, mode: WindowMode, window: &mut Window, cx: &mut Context<Self>) {
         if mode == self.store.setup.window_mode {
@@ -451,7 +487,7 @@ impl XReveal {
     }
 
     fn refresh_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let model = self.drawer_model();
+        let model = self.drawer_model(cx);
         if let Some((handle, host)) = self.drawer_window.clone() {
             let model = model.clone();
             let drawer = host.read(cx).drawer.clone();
@@ -485,7 +521,7 @@ impl XReveal {
             window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
         };
-        let model = self.drawer_model();
+        let model = self.drawer_model(cx);
         let main_entity = cx.entity().downgrade();
         let main_window = window.window_handle();
         let side = self.store.setup.drawer_side;
@@ -571,6 +607,7 @@ impl XReveal {
             }
             DrawerEvent::Source(os_id, choice) => self.switch_source(os_id, choice, window, cx),
             DrawerEvent::WindowMode(mode) => self.set_window_mode(mode, window, cx),
+            DrawerEvent::Monitor(uuid) => self.move_to_monitor(uuid, window, cx),
             DrawerEvent::Stats(stats) => self.apply_stats(stats, cx),
             DrawerEvent::Look(look) => {
                 self.store.update(|s| s.look = look);

@@ -3,6 +3,7 @@
 
 pub mod media;
 mod render;
+pub mod screens;
 mod surface;
 
 use std::sync::Arc;
