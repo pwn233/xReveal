@@ -715,7 +715,7 @@ impl SettingsDrawer {
         let placement = self.stats_placement(cx);
         let mut section = div().flex().flex_col().gap(px(theme::spacing().gap)).child(setting("Performance box", hints::STATS, placement));
         if stats.shown {
-            let shows = toggles(
+            let shows = checkboxes(
                 "stats-shows",
                 &["Latency", "Frame rate", "Dropped frames", "Video format"],
                 &[stats.latency, stats.fps, stats.frames, stats.format],
@@ -1232,6 +1232,44 @@ fn toggles(id: &'static str, labels: &[&str], on: &[bool], cursor: Option<usize>
             .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line).text_color(pal.secondary).hover(|d| d.bg(pal.raised_hover).text_color(pal.text)))
             // The switch under the arrow-key cursor.
             .when(cursor == Some(i), |d| d.border_color(pal.text))
+            .child(label.to_string())
+            .on_click(move |_, window, cx| on_toggle(&i, window, cx))
+    }))
+}
+
+/// A list of checkbox rows, one per item; each switches on and off by itself. `cursor` is the row
+/// under the arrow-key cursor.
+fn checkboxes(id: &'static str, labels: &[&str], on: &[bool], cursor: Option<usize>, on_toggle: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
+    let pal = theme::palette();
+    let on_toggle = std::rc::Rc::new(on_toggle);
+    div().w_full().flex().flex_col().children(labels.iter().enumerate().map(|(i, label)| {
+        let checked = on.get(i).copied().unwrap_or(false);
+        let on_toggle = on_toggle.clone();
+        let mark = div()
+            .flex_none()
+            .size(px(16.))
+            .rounded(px(4.))
+            .border_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(checked, |d| d.bg(pal.accent).border_color(pal.accent).text_color(if pal.dark { pal.deep } else { gpui_kit::white() }).child(Icon::new(IconName::Check).size_3()))
+            .when(!checked, |d| d.bg(pal.raised).border_color(pal.line));
+        div()
+            .id((id, i))
+            .h(px(theme::spacing().chip))
+            .px_2()
+            .mx(px(-8.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap_3()
+            .text_sm()
+            .cursor_pointer()
+            .text_color(if checked { pal.text } else { pal.secondary })
+            .hover(|d| d.bg(pal.wash))
+            .when(cursor == Some(i), |d| d.bg(pal.wash))
+            .child(mark)
             .child(label.to_string())
             .on_click(move |_, window, cx| on_toggle(&i, window, cx))
     }))
