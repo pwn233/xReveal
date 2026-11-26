@@ -176,6 +176,22 @@ impl VideoPipeline {
         ((width, height) != (choice.width, choice.height) || (fps - choice.fps).abs() > 0.5).then_some(running)
     }
 
+    /// macOS offers no driver settings windows for capture devices.
+    pub fn has_device_settings(&self) -> bool {
+        false
+    }
+
+    pub fn open_device_settings(&mut self, _window: &gpui_kit::Window) {}
+
+    /// The stream is closed while the device's settings window is open.
+    pub fn settings_paused(&self) -> bool {
+        false
+    }
+
+    pub fn poll_device_settings(&mut self) -> bool {
+        false
+    }
+
     /// The video surface is under GPUI's view here, so GPUI's screens already cover it.
     pub fn set_surface_visible(&self, _visible: bool) {}
 
