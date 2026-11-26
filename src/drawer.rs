@@ -47,6 +47,11 @@ impl Slide {
         Self { started: Instant::now() - SLIDE_IN, from: 0.0, to: 0.0 }
     }
 
+    /// Fully shown, not moving.
+    pub fn opened() -> Self {
+        Self { started: Instant::now() - SLIDE_IN, from: 1.0, to: 1.0 }
+    }
+
     /// Starts sliding open or closed from wherever it is now.
     pub fn toward(self, open: bool) -> Self {
         let now = Instant::now();

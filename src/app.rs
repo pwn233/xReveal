@@ -671,38 +671,41 @@ impl Overlays {
         }
         // The edge handle. A click on it lands on the window's own mouse handler (which opens the
         // drawer), also when it's drawn in the click-through overlay window.
-        if self.handle.visible() {
-            // It slides out from the edge and fades in as the pointer nears it, and back.
-            if self.handle.moving() {
+        // The notch: a tab attached to the edge (the window's, or the drawer's while it's open).
+        // Closed, it slides out as the pointer nears the edge and opens the drawer; open, it
+        // rides on the drawer's inner edge and closes it. Its clicks land on the main window.
+        if self.handle.visible() || self.slide.visible() {
+            if self.handle.moving() || self.slide.moving() {
                 window.request_animation_frame();
             }
-            let shown = self.handle.shown();
-            let inset = px(4. - 28. * (1. - shown));
+            const NOTCH: f32 = 16.0;
+            let drawer_edge = if self.slide.visible() { drawer::width() * self.slide.shown() } else { 0.0 };
+            let inset = px(drawer_edge - NOTCH * (1.0 - self.handle.shown()));
+            // Towards the inside to open; back towards the edge to close.
+            let points_right = (side == DrawerSide::Left) != self.drawer_open;
             let h = div()
                 .absolute()
-                .opacity(shown)
                 .top(relative(0.5))
                 .mt(px(-36.))
-                .w(px(20.))
-                .h(px(64.))
-                .rounded(px(10.))
+                .w(px(NOTCH))
+                .h(px(72.))
                 .bg(pal.panel)
-                .border_1()
                 .border_color(pal.line)
+                .border_t_1()
+                .border_b_1()
                 .flex()
                 .items_center()
                 .justify_center()
+                .cursor_pointer()
                 .text_color(pal.secondary)
                 .child(
-                    gpui_kit::component::Icon::new(match side {
-                        DrawerSide::Right => gpui_kit::assets::IconName::ChevronLeft,
-                        DrawerSide::Left => gpui_kit::assets::IconName::ChevronRight,
-                    })
-                    .size_4(),
+                    gpui_kit::component::Icon::new(if points_right { gpui_kit::assets::IconName::ChevronRight } else { gpui_kit::assets::IconName::ChevronLeft })
+                        .size_3p5(),
                 );
+            // Flush against its edge: rounded and bordered only on the side facing the picture.
             out.push(match side {
-                DrawerSide::Right => h.right(inset),
-                DrawerSide::Left => h.left(inset),
+                DrawerSide::Right => h.right(inset).rounded_l(px(8.)).border_l_1(),
+                DrawerSide::Left => h.left(inset).rounded_r(px(8.)).border_r_1(),
             }
             .into_any_element());
         }
@@ -946,7 +949,8 @@ impl XReveal {
         }
         self.drawer_open = open;
         self.near_edge = false;
-        self.handle_slide = self.handle_slide.toward(false);
+        // The notch stays while the drawer is open (to close it), and tucks away after it closes.
+        self.handle_slide = if open { drawer::Slide::opened() } else { drawer::Slide::opened().toward(false) };
         cx.notify();
     }
 
@@ -1135,7 +1139,9 @@ impl Render for XReveal {
                 let near = near_drawer_edge(event.position.x.as_f32(), width, this.shown_side);
                 if near != this.near_edge {
                     this.near_edge = near;
-                    this.handle_slide = this.handle_slide.toward(near && !this.drawer_open);
+                    if !this.drawer_open {
+                        this.handle_slide = this.handle_slide.toward(near);
+                    }
                     cx.notify();
                 }
             }))
