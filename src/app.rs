@@ -1,6 +1,6 @@
 //! Root view: the live picture shows through it (it paints no background). On top: the Settings
 //! drawer, a one-line status until the screens without a picture exist, the one-time colour tip,
-//! and the Stats overlay (F3).
+//! and the performance box (F3).
 
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use gpui_kit::*;
 use crate::drawer::{self, DrawerEvent, DrawerModel, SettingsDrawer};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::platform::VideoPipeline;
-use crate::setup::{DrawerSide, Store, WindowMode, WindowPlacement};
+use crate::setup::{DrawerSide, StatsBox, Store, WindowMode, WindowPlacement};
 use crate::theme::palette;
 use crate::video::timing::Summary;
 
@@ -64,7 +64,7 @@ pub struct XReveal {
     near_edge: bool,
     /// The one-time "Blacks look grey?" tip, while it is up.
     tip: Option<Task<()>>,
-    /// Redraws the Stats overlay while it is shown; dropping it stops the refresh.
+    /// Redraws the performance box while it is shown; dropping it stops the refresh.
     stats_refresh: Option<Task<()>>,
     /// The Remembered setup (docs/spec/v1.md §3.7).
     store: Store,
@@ -131,6 +131,9 @@ impl XReveal {
         });
         this._subscriptions.push(follow);
         this.showing_changed(window, cx);
+        let stats = this.store.setup.stats;
+        this.stats_refresh = None;
+        this.apply_stats(stats, cx);
         this
     }
 
@@ -163,6 +166,7 @@ impl XReveal {
             delay: setup.delay,
             side: setup.drawer_side,
             window_mode: setup.window_mode,
+            stats: setup.stats,
             frame_interval: 1.0 / 60.0,
             ..Default::default()
         };
@@ -319,6 +323,7 @@ impl XReveal {
             }
             DrawerEvent::Source(os_id, choice) => self.switch_source(os_id, choice, window, cx),
             DrawerEvent::WindowMode(mode) => self.set_window_mode(mode, window, cx),
+            DrawerEvent::Stats(stats) => self.apply_stats(stats, cx),
             DrawerEvent::Quit => cx.quit(),
             DrawerEvent::ResetAll => self.reset_all_settings(window, cx),
         }
@@ -387,7 +392,8 @@ impl XReveal {
                 _ => {}
             }
         }
-        if open != self.drawer_open && !self.drawer_in_own_window {
+        // Also kept for a drawer in its own window: the performance box moves aside with it.
+        if open != self.drawer_open {
             self.slide = self.slide.toward(open);
         }
         self.drawer_open = open;
@@ -395,18 +401,30 @@ impl XReveal {
         cx.notify();
     }
 
-    fn toggle_stats(&mut self, cx: &mut Context<Self>) {
-        self.stats_refresh = match self.stats_refresh.take() {
-            Some(_) => None,
-            None => Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_millis(250)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
+    /// F3: shows or hides the performance box, and remembers that.
+    fn toggle_stats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stats = StatsBox { shown: !self.store.setup.stats.shown, ..self.store.setup.stats };
+        self.apply_stats(stats, cx);
+        self.refresh_drawer(window, cx);
+    }
+
+    /// Remembers the performance box's settings and redraws it four times a second while shown.
+    fn apply_stats(&mut self, stats: StatsBox, cx: &mut Context<Self>) {
+        self.store.update(|s| s.stats = stats);
+        match (stats.shown, self.stats_refresh.is_some()) {
+            (true, false) => {
+                self.stats_refresh = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor().timer(Duration::from_millis(250)).await;
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            break;
+                        }
                     }
-                }
-            })),
-        };
+                }));
+            }
+            (false, true) => self.stats_refresh = None,
+            _ => {}
+        }
         cx.notify();
     }
 
@@ -418,24 +436,42 @@ impl XReveal {
     }
 }
 
-/// The Stats overlay's lines.
-pub fn stats_lines(summary: Option<Summary>, description: &str, launch_to_picture: Option<Duration>) -> Vec<String> {
-    let mut lines = Vec::new();
+/// The performance box's rows (label, value), with only what `shows` asks for.
+pub fn stats_rows(summary: Option<Summary>, description: &str, launch_to_picture: Option<Duration>, shows: StatsBox) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
     let summary = summary.unwrap_or_default();
     let approx = if summary.present_time_estimated { "≈" } else { "" };
     let ms = |pair: Option<(f64, f64)>| match pair {
-        Some((p50, p99)) => format!("{approx}{p50:.1} ms (p99 {p99:.1})"),
+        Some((p50, p99)) => format!("{approx}{p50:.1} ms · p99 {p99:.1}"),
         None => "–".into(),
     };
-    lines.push(format!("capture → screen  {}", ms(summary.capture_to_screen)));
-    lines.push(format!("xReveal's share   {}", ms(summary.arrival_to_screen)));
-    let fps = summary.fps.map_or("–".into(), |fps| format!("{fps:.1}"));
-    lines.push(format!("{fps} fps · dropped {} · late {}", summary.dropped, summary.late));
-    lines.push(description.to_owned());
-    if let Some(launch) = launch_to_picture {
-        lines.push(format!("launch → picture  {} ms", launch.as_millis()));
+    if shows.latency {
+        rows.push(("capture → screen", ms(summary.capture_to_screen)));
+        rows.push(("xReveal's share", ms(summary.arrival_to_screen)));
+        if let Some(launch) = launch_to_picture {
+            rows.push(("launch → picture", format!("{} ms", launch.as_millis())));
+        }
     }
-    lines
+    if shows.fps {
+        rows.push(("fps", summary.fps.map_or("–".into(), |fps| format!("{fps:.1}"))));
+    }
+    if shows.frames {
+        rows.push(("dropped · late", format!("{} · {}", summary.dropped, summary.late)));
+    }
+    if shows.format {
+        rows.push(("format", description.to_owned()));
+    }
+    rows
+}
+
+/// How far from the window's side the performance box sits: clear of the drawer when it is open
+/// on that side (following its slide), and of the status line below it at the bottom left.
+pub fn stats_inset(corner: crate::setup::Corner, drawer_side: DrawerSide, drawer_shown: f32, status_shown: bool) -> (f32, f32) {
+    const MARGIN: f32 = 12.0;
+    let same_side = corner.is_left() == (drawer_side == DrawerSide::Left);
+    let side = MARGIN + if same_side { drawer::WIDTH * drawer_shown } else { 0.0 };
+    let vertical = MARGIN + if status_shown && corner == crate::setup::Corner::BottomLeft { 40.0 } else { 0.0 };
+    (side, vertical)
 }
 
 /// Whether the pointer at `x` is near the drawer's edge of a window `width` wide.
@@ -452,10 +488,41 @@ impl Render for XReveal {
         let side = self.store.setup.drawer_side;
         let width = window.bounds().size.width.as_f32();
 
-        let overlay = self.stats_refresh.is_some().then(|| {
-            let lines = stats_lines(self.stats(), &self.status, crate::video::FIRST_PRESENT.get().copied());
-            panel(div().absolute().top_3().left_3().font_family("Menlo").flex().flex_col())
-                .children(lines.into_iter().map(|line| div().child(line)))
+        let overlay = self.store.setup.stats.shown.then(|| {
+            let stats = self.store.setup.stats;
+            let rows = stats_rows(self.stats(), &self.status, crate::video::FIRST_PRESENT.get().copied(), stats);
+            if self.slide.moving() {
+                window.request_animation_frame();
+            }
+            let shown = 1.0 + self.slide.offset().as_f32() / drawer::WIDTH;
+            let (side_inset, vertical_inset) = stats_inset(stats.corner, side, shown, !self.drawer_open);
+            let rows = rows.into_iter().map(|(label, value)| {
+                div()
+                    .flex()
+                    .justify_between()
+                    .gap_4()
+                    .child(div().text_color(rgb(palette::MUTED)).child(label))
+                    .child(div().text_color(rgb(palette::TEXT)).child(value))
+            });
+            let corner = stats.corner;
+            div()
+                .absolute()
+                .when(corner.is_left(), |d| d.left(px(side_inset)))
+                .when(!corner.is_left(), |d| d.right(px(side_inset)))
+                .when(corner.is_top(), |d| d.top(px(vertical_inset)))
+                .when(!corner.is_top(), |d| d.bottom(px(vertical_inset)))
+                .px_3()
+                .py_2()
+                .rounded(px(10.))
+                .bg(rgba(palette::PANEL))
+                .border_1()
+                .border_color(rgba(palette::LINE))
+                .font_family(crate::theme::mono_family())
+                .text_xs()
+                .line_height(px(18.))
+                .flex()
+                .flex_col()
+                .children(rows)
         });
         let tip = self.tip.is_some().then(|| {
             div().absolute().top_3().w_full().flex().justify_center().child(panel(div()).child(
@@ -533,7 +600,7 @@ impl Render for XReveal {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleDrawer, window, cx| this.set_drawer_open(!this.drawer_open, window, cx)))
             .on_action(cx.listener(|this, _: &CloseDrawer, window, cx| this.set_drawer_open(false, window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleStats, _, cx| this.toggle_stats(cx)))
+            .on_action(cx.listener(|this, _: &ToggleStats, window, cx| this.toggle_stats(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleFullscreen, window, cx| {
                 let mode = match this.store.setup.window_mode {
                     WindowMode::Windowed => WindowMode::Fullscreen,
@@ -643,7 +710,7 @@ impl Render for DrawerWindow {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleDrawer, _, cx| this.with_main(cx, |m, w, cx| m.set_drawer_open(false, w, cx))))
             .on_action(cx.listener(|this, _: &CloseDrawer, _, cx| this.with_main(cx, |m, w, cx| m.set_drawer_open(false, w, cx))))
-            .on_action(cx.listener(|this, _: &ToggleStats, _, cx| this.with_main(cx, |m, _, cx| m.toggle_stats(cx))))
+            .on_action(cx.listener(|this, _: &ToggleStats, _, cx| this.with_main(cx, |m, w, cx| m.toggle_stats(w, cx))))
             .on_action(cx.listener(|this, _: &ToggleFullscreen, _, cx| {
                 this.with_main(cx, |m, w, cx| {
                     m.set_drawer_open(false, w, cx);
@@ -657,14 +724,21 @@ impl Render for DrawerWindow {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has its own `test` attribute that would replace std's.
-    use super::{DrawerSide, Duration, Summary, near_drawer_edge, stats_lines};
+    use super::{DrawerSide, Duration, Summary, near_drawer_edge, stats_inset, stats_rows};
+    use crate::setup::{Corner, StatsBox};
+
+    fn value<'a>(rows: &'a [(&str, String)], label: &str) -> &'a str {
+        rows.iter().find(|(l, _)| *l == label).map(|(_, v)| v.as_str()).unwrap_or_else(|| panic!("no {label} row"))
+    }
 
     #[test]
-    fn stats_lines_show_timings_or_dashes() {
-        let empty = stats_lines(None, "No capture card found.", None);
-        assert_eq!(empty[0], "capture → screen  –");
-        assert_eq!(empty[2], "– fps · dropped 0 · late 0");
-        assert_eq!(empty.len(), 4);
+    fn stats_rows_show_timings_or_dashes() {
+        let all = StatsBox::default();
+        let empty = stats_rows(None, "No capture card found.", None, all);
+        assert_eq!(value(&empty, "capture → screen"), "–");
+        assert_eq!(value(&empty, "fps"), "–");
+        assert_eq!(value(&empty, "dropped · late"), "0 · 0");
+        assert_eq!(empty.len(), 5);
 
         let summary = Summary {
             capture_to_screen: Some((12.34, 18.1)),
@@ -674,11 +748,24 @@ mod tests {
             late: 1,
             present_time_estimated: true,
         };
-        let lines = stats_lines(Some(summary), "USB2 Video · 1280x720 @ 60 · 420v", Some(Duration::from_millis(480)));
-        assert_eq!(lines[0], "capture → screen  ≈12.3 ms (p99 18.1)");
-        assert_eq!(lines[1], "xReveal's share   ≈4.2 ms (p99 6.0)");
-        assert_eq!(lines[2], "59.9 fps · dropped 3 · late 1");
-        assert_eq!(lines[4], "launch → picture  480 ms");
+        let rows = stats_rows(Some(summary), "USB2 Video · 1280x720 @ 60 · 420v", Some(Duration::from_millis(480)), all);
+        assert_eq!(value(&rows, "capture → screen"), "≈12.3 ms · p99 18.1");
+        assert_eq!(value(&rows, "xReveal's share"), "≈4.2 ms · p99 6.0");
+        assert_eq!(value(&rows, "launch → picture"), "480 ms");
+        assert_eq!(value(&rows, "fps"), "59.9");
+        assert_eq!(value(&rows, "dropped · late"), "3 · 1");
+
+        let just_fps = StatsBox { latency: false, frames: false, format: false, ..all };
+        let rows = stats_rows(Some(summary), "", Some(Duration::from_millis(480)), just_fps);
+        assert_eq!(rows, vec![("fps", "59.9".to_string())]);
+    }
+
+    #[test]
+    fn performance_box_moves_clear_of_the_drawer_and_status_line() {
+        assert_eq!(stats_inset(Corner::TopRight, DrawerSide::Right, 1.0, false), (392.0, 12.0), "drawer open on its side");
+        assert_eq!(stats_inset(Corner::TopRight, DrawerSide::Right, 0.5, false), (202.0, 12.0), "follows the slide");
+        assert_eq!(stats_inset(Corner::TopLeft, DrawerSide::Right, 1.0, false), (12.0, 12.0), "drawer on the other side");
+        assert_eq!(stats_inset(Corner::BottomLeft, DrawerSide::Right, 0.0, true), (12.0, 52.0), "above the status line");
     }
 
     #[test]

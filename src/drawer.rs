@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::{Duration, Instant};
 
-use crate::setup::{DrawerSide, WindowMode};
+use crate::setup::{Corner, DrawerSide, StatsBox, WindowMode};
 use crate::source::{self, SourceIdentity, SourceInfo, VideoFormat};
 use crate::theme::{mono_family, palette::*};
 use crate::video::picture::{Adjustments, Choice, ColourRange, ColourSpace, FillMode, PictureSettings, TargetRatio};
@@ -82,6 +82,7 @@ pub struct DrawerModel {
     pub delay: DelaySettings,
     pub side: DrawerSide,
     pub window_mode: WindowMode,
+    pub stats: StatsBox,
     /// The Source's frame interval in seconds, to say how much Buffering costs.
     pub frame_interval: f64,
 }
@@ -95,6 +96,7 @@ pub enum DrawerEvent {
     Delay(DelaySettings),
     Side(DrawerSide),
     WindowMode(WindowMode),
+    Stats(StatsBox),
     ResetAll,
     Quit,
 }
@@ -140,6 +142,9 @@ pub mod hints {
     pub const STRENGTH: &str = "0% looks just like Stretch. Higher keeps the centre more natural and stretches the edges more.";
     pub const CUSTOM_RATIO: &str = "Width ÷ height of your own shape, like 2.39 for a cinema ratio";
     pub const DRAWER_SIDE: &str = "Which side this panel opens from";
+    pub const STATS: &str = "Live timing over the picture. F3 shows or hides it too.";
+    pub const STATS_CORNER: &str = "It moves aside when this panel opens on the same side";
+    pub const STATS_SHOWS: &str = "What the box lists";
     pub const RANGE: &str = "Match your console's RGB range. Blacks look grey? Choose Limited, or set your console to Full.";
     pub const SPACE: &str = "The picture's colour formula. Auto picks BT.709 for HD pictures.";
     pub const BRIGHTNESS: &str = "Lifts or lowers the whole picture";
@@ -485,7 +490,54 @@ impl SettingsDrawer {
             }),
         );
         out.push(setting("Drawer side", hints::DRAWER_SIDE, side));
+        out.push(self.stats_settings(cx));
         out
+    }
+
+    /// The performance box: on or off, which corner, and what it lists (one section).
+    fn stats_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let stats = self.model.stats;
+        let shown = chips(
+            "stats-shown",
+            &["Off", "On"],
+            stats.shown as usize,
+            cx.listener(|this, i: &usize, _, cx| this.set_stats(StatsBox { shown: *i == 1, ..this.model.stats }, cx)),
+        );
+        let mut section = div().flex().flex_col().gap_6().child(setting("Performance box", hints::STATS, shown));
+        if stats.shown {
+            let corner = chips(
+                "stats-corner",
+                &["Top left", "Top right", "Bottom left", "Bottom right"],
+                Corner::ALL.iter().position(|c| *c == stats.corner).unwrap_or(0),
+                cx.listener(|this, i: &usize, _, cx| this.set_stats(StatsBox { corner: Corner::ALL[*i], ..this.model.stats }, cx)),
+            );
+            let shows = toggles(
+                "stats-shows",
+                &["Latency", "Frame rate", "Dropped frames", "Video format"],
+                &[stats.latency, stats.fps, stats.frames, stats.format],
+                cx.listener(|this, i: &usize, _, cx| {
+                    let mut stats = this.model.stats;
+                    let flag = match i {
+                        0 => &mut stats.latency,
+                        1 => &mut stats.fps,
+                        2 => &mut stats.frames,
+                        _ => &mut stats.format,
+                    };
+                    *flag = !*flag;
+                    this.set_stats(stats, cx);
+                }),
+            );
+            section = section.child(setting("Corner", hints::STATS_CORNER, corner)).child(setting("Shows", hints::STATS_SHOWS, shows));
+        }
+        section.into_any_element()
+    }
+
+    fn set_stats(&mut self, stats: StatsBox, cx: &mut Context<Self>) {
+        if stats != self.model.stats {
+            self.model.stats = stats;
+            cx.emit(DrawerEvent::Stats(stats));
+            cx.notify();
+        }
     }
 
     fn colour_tab(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -626,6 +678,7 @@ impl SettingsDrawer {
                     && p.smart_stretch_strength == d.smart_stretch_strength
                     && self.model.side == DrawerSide::default()
                     && self.model.window_mode == WindowMode::default()
+                    && self.model.stats == StatsBox::default()
                     && !self.custom_ratio
             }
             Tab::Colour => p.colour_range == d.colour_range && p.colour_space == d.colour_space && p.adjustments == d.adjustments,
@@ -663,6 +716,10 @@ impl SettingsDrawer {
                 if model.side != DrawerSide::default() {
                     model.side = DrawerSide::default();
                     events.push(DrawerEvent::Side(model.side));
+                }
+                if model.stats != StatsBox::default() {
+                    model.stats = StatsBox::default();
+                    events.push(DrawerEvent::Stats(model.stats));
                 }
                 if model.window_mode != WindowMode::default() {
                     model.window_mode = WindowMode::default();
@@ -819,6 +876,30 @@ fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&u
             .when(!chosen, |d| d.bg(rgb(RAISED)).border_color(rgba(LINE)).text_color(rgb(SECONDARY)).hover(|d| d.bg(rgb(RAISED_HOVER)).text_color(rgb(TEXT))))
             .child(label.to_string())
             .on_click(move |_, window, cx| on_pick(&i, window, cx))
+    }))
+}
+
+/// Like [`chips`], but each one switches on and off by itself.
+fn toggles(id: &'static str, labels: &[&str], on: &[bool], on_toggle: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
+    let on_toggle = std::rc::Rc::new(on_toggle);
+    div().w_full().flex().flex_wrap().gap(px(6.)).children(labels.iter().enumerate().map(|(i, label)| {
+        let chosen = on.get(i).copied().unwrap_or(false);
+        let on_toggle = on_toggle.clone();
+        div()
+            .id((id, i))
+            .h(px(30.))
+            .px_3()
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_sm()
+            .cursor_pointer()
+            .border_1()
+            .when(chosen, |d| d.bg(rgba(ACCENT_FILL)).border_color(rgba(0x6aa9ff66)).text_color(rgb(ACCENT)).child(Icon::new(IconName::Check).size_3p5()))
+            .when(!chosen, |d| d.bg(rgb(RAISED)).border_color(rgba(LINE)).text_color(rgb(SECONDARY)).hover(|d| d.bg(rgb(RAISED_HOVER)).text_color(rgb(TEXT))))
+            .child(label.to_string())
+            .on_click(move |_, window, cx| on_toggle(&i, window, cx))
     }))
 }
 

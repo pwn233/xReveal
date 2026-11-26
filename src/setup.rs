@@ -42,6 +42,8 @@ pub struct Setup {
     /// Where the window last was on `monitor` in Windowed mode.
     pub window: Option<WindowPlacement>,
     pub drawer_side: DrawerSide,
+    /// The performance box (F3): whether it shows, where, and what it lists.
+    pub stats: StatsBox,
     /// Every Source ever seen, with its own colour choices. Never trimmed.
     pub sources: Vec<SourceEntry>,
     /// Audio buffer size per device ID, in frames, grown after dropouts.
@@ -61,6 +63,7 @@ impl Default for Setup {
             window_mode: WindowMode::Windowed,
             window: None,
             drawer_side: DrawerSide::Right,
+            stats: StatsBox::default(),
             sources: Vec::new(),
             audio_buffers: BTreeMap::new(),
         }
@@ -101,6 +104,49 @@ pub enum WindowMode {
     Windowed,
     /// Borderless, covering the whole monitor.
     Fullscreen,
+}
+
+/// The performance box over the picture (docs/spec/v1.md §3.3). Hidden by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct StatsBox {
+    pub shown: bool,
+    pub corner: Corner,
+    /// Capture → screen and xReveal's share, p50 and p99.
+    pub latency: bool,
+    pub fps: bool,
+    /// Dropped and late frames.
+    pub frames: bool,
+    /// The Video format and pixel format on screen.
+    pub format: bool,
+}
+
+impl Default for StatsBox {
+    fn default() -> Self {
+        Self { shown: false, corner: Corner::TopLeft, latency: true, fps: true, frames: true, format: true }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Corner {
+    #[default]
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Corner {
+    pub const ALL: [Corner; 4] = [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight];
+
+    pub fn is_left(self) -> bool {
+        matches!(self, Corner::TopLeft | Corner::BottomLeft)
+    }
+
+    pub fn is_top(self) -> bool {
+        matches!(self, Corner::TopLeft | Corner::TopRight)
+    }
 }
 
 /// A window's place and size on its monitor, in logical pixels.
@@ -431,6 +477,7 @@ mod tests {
         let Loaded::Setup(setup) = load(&dir.file()) else { panic!("should load") };
         assert_eq!(setup.window_mode, WindowMode::Fullscreen);
         assert!(!setup.window.unwrap().usable());
+        assert!(!setup.stats.shown && setup.stats.latency, "the performance box starts hidden, listing everything");
         assert!(WindowPlacement { x: -1900.0, y: 30.0, width: 1280.0, height: 720.0 }.usable(), "a monitor left of the primary");
     }
 
