@@ -1,6 +1,7 @@
 //! Windows: Media Foundation capture → video thread → Direct3D 11 swap chain in a child window over
 //! GPUI's window (docs/spec/v1.md §3.1, §3.3, §3.4; ADR 0001, ADR 0002).
 
+pub mod container;
 pub mod media;
 mod render;
 pub mod screens;

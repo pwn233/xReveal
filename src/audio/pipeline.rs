@@ -50,9 +50,29 @@ fn devices(input: bool) -> Vec<AudioDevice> {
         .collect()
 }
 
-/// The input that carries the same physical card's sound (docs/spec/v1.md §2.1): matched by the
-/// card's serial, which macOS puts in its audio device's UID, never by name.
-pub fn paired_input(card_name: &str, card_serial: Option<&str>, inputs: &[AudioDevice]) -> Option<String> {
+/// The input that carries the same physical card's sound (docs/spec/v1.md §2.1), never matched by
+/// name: on Windows by container ID, on macOS by the serial in the audio device's UID.
+pub fn paired_input(card: &crate::source::SourceIdentity, inputs: &[AudioDevice]) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::platform::windows::container;
+        let found = container::of_video(&card.os_id)?;
+        let containers: Vec<(String, Option<_>)> = inputs.iter().map(|d| (d.id.clone(), container::of_audio_endpoint(&d.id))).collect();
+        same_container(found, &containers)
+    }
+    #[cfg(not(target_os = "windows"))]
+    by_serial(&card.name, card.serial.as_deref(), inputs)
+}
+
+/// The first input in `inputs` (ID, container) in the card's container.
+#[cfg_attr(not(any(target_os = "windows", test)), expect(dead_code, reason = "Windows pairs by container"))]
+pub fn same_container<T: PartialEq>(card: T, inputs: &[(String, Option<T>)]) -> Option<String> {
+    inputs.iter().find(|(_, c)| c.as_ref() == Some(&card)).map(|(id, _)| id.clone())
+}
+
+/// The input whose macOS UID carries the card's serial.
+#[cfg_attr(all(target_os = "windows", not(test)), expect(dead_code, reason = "macOS pairs by serial"))]
+pub fn by_serial(card_name: &str, card_serial: Option<&str>, inputs: &[AudioDevice]) -> Option<String> {
     let serial = card_serial?;
     inputs
         .iter()
@@ -363,7 +383,7 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioDevice, paired_input, to_stereo};
+    use super::{AudioDevice, by_serial, same_container, to_stereo};
 
     /// Real devices: the default input played (muted) on the default output for 3 s. Run by hand
     /// with `cargo test -- --ignored live_sound`; needs a microphone and an output.
@@ -404,7 +424,14 @@ mod tests {
             AudioDevice { id: "AppleUSBAudioEngine:MACROSILICON:USB2 Video:12345678:4,3".into(), name: "USB2 Digital Audio".into() },
             AudioDevice { id: "AppleUSBAudioEngine:MACROSILICON:USB2 Video:93869598:4,3".into(), name: "USB2 Digital Audio".into() },
         ];
-        assert_eq!(paired_input("USB2 Video", Some("93869598"), &inputs).as_deref(), Some("AppleUSBAudioEngine:MACROSILICON:USB2 Video:93869598:4,3"));
-        assert_eq!(paired_input("USB2 Video", None, &inputs), None, "no serial, no guess");
+        assert_eq!(by_serial("USB2 Video", Some("93869598"), &inputs).as_deref(), Some("AppleUSBAudioEngine:MACROSILICON:USB2 Video:93869598:4,3"));
+        assert_eq!(by_serial("USB2 Video", None, &inputs), None, "no serial, no guess");
+    }
+
+    #[test]
+    fn pairs_the_cards_own_audio_by_container_on_windows() {
+        let inputs = [("mic".to_owned(), None), ("other-card".to_owned(), Some(7u32)), ("card-audio".to_owned(), Some(42u32))];
+        assert_eq!(same_container(42, &inputs).as_deref(), Some("card-audio"));
+        assert_eq!(same_container(9, &inputs), None, "no match, no guess");
     }
 }

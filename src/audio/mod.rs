@@ -53,7 +53,7 @@ impl Sound {
         self.card = card.cloned();
         self.seen_underruns = 0;
         let inputs = pipeline::inputs();
-        self.paired = card.and_then(|c| pipeline::paired_input(&c.name, c.serial.as_deref(), &inputs));
+        self.paired = card.and_then(|c| pipeline::paired_input(c, &inputs));
         let chosen = setup.audio.input.clone().filter(|id| inputs.iter().any(|d| &d.id == id));
         self.notice = None;
         if setup.audio.input.is_some() && chosen.is_none() && self.paired.is_some() {
