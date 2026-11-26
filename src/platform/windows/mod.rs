@@ -44,7 +44,7 @@ impl VideoPipeline {
     /// Puts a video surface over GPUI's content in `window` and starts showing a Source: the
     /// first device at its default Video format. The surface comes up even without a card (it
     /// shows black). Main thread only.
-    pub fn start(window: &gpui_kit::Window, remembered: Option<(&SourceIdentity, Option<VideoFormat>)>) -> Result<Self, String> {
+    pub fn start(window: &gpui_kit::Window, remembered: Option<(&SourceIdentity, Option<VideoFormat>)>, show: bool) -> Result<Self, String> {
         let handle = HasWindowHandle::window_handle(window).map_err(|e| format!("no native window: {e}"))?;
         let RawWindowHandle::Win32(win32) = handle.as_raw() else {
             return Err("expected a Win32 window".into());
@@ -79,14 +79,16 @@ impl VideoPipeline {
         };
         if let Err(error) = started {
             pipeline.status = format!("Media Foundation didn't start: {error}");
-        } else {
-            pipeline.show(source::launch_pick(&pipeline.sources, remembered));
+        } else if show {
+            pipeline.show_launch(remembered);
         }
         Ok(pipeline)
     }
 
-    fn show(&mut self, pick: LaunchPick) {
-        match pick {
+    /// Shows the remembered Source, as at launch (docs/spec/v1.md §2.1). With nothing remembered,
+    /// the first card; when the remembered one isn't plugged in, nothing (the picker waits).
+    pub fn show_launch(&mut self, remembered: Option<(&SourceIdentity, Option<VideoFormat>)>) {
+        match source::launch_pick(&self.sources, remembered) {
             LaunchPick::Show(index, choice) => {
                 let os_id = self.sources[index].identity.os_id.clone();
                 if let Err(error) = self.switch_to(&os_id, choice) {
@@ -123,7 +125,9 @@ impl VideoPipeline {
         self.wanted = Some((identity.clone(), choice));
         self.release();
         let capture = DeviceCapture::start(os_id, name.clone(), native, self.slot.clone()).map_err(|e| {
-            let error = if media::is_busy(e.code()) {
+            let error = if e.code() == windows::Win32::Foundation::E_ACCESSDENIED {
+                OpenError::Blocked("Windows is blocking camera access for desktop apps".into())
+            } else if media::is_busy(e.code()) {
                 OpenError::Busy(format!("{name} is being used by another app (OBS, Discord, a browser…). Close it to continue."))
             } else {
                 OpenError::Failed(format!("Couldn't open {name}: {e}"))
@@ -138,6 +142,18 @@ impl VideoPipeline {
         self.status = capture.description();
         self.capture = Some(capture);
         Ok(())
+    }
+
+    /// Stops showing anything and forgets the wanted Source (Reset all: back to the picker).
+    pub fn forget(&mut self) {
+        self.release();
+        self.wanted = None;
+        self.open_error = None;
+    }
+
+    /// Why the wanted Source didn't open, if it didn't.
+    pub fn open_error(&self) -> Option<&OpenError> {
+        self.open_error.as_ref()
     }
 
     /// Stops the capture (the card is gone); the Source stays wanted.

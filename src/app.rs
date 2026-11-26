@@ -8,7 +8,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::drawer::{self, DrawerEvent, DrawerModel, SettingsDrawer, Tab};
-use crate::screens::Screen;
+use crate::permission::{self, Access, Privacy};
+use crate::screens::{Actions, PickerInput, PickerKind, Screen};
 use crate::source::VideoFormat;
 use crate::video::signal;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -71,6 +72,14 @@ pub struct XReveal {
     stats_refresh: Option<Task<()>>,
     /// What shows where the picture goes (docs/spec/v1.md §2.8), checked twice a second.
     screen: Screen,
+    /// Which picker shows while nothing is wanted.
+    picker: PickerKind,
+    /// The remembered Source starts once camera access is given.
+    pending_launch: bool,
+    /// A broken `setup.toml` was set aside: said once, over the Welcome screen.
+    notice: Option<String>,
+    /// When the picker lists the inputs again (one may have been plugged in).
+    next_listing: Option<Instant>,
     /// The wanted card was unplugged: open it again as soon as it is back.
     unplugged: bool,
     /// When to try a busy card again.
@@ -99,10 +108,15 @@ impl XReveal {
             store.update(|s| s.monitor = Some(uuid.to_string()));
         }
 
+        // First launch: the Welcome screen, not the first card. Without camera access (macOS), the
+        // permission screen first; the remembered Source starts once access is given.
+        let camera_ready = permission::access(Privacy::Camera) == Access::Granted;
+        let first_run = store.first_run;
+        let notice = store.notice.take();
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let (video, mut status) = {
+        let (video, status) = {
             let remembered = store.setup.source.clone();
-            match VideoPipeline::start(window, remembered.as_ref().map(|s| (s, store.setup.video_format))) {
+            match VideoPipeline::start(window, remembered.as_ref().map(|s| (s, store.setup.video_format)), camera_ready && !first_run) {
                 Ok(video) => {
                     let status = video.description().to_owned();
                     (Some(video), status)
@@ -111,10 +125,12 @@ impl XReveal {
             }
         };
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let mut status = String::from("The live picture isn't implemented on this OS yet.");
-        if let Some(notice) = store.notice.take() {
-            status = format!("{notice} {status}");
-        }
+        let status = String::from("The live picture isn't implemented on this OS yet.");
+        let picker = match (&store.setup.source, first_run) {
+            (_, true) => PickerKind::Welcome,
+            (Some(remembered), false) => PickerKind::NotFound(remembered.name.clone()),
+            (None, false) => PickerKind::Choose,
+        };
 
         let drawer = cx.new(|cx| SettingsDrawer::new(DrawerModel::default(), window, cx));
         let on_drawer = cx.subscribe_in(&drawer, window, |this, _, event: &DrawerEvent, window, cx| this.apply(event.clone(), window, cx));
@@ -132,6 +148,10 @@ impl XReveal {
             tip: None,
             stats_refresh: None,
             screen: Screen::Starting,
+            picker,
+            pending_launch: !camera_ready && !first_run,
+            notice,
+            next_listing: None,
             unplugged: false,
             next_retry: None,
             taken_over: None,
@@ -173,10 +193,49 @@ impl XReveal {
     /// it comes back or stops being busy, and notices another app changing its format.
     fn watch_signal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let screen = {
+        let screen = 'screen: {
+            let camera = permission::access(Privacy::Camera);
+            if camera != Access::Granted {
+                break 'screen Screen::Permission { denied: camera == Access::Denied };
+            }
             let Some(video) = &mut self.video else { return };
+            if std::mem::take(&mut self.pending_launch) {
+                let remembered = self.store.setup.source.clone();
+                video.show_launch(remembered.as_ref().map(|s| (s, self.store.setup.video_format)));
+                if video.wanted().is_some() {
+                    self.status = video.description().to_owned();
+                    self.showing_changed(window, cx);
+                    return self.watch_signal(window, cx);
+                }
+            }
+            if matches!(video.open_error(), Some(signal::OpenError::Blocked(_))) {
+                if self.next_retry.is_none_or(|t| Instant::now() >= t) {
+                    self.next_retry = Some(Instant::now() + signal::BUSY_RETRY);
+                    if video.retry().is_ok() {
+                        self.status = video.description().to_owned();
+                        self.showing_changed(window, cx);
+                        return self.watch_signal(window, cx);
+                    }
+                }
+                break 'screen Screen::Blocked;
+            }
             match video.observe() {
-                None => Screen::no_card(video.description()),
+                None => {
+                    // Nothing chosen yet: the picker, listing what's plugged in now (every 2 s).
+                    if self.next_listing.is_none_or(|t| Instant::now() >= t) {
+                        self.next_listing = Some(Instant::now() + Duration::from_secs(2));
+                        video.refresh_sources();
+                    }
+                    let inputs = video
+                        .sources()
+                        .iter()
+                        .filter_map(|s| {
+                            let format = crate::source::default_choice(&s.formats)?;
+                            Some(PickerInput { os_id: s.identity.os_id.clone(), name: s.identity.name.clone(), format: drawer::readout(format) })
+                        })
+                        .collect();
+                    Screen::Picker { kind: self.picker.clone(), inputs }
+                }
                 Some(observed) => {
                     let mut observed = observed;
                     let mut reopened = false;
@@ -227,6 +286,39 @@ impl XReveal {
             cx.notify();
         }
         let _ = window;
+    }
+
+    /// An input chosen on the Welcome screen or the picker: it starts, with the drawer closed.
+    fn choose_input(&mut self, os_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(video) = &self.video
+            && let Some(format) = video.sources().iter().find(|s| s.identity.os_id == os_id).and_then(|s| crate::source::default_choice(&s.formats))
+        {
+            self.notice = None;
+            self.set_drawer_open(false, window, cx);
+            self.switch_source(os_id, format, window, cx);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (os_id, window, cx);
+    }
+
+    /// What the screens' buttons do.
+    fn screen_actions(&self, cx: &mut Context<Self>) -> Actions {
+        let this = cx.entity().downgrade();
+        let (a, b) = (this.clone(), this.clone());
+        Actions {
+            pick_another: std::rc::Rc::new(move |window, cx| {
+                let _ = this.update(cx, |this, cx| this.pick_another_card(window, cx));
+            }),
+            choose: std::rc::Rc::new(move |os_id, window, cx| {
+                let _ = a.update(cx, |this, cx| this.choose_input(os_id, window, cx));
+            }),
+            allow: std::rc::Rc::new(move |window, cx| {
+                permission::request();
+                let _ = b.update(cx, |this, cx| this.watch_signal(window, cx));
+            }),
+            open_settings: std::rc::Rc::new(|privacy, _, _| permission::open_settings(privacy)),
+        }
     }
 
     /// "Restore": puts the card back to xReveal's own Video format after another app changed it.
@@ -457,8 +549,16 @@ impl XReveal {
             self.store.update(|s| s.window_mode = mode);
             self.set_window_mode(WindowMode::default(), window, cx);
         }
-        // Until the Welcome screen exists, keep showing the current Source with default settings.
-        self.showing_changed(window, cx);
+        // Everything forgotten: back to the Welcome screen (docs/spec/v1.md §2.3).
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(video) = &mut self.video {
+            video.forget();
+        }
+        self.picker = PickerKind::Welcome;
+        self.unplugged = false;
+        self.set_drawer_open(false, window, cx);
+        self.refresh_drawer(window, cx);
+        self.watch_signal(window, cx);
     }
 
     /// Switches to another Source or Video format: the picture restarts briefly, with a notice
@@ -714,7 +814,24 @@ impl Render for XReveal {
         // Screens without a picture sit on black, so they always use the dark palette.
         let screen_palette = theme::palette_for(&crate::setup::Look { theme: crate::setup::ThemeChoice::Dark, ..self.store.setup.look }, true);
         let backdrop = self.screen.backdrop();
-        let screen = self.screen.render(screen_palette, cx.listener(|this, _, window, cx| this.pick_another_card(window, cx)));
+        let actions = self.screen_actions(cx);
+        let screen = self.screen.render(screen_palette, &actions);
+        // A one-time notice (a broken setup set aside), and macOS microphone access turned off.
+        let microphone_off = self.screen.shows_picture() && permission::access(Privacy::Microphone) == Access::Denied;
+        let notice = self.notice.clone().filter(|_| matches!(self.screen, Screen::Picker { .. })).map(|n| panel(div()).child(n));
+        let microphone = microphone_off.then(|| {
+            panel(div().flex().items_center().gap_3()).child("Microphone access is off, so xReveal can't play sound").child(
+                div()
+                    .id("open-microphone-settings")
+                    .text_color(pal.accent)
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(pal.text))
+                    .child("Open System Settings")
+                    .on_click(|_, _, _| permission::open_settings(Privacy::Microphone)),
+            )
+        });
+        let top_notices = (notice.is_some() || microphone.is_some())
+            .then(|| div().absolute().top_3().w_full().flex().flex_col().items_center().gap_2().children(notice).children(microphone));
         let taken_over = self.taken_over.map(|format| {
             let card = self.status.split(" · ").next().unwrap_or("The input").to_owned();
             div().absolute().top_3().w_full().flex().justify_center().child(
@@ -769,6 +886,7 @@ impl Render for XReveal {
             .items_end()
             .p_3()
             .children(screen)
+            .children(top_notices)
             .children(status)
             .children(taken_over)
             .children(tip)

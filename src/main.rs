@@ -1,5 +1,6 @@
 mod app;
 mod drawer;
+mod permission;
 mod platform;
 mod screens;
 mod setup;
