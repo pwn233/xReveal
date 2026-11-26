@@ -216,6 +216,36 @@ impl VideoPipeline {
     }
 }
 
+impl VideoPipeline {
+    /// Every capture device and its formats (for `--report`).
+    pub fn list_sources() -> Vec<SourceInfo> {
+        capture::list_sources()
+    }
+
+    /// Captures from `os_id` at `native` for `seconds` without drawing anything, for `--report`:
+    /// what the capture says it delivers, and the gaps between frames as they arrive, in ms.
+    pub fn measure(os_id: &str, native: source::NativeFormat, seconds: f64) -> Result<(String, Vec<f64>), String> {
+        use crate::video::slot::Taken;
+        use std::time::Duration;
+        let slot = Arc::new(FrameSlot::<PixelBuffer>::new());
+        let capture = Capture::start(slot.clone(), os_id, native).map_err(|e| e.message().to_owned())?;
+        let started = Instant::now();
+        let mut last = None::<Instant>;
+        let mut gaps = Vec::new();
+        while started.elapsed().as_secs_f64() < seconds {
+            if let Taken::Frame(_) = slot.take_timeout(Duration::from_millis(250)) {
+                let now = Instant::now();
+                if let Some(previous) = last {
+                    gaps.push(now.duration_since(previous).as_secs_f64() * 1000.0);
+                }
+                last = Some(now);
+            }
+        }
+        capture.stop();
+        Ok((capture.description.clone(), gaps))
+    }
+}
+
 impl Drop for VideoPipeline {
     fn drop(&mut self) {
         if let Some(capture) = &self.capture {

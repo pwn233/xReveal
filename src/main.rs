@@ -1,8 +1,13 @@
+// Release builds on Windows are GUI apps: no console window next to xReveal. (`--report` attaches
+// to the terminal that started it.)
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod audio;
 mod drawer;
 mod permission;
 mod platform;
+mod report;
 mod screens;
 mod setup;
 mod source;
@@ -14,6 +19,9 @@ use gpui_kit::*;
 use crate::app::XReveal;
 
 fn main() {
+    if std::env::args().any(|a| a == "--report") {
+        report::run();
+    }
     let _ = crate::video::LAUNCH.set(std::time::Instant::now());
     if std::env::var_os("XREVEAL_SMOKE_TEST").is_some() {
         watch_smoke_test();

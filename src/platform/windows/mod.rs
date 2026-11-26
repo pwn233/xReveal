@@ -287,6 +287,45 @@ impl VideoPipeline {
     }
 }
 
+impl VideoPipeline {
+    /// Every capture device and its formats (for `--report`).
+    pub fn list_sources() -> Vec<SourceInfo> {
+        if media::startup().is_err() {
+            return Vec::new();
+        }
+        media::list_sources()
+    }
+
+    /// Captures from `os_id` at `native` for `seconds` without drawing anything, for `--report`:
+    /// what the capture says it delivers, and the gaps between frames as they arrive, in ms.
+    pub fn measure(os_id: &str, native: source::NativeFormat, seconds: f64) -> Result<(String, Vec<f64>), String> {
+        use crate::video::slot::Taken;
+        use std::time::Duration;
+        media::startup().map_err(|e| e.to_string())?;
+        let slot = Arc::new(FrameSlot::<Frame>::new());
+        let capture = DeviceCapture::start(os_id, String::from("input"), native, slot.clone()).map_err(|e| e.to_string())?;
+        let started = Instant::now();
+        let mut last = None::<Instant>;
+        let mut gaps = Vec::new();
+        while started.elapsed().as_secs_f64() < seconds {
+            if let Taken::Frame(_) = slot.take_timeout(Duration::from_millis(250)) {
+                let now = Instant::now();
+                if let Some(previous) = last {
+                    gaps.push(now.duration_since(previous).as_secs_f64() * 1000.0);
+                }
+                last = Some(now);
+            }
+        }
+        capture.stop();
+        Ok((capture.description(), gaps))
+    }
+
+    /// Whether the device offers its own settings window (for `--report`).
+    pub fn offers_device_settings(link: &str) -> bool {
+        device_settings::available(link)
+    }
+}
+
 impl Drop for VideoPipeline {
     fn drop(&mut self) {
         if let Some(capture) = &self.capture {
