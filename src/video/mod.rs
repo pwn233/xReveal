@@ -4,6 +4,7 @@ pub mod fill;
 #[cfg(any(target_os = "windows", test))]
 pub mod mjpeg;
 pub mod picture;
+pub mod signal;
 pub mod slot;
 pub mod timing;
 

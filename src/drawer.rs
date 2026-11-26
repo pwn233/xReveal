@@ -298,6 +298,13 @@ impl SettingsDrawer {
         this
     }
 
+    /// Switches to `tab` (e.g. Source, for "Pick another card").
+    pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        self.confirm_reset = false;
+        cx.notify();
+    }
+
     /// Replaces the snapshot (e.g. after a Source switch or a reset) and moves the controls to match.
     pub fn set_model(&mut self, model: DrawerModel, window: &mut Window, cx: &mut Context<Self>) {
         let p = model.picture;

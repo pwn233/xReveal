@@ -190,6 +190,21 @@ pub fn list_sources() -> Vec<SourceInfo> {
 }
 
 /// The device whose symbolic link is `link`.
+/// Whether the device with symbolic link `link` is plugged in.
+pub fn is_connected(link: &str) -> bool {
+    find_device(link).ok().flatten().is_some()
+}
+
+/// Whether `code` means another app has the device (docs/spec/v1.md §2.8 Source busy).
+pub fn is_busy(code: windows::core::HRESULT) -> bool {
+    code == MF_E_HW_MFT_FAILED_START_STREAMING || code == MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED
+}
+
+/// Whether `code` means the device went away.
+pub fn is_gone(code: windows::core::HRESULT) -> bool {
+    code == MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED
+}
+
 fn find_device(link: &str) -> Result<Option<IMFActivate>> {
     Ok(devices()?
         .into_iter()
@@ -295,6 +310,12 @@ impl DeviceCapture {
         format!("{} · {}x{} @ {:.0} · {}{}", self.name, f.width, f.height, f.fps, f.pixel_format.name(), decoded)
     }
 
+    /// The error that stopped frames arriving, if one did (unplugged, or taken by another app).
+    pub fn failure(&self) -> Option<windows::core::HRESULT> {
+        let callback = unsafe { self.callback.as_impl() };
+        callback.state.lock().ok().and_then(|s| s.failure)
+    }
+
     /// Stops asking for frames. In-flight callbacks finish on their own.
     pub fn stop(&self) {
         let callback = unsafe { self.callback.as_impl() };
@@ -319,6 +340,7 @@ struct CallbackState {
     reader: Option<IMFSourceReader>,
     format: Option<StreamFormat>,
     stopped: bool,
+    failure: Option<windows::core::HRESULT>,
 }
 
 #[implement(IMFSourceReaderCallback)]
@@ -333,14 +355,29 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
         &self,
         hrstatus: windows::core::HRESULT,
         _stream_index: u32,
-        _stream_flags: u32,
+        stream_flags: u32,
         _timestamp: i64,
         sample: Ref<IMFSample>,
     ) -> Result<()> {
-        let (reader, format) = match self.state.lock() {
+        let (reader, mut format) = match self.state.lock() {
             Ok(state) if !state.stopped => (state.reader.clone(), state.format),
             _ => return Ok(()),
         };
+        if hrstatus.is_err()
+            && let Ok(mut state) = self.state.lock()
+        {
+            state.failure = Some(hrstatus);
+        }
+        // The Source changed resolution or refresh rate: adapt silently (docs/spec/v1.md §2.8).
+        if stream_flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0
+            && let (Some(reader), Some(old)) = (&reader, format)
+            && let Ok(new) = unsafe { current_format(reader, old.decoded) }
+        {
+            format = Some(new);
+            if let Ok(mut state) = self.state.lock() {
+                state.format = Some(new);
+            }
+        }
         if let (Some(sample), Some(format)) = (sample.as_ref(), format) {
             let arrival = host_seconds();
             let stamps = Stamps { capture: capture_time(sample, arrival), arrival };
@@ -449,11 +486,22 @@ fn negotiate(reader: &IMFSourceReader, want: Option<NativeFormat>) -> Result<Str
             chosen?;
         }
 
+        let mut format = current_format(reader, decoded)?;
+        if format.fps == 0.0 {
+            format.fps = frame_rate(&native).unwrap_or(0.0);
+        }
+        Ok(format)
+    }
+}
+
+/// What the reader delivers now: after negotiating, and again when the Source changes format.
+unsafe fn current_format(reader: &IMFSourceReader, decoded: bool) -> Result<StreamFormat> {
+    unsafe {
         let current = reader.GetCurrentMediaType(FIRST_VIDEO_STREAM)?;
         let pixel_format = PixelFormat::from_subtype(current.GetGUID(&MF_MT_SUBTYPE)?)
             .ok_or_else(|| windows::core::Error::from(MF_E_INVALIDMEDIATYPE))?;
         let (width, height) = frame_size(&current).ok_or_else(|| windows::core::Error::from(MF_E_INVALIDMEDIATYPE))?;
-        let fps = frame_rate(&current).or_else(|| frame_rate(&native)).unwrap_or(0.0);
+        let fps = frame_rate(&current).unwrap_or(0.0);
         Ok(StreamFormat { pixel_format, width, height, fps, decoded })
     }
 }

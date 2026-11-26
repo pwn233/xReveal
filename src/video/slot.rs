@@ -25,12 +25,14 @@ pub enum Taken<T> {
 struct State<T> {
     frame: Option<T>,
     closed: bool,
+    /// When the last frame was put in: the No-signal screen watches it (docs/spec/v1.md §2.8).
+    last_put: Option<Instant>,
 }
 
 impl<T> Default for FrameSlot<T> {
     fn default() -> Self {
         Self {
-            state: Mutex::new(State { frame: None, closed: false }),
+            state: Mutex::new(State { frame: None, closed: false, last_put: None }),
             wake: Condvar::new(),
             replaced: AtomicU64::new(0),
         }
@@ -50,6 +52,7 @@ impl<T> FrameSlot<T> {
             if state.closed {
                 return false;
             }
+            state.last_put = Some(Instant::now());
             state.frame.replace(frame)
         };
         self.wake.notify_one();
@@ -58,6 +61,11 @@ impl<T> FrameSlot<T> {
         }
         // Dropped outside the lock: releasing a frame may return it to the capture pool.
         replaced.is_some()
+    }
+
+    /// When the last frame arrived, if any has.
+    pub fn last_put(&self) -> Option<Instant> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).last_put
     }
 
     /// Frames replaced before the video thread took them (dropped frames), since creation.
@@ -125,6 +133,15 @@ mod tests {
         assert!(slot.put(2));
         assert!(slot.put(3));
         assert_eq!(slot.take(), Some(3));
+    }
+
+    #[test]
+    fn remembers_when_the_last_frame_arrived() {
+        let slot = FrameSlot::new();
+        assert_eq!(slot.last_put(), None);
+        let before = std::time::Instant::now();
+        slot.put(1);
+        assert!(slot.last_put().is_some_and(|t| t >= before));
     }
 
     #[test]

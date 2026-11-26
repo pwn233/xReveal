@@ -2,12 +2,15 @@
 //! drawer, a one-line status until the screens without a picture exist, the one-time colour tip,
 //! and the performance box (F3).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::drawer::{self, DrawerEvent, DrawerModel, SettingsDrawer};
+use crate::drawer::{self, DrawerEvent, DrawerModel, SettingsDrawer, Tab};
+use crate::screens::Screen;
+use crate::source::VideoFormat;
+use crate::video::signal;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::platform::VideoPipeline;
 use crate::setup::{DrawerSide, StatsBox, Store, WindowMode, WindowPlacement};
@@ -66,6 +69,15 @@ pub struct XReveal {
     tip: Option<Task<()>>,
     /// Redraws the performance box while it is shown; dropping it stops the refresh.
     stats_refresh: Option<Task<()>>,
+    /// What shows where the picture goes (docs/spec/v1.md §2.8), checked twice a second.
+    screen: Screen,
+    /// The wanted card was unplugged: open it again as soon as it is back.
+    unplugged: bool,
+    /// When to try a busy card again.
+    next_retry: Option<Instant>,
+    /// The format another app switched the card to, while it differs from xReveal's choice.
+    taken_over: Option<VideoFormat>,
+    _signal_watch: Option<Task<()>>,
     /// The Remembered setup (docs/spec/v1.md §3.7).
     store: Store,
     _subscriptions: Vec<Subscription>,
@@ -119,6 +131,11 @@ impl XReveal {
             near_edge: false,
             tip: None,
             stats_refresh: None,
+            screen: Screen::Starting,
+            unplugged: false,
+            next_retry: None,
+            taken_over: None,
+            _signal_watch: None,
             store,
             _subscriptions: vec![save_on_quit, on_drawer],
         };
@@ -137,10 +154,98 @@ impl XReveal {
         });
         this._subscriptions.push(appearance);
         this.showing_changed(window, cx);
+        this.watch_signal(window, cx);
+        this._signal_watch = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                if this.update_in(cx, |this, window, cx| this.watch_signal(window, cx)).is_err() {
+                    break;
+                }
+            }
+        }));
         let stats = this.store.setup.stats;
         this.stats_refresh = None;
         this.apply_stats(stats, cx);
         this
+    }
+
+    /// Works out what the Source is doing (docs/spec/v1.md §2.8) and reacts: reopens the card when
+    /// it comes back or stops being busy, and notices another app changing its format.
+    fn watch_signal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let screen = {
+            let Some(video) = &mut self.video else { return };
+            match video.observe() {
+                None => Screen::no_card(video.description()),
+                Some(observed) => {
+                    let mut observed = observed;
+                    let mut reopened = false;
+                    if !observed.connected {
+                        // The card is gone: let go of it, and wait for the same Source.
+                        if video.current().is_some() {
+                            video.release();
+                        }
+                        self.unplugged = true;
+                    } else if (self.unplugged || observed.busy) && self.next_retry.is_none_or(|t| Instant::now() >= t) {
+                        // Back, or maybe no longer busy: open it again (at most every 2 s).
+                        self.next_retry = Some(Instant::now() + signal::BUSY_RETRY);
+                        reopened = video.retry().is_ok();
+                        if reopened {
+                            self.unplugged = false;
+                        }
+                        observed = video.observe().unwrap_or(observed);
+                    }
+                    if self.unplugged {
+                        // Until it opens again, it is still the Card-unplugged screen.
+                        observed.connected = false;
+                    }
+                    self.taken_over = video.taken_over();
+                    let card = video.wanted().map(|(identity, _)| identity.name.clone()).unwrap_or_default();
+                    let screen = if observed.connected && !observed.busy && video.current().is_none() {
+                        // It's there but didn't open for another reason: say why.
+                        Screen::no_card(video.description())
+                    } else {
+                        Screen::for_signal(signal::judge(observed), &card, observed.since_frame.is_some())
+                    };
+                    if reopened {
+                        self.status = video.description().to_owned();
+                        self.showing_changed(window, cx);
+                    }
+                    screen
+                }
+            }
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let screen = Screen::no_card(&self.status);
+        if screen != self.screen {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if let Some(video) = &self.video {
+                // Windows' surface covers GPUI's screens, so it hides while one shows.
+                video.set_surface_visible(matches!(screen, Screen::Picture | Screen::Starting));
+            }
+            self.screen = screen;
+            cx.notify();
+        }
+        let _ = window;
+    }
+
+    /// "Restore": puts the card back to xReveal's own Video format after another app changed it.
+    fn restore_format(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(video) = &mut self.video {
+            if let Err(error) = video.retry() {
+                self.status = error;
+            }
+            self.taken_over = None;
+        }
+        self.watch_signal(window, cx);
+        cx.notify();
+    }
+
+    /// "Pick another card": the drawer, on the Source tab.
+    fn pick_another_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drawer.update(cx, |d, cx| d.show_tab(Tab::Source, cx));
+        self.set_drawer_open(true, window, cx);
     }
 
     /// After the Source on screen changed: apply its remembered picture and delay, remember it,
@@ -375,6 +480,7 @@ impl XReveal {
                         };
                     }
                     this.showing_changed(window, cx);
+                    this.watch_signal(window, cx);
                     cx.notify();
                 });
             })
@@ -394,6 +500,13 @@ impl XReveal {
 
     fn set_drawer_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if open && !self.drawer_open {
+            // Without a live picture, list the cards again: one may have been plugged in since.
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if !self.screen.shows_picture()
+                && let Some(video) = &mut self.video
+            {
+                video.refresh_sources();
+            }
             self.refresh_drawer(window, cx);
         }
         if self.drawer_in_own_window {
@@ -598,16 +711,34 @@ impl Render for XReveal {
             }
         });
 
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let no_picture = self.video.as_ref().is_none_or(|v| v.current().is_none());
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let no_picture = true;
+        // Screens without a picture sit on black, so they always use the dark palette.
+        let screen_palette = theme::palette_for(&crate::setup::Look { theme: crate::setup::ThemeChoice::Dark, ..self.store.setup.look }, true);
+        let backdrop = self.screen.backdrop();
+        let screen = self.screen.render(screen_palette, cx.listener(|this, _, window, cx| this.pick_another_card(window, cx)));
+        let taken_over = self.taken_over.map(|format| {
+            let card = self.status.split(" · ").next().unwrap_or("The card").to_owned();
+            div().absolute().top_3().w_full().flex().justify_center().child(
+                panel(div().flex().items_center().gap_3())
+                    .child(format!("Another app changed {card} to {}", drawer::readout(format)))
+                    .child(
+                        div()
+                            .id("restore-format")
+                            .text_color(pal.accent)
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(pal.text))
+                            .child("Restore")
+                            .on_click(cx.listener(|this, _, window, cx| this.restore_format(window, cx))),
+                    ),
+            )
+        });
+        // A one-line status only for what has no screen of its own (e.g. a failed switch).
+        let status = (!self.drawer_open && self.screen.shows_picture() && self.status.starts_with("Couldn't")).then(|| panel(div()).child(self.status.clone()));
 
         div()
             .size_full()
             .relative()
-            // With no Source on screen nothing is drawn under this view: paint black, not see-through.
-            .when(no_picture, |d| d.bg(rgb(0x000000)))
+            // Without a live picture nothing is drawn under this view: black, or the last frame dimmed.
+            .when_some(backdrop, |d, colour| d.bg(colour))
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleDrawer, window, cx| this.set_drawer_open(!this.drawer_open, window, cx)))
@@ -637,8 +768,9 @@ impl Render for XReveal {
             .flex()
             .items_end()
             .p_3()
-            // While the drawer is open its live readout says the same, and the status would sit under it.
-            .when(!self.drawer_open, |d| d.child(panel(div()).child(self.status.clone())))
+            .children(screen)
+            .children(status)
+            .children(taken_over)
             .children(tip)
             .children(overlay)
             .children(handle)
