@@ -70,6 +70,10 @@ pub struct XReveal {
     /// (Windows). `XREVEAL_OVERLAY_WINDOW=1` forces it elsewhere, for testing.
     overlays_in_own_window: bool,
     overlay_window: Option<(AnyWindowHandle, Entity<OverlayWindow>)>,
+    /// Where the window and its content were when the drawer and overlay windows were last placed.
+    /// GPUI also reports a bounds change whenever the window gains or loses focus; only a real move,
+    /// resize or scale change places them again.
+    placed: (Bounds<Pixels>, Size<Pixels>, f32),
     /// The pointer is near the drawer's edge: show the handle.
     near_edge: bool,
     /// The edge handle sliding in from the edge or back out.
@@ -152,6 +156,7 @@ impl XReveal {
             drawer_window: None,
             overlays_in_own_window: cfg!(target_os = "windows") || std::env::var_os("XREVEAL_OVERLAY_WINDOW").is_some(),
             overlay_window: None,
+            placed: (window.bounds(), window.viewport_size(), window.scale_factor()),
             near_edge: false,
             handle_slide: drawer::Slide::closed(),
             shown_side: store.setup.drawer_side,
@@ -170,6 +175,13 @@ impl XReveal {
             _subscriptions: vec![save_on_quit, on_drawer],
         };
         let follow = cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+            let placed = (window.bounds(), window.viewport_size(), window.scale_factor());
+            if placed == this.placed {
+                // Only focus changed (the drawer window opening, say): reopening the drawer here
+                // would close it at once.
+                return;
+            }
+            this.placed = placed;
             this.remember_placement(window, cx);
             // On another screen the pixel density may differ (Retina and 1×).
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1269,13 +1281,17 @@ impl DrawerWindow {
         Self { drawer, side, slide, focus, main, main_window, _subscriptions: vec![forward, blur] }
     }
 
-    /// Runs `f` on the main window's view, in the main window.
+    /// Runs `f` on the main window's view, in the main window. Deferred until this window's own
+    /// update is over: `f` may reach back into this window (closing the drawer, refreshing it), and
+    /// GPUI can't update an entity while it is already being updated.
     fn with_main(&self, cx: &mut App, f: impl FnOnce(&mut XReveal, &mut Window, &mut Context<XReveal>) + 'static) {
-        let main = self.main.clone();
-        let _ = self.main_window.update(cx, move |_, window, cx| {
-            if let Some(main) = main.upgrade() {
-                main.update(cx, |main, cx| f(main, window, cx));
-            }
+        let (main, main_window) = (self.main.clone(), self.main_window);
+        cx.defer(move |cx| {
+            let _ = main_window.update(cx, move |_, window, cx| {
+                if let Some(main) = main.upgrade() {
+                    main.update(cx, |main, cx| f(main, window, cx));
+                }
+            });
         });
     }
 }
