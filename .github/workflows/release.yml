@@ -1,6 +1,7 @@
 # Release assets (docs/spec/v1.md §6). A release is made by hand: Actions › Release › Run workflow,
-# naming a `v*` tag that's already pushed and typing RELEASE to confirm. The workflow builds that
-# tag on both OSes and attaches the assets to a GitHub Release. Pushing a tag publishes nothing.
+# naming a `v*` tag that's already pushed (e.g. v1.0.0) and confirming with release@<tag>
+# (release@v1.0.0). The workflow builds that tag on both OSes and attaches the assets to a GitHub
+# Release. Pushing a tag publishes nothing.
 # Pull requests that touch packaging build the assets too, as artifacts only, so the pipeline is
 # proven before a release needs it.
 name: Release
@@ -9,11 +10,11 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release: one already pushed, e.g. v0.1.0"
+        description: "Tag to release, already pushed (e.g. v1.0.0)"
         required: true
         type: string
       confirm:
-        description: "Type RELEASE to publish it"
+        description: "Confirm: type release@<tag> (e.g. release@v1.0.0)"
         required: true
         type: string
   pull_request:
@@ -55,12 +56,12 @@ jobs:
               if [[ -n "$found" ]]; then
                 sed 's/^/- /' <<< "$found"
               else
-                echo "None yet. Push one: \`git tag v0.1.0 && git push origin v0.1.0\`"
+                echo "None yet. Push one: \`git tag v1.0.0 && git push origin v1.0.0\`"
               fi
             } >> "$GITHUB_STEP_SUMMARY"
           }
-          if [[ "$CONFIRM" != "RELEASE" ]]; then
-            echo "::error::Type RELEASE (in capitals) in the confirmation box to publish"
+          if [[ "$CONFIRM" != "release@$TAG" ]]; then
+            echo "::error::To publish $TAG, type release@$TAG in the confirmation box (got '$CONFIRM')"
             exit 1
           fi
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
