@@ -540,13 +540,15 @@ impl XReveal {
             ..Default::default()
         };
         let model = self.drawer_model(cx);
+        // Back on the tab it was showing (a drawer window is a new one each time).
+        let tab = self.drawer.read(cx).tab();
         let main_entity = cx.entity().downgrade();
         let main_window = window.window_handle();
         let side = self.store.setup.drawer_side;
         let owner = crate::platform::window_handle(window);
         match gpui_kit::open_window(options, cx, move |window, cx| {
             window.set_rem_size(px(theme::spacing().rem));
-            cx.new(|cx| DrawerWindow::new(model, side, main_entity, main_window, window, cx))
+            cx.new(|cx| DrawerWindow::new(model, tab, side, main_entity, main_window, window, cx))
         }) {
             Ok((handle, host)) => {
                 let _ = handle.update(cx, |_, window, cx| {
@@ -769,9 +771,12 @@ impl Overlays {
 }
 
 impl XReveal {
-    /// Slides the drawer window's panel out, then closes the window.
+    /// Slides the drawer window's panel out, then closes the window. The tab it shows is kept for the
+    /// next one.
     fn close_drawer_window(&mut self, cx: &mut Context<Self>) {
         if let Some((handle, host)) = self.drawer_window.take() {
+            let tab = host.read(cx).drawer.read(cx).tab();
+            self.drawer.update(cx, |drawer, cx| drawer.show_tab(tab, cx));
             host.update(cx, |host, cx| {
                 host.slide = host.slide.toward(false);
                 cx.notify();
@@ -1296,8 +1301,12 @@ pub struct DrawerWindow {
 }
 
 impl DrawerWindow {
-    fn new(model: DrawerModel, side: DrawerSide, main: WeakEntity<XReveal>, main_window: AnyWindowHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let drawer = cx.new(|cx| SettingsDrawer::new(model, window, cx));
+    fn new(model: DrawerModel, tab: Tab, side: DrawerSide, main: WeakEntity<XReveal>, main_window: AnyWindowHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let drawer = cx.new(|cx| {
+            let mut drawer = SettingsDrawer::new(model, window, cx);
+            drawer.show_tab(tab, cx);
+            drawer
+        });
         let focus = cx.focus_handle();
         // The drawer itself takes the keys, so its arrow keys work; this window's keys still reach
         // the shell around it.

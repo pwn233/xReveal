@@ -405,6 +405,11 @@ impl SettingsDrawer {
         this
     }
 
+    /// The tab showing.
+    pub fn tab(&self) -> Tab {
+        self.tab
+    }
+
     /// Switches to `tab` (e.g. Source, for "Pick another input").
     pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
