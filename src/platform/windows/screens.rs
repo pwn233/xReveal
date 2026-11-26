@@ -38,3 +38,36 @@ pub fn move_window(hwnd: HWND, monitor: u64) {
         let _ = SetWindowPos(hwnd, None, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
+
+/// Turns `overlay` into a layer over `owner` (xReveal's overlays on Windows): owned by it, so it
+/// stays just above it and minimises with it, not over other apps; never takes focus; and lets
+/// every click and mouse move through to `owner` underneath.
+pub fn make_overlay(overlay: HWND, owner: HWND) {
+    use windows::Win32::UI::Shell::SetWindowSubclass;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GWLP_HWNDPARENT, GetWindowLongPtrW, HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE, SetWindowLongPtrW, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
+    };
+    unsafe {
+        SetWindowLongPtrW(overlay, GWLP_HWNDPARENT, owner.0 as isize);
+        let style = GetWindowLongPtrW(overlay, GWL_EXSTYLE);
+        SetWindowLongPtrW(overlay, GWL_EXSTYLE, (style | WS_EX_NOACTIVATE.0 as isize) & !(WS_EX_TOPMOST.0 as isize));
+        let _ = SetWindowPos(overlay, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        let _ = SetWindowSubclass(overlay, Some(pass_mouse_through), 1, 0);
+    }
+}
+
+/// Every mouse message goes to the window underneath (`owner`, which is on the same thread).
+unsafe extern "system" fn pass_mouse_through(
+    hwnd: HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{HTTRANSPARENT, WM_NCHITTEST};
+    if message == WM_NCHITTEST {
+        return windows::Win32::Foundation::LRESULT(HTTRANSPARENT as isize);
+    }
+    unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, message, wparam, lparam) }
+}

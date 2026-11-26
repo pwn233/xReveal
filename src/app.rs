@@ -65,6 +65,11 @@ pub struct XReveal {
     /// GPUI's content; docs/spec/v1.md §3.5). `XREVEAL_DRAWER_WINDOW=1` forces it elsewhere, for testing.
     drawer_in_own_window: bool,
     drawer_window: Option<(AnyWindowHandle, Entity<DrawerWindow>)>,
+    /// The overlays that only show something (performance box, tip, status, edge handle) are drawn
+    /// in a click-through window of their own, over the video surface that would hide them
+    /// (Windows). `XREVEAL_OVERLAY_WINDOW=1` forces it elsewhere, for testing.
+    overlays_in_own_window: bool,
+    overlay_window: Option<(AnyWindowHandle, Entity<OverlayWindow>)>,
     /// The pointer is near the drawer's edge: show the handle.
     near_edge: bool,
     /// The one-time "Blacks look grey?" tip, while it is up.
@@ -147,6 +152,8 @@ impl XReveal {
             slide: drawer::Slide::closed(),
             drawer_in_own_window: cfg!(target_os = "windows") || std::env::var_os("XREVEAL_DRAWER_WINDOW").is_some(),
             drawer_window: None,
+            overlays_in_own_window: cfg!(target_os = "windows") || std::env::var_os("XREVEAL_OVERLAY_WINDOW").is_some(),
+            overlay_window: None,
             near_edge: false,
             tip: None,
             stats_refresh: None,
@@ -165,12 +172,20 @@ impl XReveal {
         };
         let follow = cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
             this.remember_placement(window, cx);
+            // The overlay first, so the drawer (opened after it) stays on top.
+            if this.overlay_window.is_some() {
+                this.close_overlay_window(cx);
+                this.open_overlay_window(window, cx);
+            }
             if this.drawer_window.is_some() {
                 this.close_drawer_window(cx);
                 this.open_drawer_window(window, cx);
             }
         });
         this._subscriptions.push(follow);
+        if this.overlays_in_own_window {
+            cx.defer_in(window, |this, window, cx| this.open_overlay_window(window, cx));
+        }
         // The remembered look; with System it follows the OS's appearance as that changes.
         theme::apply(&this.store.setup.look, theme::appearance_is_dark(window.appearance()), cx);
         let appearance = cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
@@ -444,9 +459,8 @@ impl XReveal {
     fn remember_placement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let monitor = window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string());
         let windowed = self.store.setup.window_mode == WindowMode::Windowed && !window.is_fullscreen();
-        // In fullscreen GPUI reports the bounds to go back to, which is just as good.
         let b = window.window_bounds().get_bounds();
-        let placement = WindowPlacement { x: b.origin.x.as_f32(), y: b.origin.y.as_f32(), width: b.size.width.as_f32(), height: b.size.height.as_f32() };
+        let placement = saved_placement(b, window.viewport_size());
         self.store.update(|s| {
             if monitor.is_some() {
                 s.monitor = monitor;
@@ -546,6 +560,172 @@ impl XReveal {
         }
     }
 
+    /// Opens the click-through overlay window over this one's content (see [`OverlayWindow`]).
+    fn open_overlay_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let main = window.bounds();
+        let content = window.viewport_size();
+        let top = main.origin.y + (main.size.height - content.height).max(px(0.));
+        let bounds = Bounds { origin: point(main.origin.x, top), size: size(main.size.width, content.height) };
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            kind: WindowKind::PopUp,
+            focus: false,
+            show: true,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id: window.display(cx).map(|d| d.id()),
+            window_background: WindowBackgroundAppearance::Transparent,
+            ..Default::default()
+        };
+        let Some(owner) = crate::platform::window_handle(window) else { return };
+        let main_entity = cx.entity();
+        let overlays = self.overlays();
+        if let Ok((handle, host)) = gpui_kit::open_window(options, cx, move |_, cx| cx.new(|cx| OverlayWindow::new(&main_entity, overlays, cx))) {
+            let _ = handle.update(cx, |_, window, cx| {
+                gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
+                crate::platform::make_overlay(window, owner);
+            });
+            self.overlay_window = Some((handle, host));
+        }
+    }
+
+    fn close_overlay_window(&mut self, cx: &mut Context<Self>) {
+        if let Some((handle, _)) = self.overlay_window.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+
+    /// What the display-only overlays show right now (drawn here, or copied to the overlay window).
+    fn overlays(&self) -> Overlays {
+        let stats = self.store.setup.stats;
+        Overlays {
+            notice: self.notice.clone().filter(|_| matches!(self.screen, Screen::Picker { .. })),
+            // A one-line status only for what has no screen of its own (e.g. a failed switch).
+            status: (!self.drawer_open && self.screen.shows_picture() && self.status.starts_with("Couldn't")).then(|| self.status.clone()),
+            tip: self.tip.is_some(),
+            stats: stats.shown.then(|| (stats, stats_rows(self.stats(), &self.status, crate::video::FIRST_PRESENT.get().copied(), stats))),
+            slide: self.slide,
+            drawer_open: self.drawer_open,
+            side: self.store.setup.drawer_side,
+            handle: !self.drawer_open && self.near_edge,
+        }
+    }
+}
+
+/// A copy of what the display-only overlays show: the overlay window draws from it, never from
+/// [`XReveal`] itself (which may be mid-update when that window draws).
+#[derive(Clone)]
+struct Overlays {
+    notice: Option<String>,
+    status: Option<String>,
+    tip: bool,
+    stats: Option<(StatsBox, Vec<(&'static str, String)>)>,
+    slide: drawer::Slide,
+    drawer_open: bool,
+    side: DrawerSide,
+    handle: bool,
+}
+
+impl Overlays {
+    /// The performance box, the colour tip, the one-line status, the one-time notice and the edge
+    /// handle.
+    fn render(&self, window: &mut Window) -> Vec<AnyElement> {
+        let pal = theme::palette();
+        let panel = |child: Div| child.px_2().py_1().rounded(px(8.)).bg(pal.panel).border_1().border_color(pal.line).text_color(pal.text).text_sm();
+        let side = self.side;
+        let mut out = Vec::new();
+        if let Some(n) = self.notice.clone() {
+            out.push(div().absolute().top_3().w_full().flex().justify_center().child(panel(div()).child(n)).into_any_element());
+        }
+        if let Some(status) = self.status.clone() {
+            out.push(panel(div()).child(status).into_any_element());
+        }
+        if self.tip {
+            out.push(
+                div()
+                    .absolute()
+                    .top_3()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .child(panel(div()).child("Blacks look grey? Open settings (Tab) › Colour and set Range to Limited, or set your console's RGB range to Full."))
+                    .into_any_element(),
+            );
+        }
+        if let Some((stats, rows)) = self.stats.clone() {
+            if self.slide.moving() {
+                window.request_animation_frame();
+            }
+            let shown = 1.0 + self.slide.offset().as_f32() / drawer::WIDTH;
+            let (side_inset, vertical_inset) = stats_inset(stats.corner, side, shown, !self.drawer_open);
+            let rows = rows.into_iter().map(|(label, value)| {
+                div()
+                    .flex()
+                    .justify_between()
+                    .gap_4()
+                    .child(div().text_color(pal.muted).child(label))
+                    .child(div().text_color(pal.text).child(value))
+            });
+            let corner = stats.corner;
+            out.push(
+                div()
+                    .absolute()
+                    .when(corner.is_left(), |d| d.left(px(side_inset)))
+                    .when(!corner.is_left(), |d| d.right(px(side_inset)))
+                    .when(corner.is_top(), |d| d.top(px(vertical_inset)))
+                    .when(!corner.is_top(), |d| d.bottom(px(vertical_inset)))
+                    .px_3()
+                    .py_2()
+                    .rounded(px(10.))
+                    .bg(pal.panel)
+                    .border_1()
+                    .border_color(pal.line)
+                    .font_family(theme::mono_family())
+                    .text_xs()
+                    .line_height(px(18.))
+                    .flex()
+                    .flex_col()
+                    .children(rows)
+                    .into_any_element(),
+            );
+        }
+        // The edge handle. A click on it lands on the window's own mouse handler (which opens the
+        // drawer), also when it's drawn in the click-through overlay window.
+        if self.handle {
+            let h = div()
+                .absolute()
+                .top(relative(0.5))
+                .mt(px(-36.))
+                .w(px(20.))
+                .h(px(64.))
+                .rounded(px(10.))
+                .bg(pal.panel)
+                .border_1()
+                .border_color(pal.line)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(pal.secondary)
+                .child(
+                    gpui_kit::component::Icon::new(match side {
+                        DrawerSide::Right => gpui_kit::assets::IconName::ChevronLeft,
+                        DrawerSide::Left => gpui_kit::assets::IconName::ChevronRight,
+                    })
+                    .size_4(),
+                );
+            out.push(match side {
+                DrawerSide::Right => h.right_1(),
+                DrawerSide::Left => h.left_1(),
+            }
+            .into_any_element());
+        }
+        out
+    }
+}
+
+impl XReveal {
     /// Slides the drawer window's panel out, then closes the window.
     fn close_drawer_window(&mut self, cx: &mut Context<Self>) {
         if let Some((handle, host)) = self.drawer_window.take() {
@@ -804,6 +984,13 @@ pub fn stats_inset(corner: crate::setup::Corner, drawer_side: DrawerSide, drawer
     (side, vertical)
 }
 
+/// The placement to remember for a window with outer frame `frame` and content area `content`:
+/// the frame's position with the content's size. GPUI reopens a window with that size as its
+/// content area, so saving the frame's size would grow the window by its title bar every launch.
+pub fn saved_placement(frame: Bounds<Pixels>, content: Size<Pixels>) -> WindowPlacement {
+    WindowPlacement { x: frame.origin.x.as_f32(), y: frame.origin.y.as_f32(), width: content.width.as_f32(), height: content.height.as_f32() }
+}
+
 /// Whether the pointer at `x` is near the drawer's edge of a window `width` wide.
 pub fn near_drawer_edge(x: f32, width: f32, side: DrawerSide) -> bool {
     match side {
@@ -819,47 +1006,6 @@ impl Render for XReveal {
         let side = self.store.setup.drawer_side;
         let width = window.bounds().size.width.as_f32();
 
-        let overlay = self.store.setup.stats.shown.then(|| {
-            let stats = self.store.setup.stats;
-            let rows = stats_rows(self.stats(), &self.status, crate::video::FIRST_PRESENT.get().copied(), stats);
-            if self.slide.moving() {
-                window.request_animation_frame();
-            }
-            let shown = 1.0 + self.slide.offset().as_f32() / drawer::WIDTH;
-            let (side_inset, vertical_inset) = stats_inset(stats.corner, side, shown, !self.drawer_open);
-            let rows = rows.into_iter().map(|(label, value)| {
-                div()
-                    .flex()
-                    .justify_between()
-                    .gap_4()
-                    .child(div().text_color(pal.muted).child(label))
-                    .child(div().text_color(pal.text).child(value))
-            });
-            let corner = stats.corner;
-            div()
-                .absolute()
-                .when(corner.is_left(), |d| d.left(px(side_inset)))
-                .when(!corner.is_left(), |d| d.right(px(side_inset)))
-                .when(corner.is_top(), |d| d.top(px(vertical_inset)))
-                .when(!corner.is_top(), |d| d.bottom(px(vertical_inset)))
-                .px_3()
-                .py_2()
-                .rounded(px(10.))
-                .bg(pal.panel)
-                .border_1()
-                .border_color(pal.line)
-                .font_family(theme::mono_family())
-                .text_xs()
-                .line_height(px(18.))
-                .flex()
-                .flex_col()
-                .children(rows)
-        });
-        let tip = self.tip.is_some().then(|| {
-            div().absolute().top_3().w_full().flex().justify_center().child(panel(div()).child(
-                "Blacks look grey? Open settings (Tab) › Colour and set Range to Limited, or set your console's RGB range to Full.",
-            ))
-        });
         let drawer = (!self.drawer_in_own_window && self.slide.visible()).then(|| {
             if self.slide.moving() {
                 window.request_animation_frame();
@@ -882,49 +1028,13 @@ impl Render for XReveal {
                 DrawerSide::Left => shell.left(offset).border_r_1(),
             }
         });
-        let handle = (!self.drawer_open && self.near_edge).then(|| {
-            let h = div()
-                .id("drawer-handle")
-                .absolute()
-                .top(relative(0.5))
-                .mt(px(-36.))
-                .w(px(20.))
-                .h(px(64.))
-                .rounded(px(10.))
-                .bg(pal.panel)
-                .border_1()
-                .border_color(pal.line)
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(pal.secondary)
-                .hover(|d| d.text_color(pal.text))
-                .cursor_pointer()
-                .child(
-                    gpui_kit::component::Icon::new(match side {
-                        DrawerSide::Right => gpui_kit::assets::IconName::ChevronLeft,
-                        DrawerSide::Left => gpui_kit::assets::IconName::ChevronRight,
-                    })
-                    .size_4(),
-                )
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.set_drawer_open(true, window, cx);
-                }));
-            match side {
-                DrawerSide::Right => h.right_1(),
-                DrawerSide::Left => h.left_1(),
-            }
-        });
-
         // Screens without a picture sit on black, so they always use the dark palette.
         let screen_palette = theme::palette_for(&crate::setup::Look { theme: crate::setup::ThemeChoice::Dark, ..self.store.setup.look }, true);
         let backdrop = self.screen.backdrop();
         let actions = self.screen_actions(cx);
         let screen = self.screen.render(screen_palette, &actions);
-        // A one-time notice (a broken setup set aside), and macOS microphone access turned off.
+        // macOS microphone access turned off (with a link, so not in the click-through overlays).
         let microphone_off = self.screen.shows_picture() && permission::access(Privacy::Microphone) == Access::Denied;
-        let notice = self.notice.clone().filter(|_| matches!(self.screen, Screen::Picker { .. })).map(|n| panel(div()).child(n));
         let microphone = microphone_off.then(|| {
             panel(div().flex().items_center().gap_3()).child("Microphone access is off, so xReveal can't play sound").child(
                 div()
@@ -936,8 +1046,7 @@ impl Render for XReveal {
                     .on_click(|_, _, _| permission::open_settings(Privacy::Microphone)),
             )
         });
-        let top_notices = (notice.is_some() || microphone.is_some())
-            .then(|| div().absolute().top_3().w_full().flex().flex_col().items_center().gap_2().children(notice).children(microphone));
+        let top_notices = microphone.map(|m| div().absolute().top_3().w_full().flex().flex_col().items_center().gap_2().child(m));
         let taken_over = self.taken_over.map(|format| {
             let card = self.status.split(" · ").next().unwrap_or("The input").to_owned();
             div().absolute().top_3().w_full().flex().justify_center().child(
@@ -954,8 +1063,7 @@ impl Render for XReveal {
                     ),
             )
         });
-        // A one-line status only for what has no screen of its own (e.g. a failed switch).
-        let status = (!self.drawer_open && self.screen.shows_picture() && self.status.starts_with("Couldn't")).then(|| panel(div()).child(self.status.clone()));
+        let passive = if self.overlays_in_own_window { Vec::new() } else { self.overlays().render(window) };
 
         div()
             .size_full()
@@ -979,6 +1087,9 @@ impl Render for XReveal {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                 if this.drawer_open {
                     this.set_drawer_open(false, window, cx);
+                } else if this.near_edge {
+                    // The edge handle (which lets clicks through to here).
+                    this.set_drawer_open(true, window, cx);
                 }
             }))
             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
@@ -993,15 +1104,37 @@ impl Render for XReveal {
             .p_3()
             .children(screen)
             .children(top_notices)
-            .children(status)
             .children(taken_over)
-            .children(tip)
-            .children(overlay)
-            .children(handle)
+            .children(passive)
             .children(drawer)
     }
 }
 
+
+/// The overlays that only show something, in a click-through window of their own over the main
+/// one (see [`XReveal::open_overlay_window`]): on Windows the video surface covers anything drawn
+/// in the main window itself. Redrawn whenever the main view changes.
+pub struct OverlayWindow {
+    overlays: Overlays,
+    _observe: Subscription,
+}
+
+impl OverlayWindow {
+    fn new(main: &Entity<XReveal>, overlays: Overlays, cx: &mut Context<Self>) -> Self {
+        // Read after each of the main view's updates has finished, never while it's running.
+        let observe = cx.observe(main, |this, main, cx| {
+            this.overlays = main.read(cx).overlays();
+            cx.notify();
+        });
+        Self { overlays, _observe: observe }
+    }
+}
+
+impl Render for OverlayWindow {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().relative().flex().items_end().p_3().children(self.overlays.render(window))
+    }
+}
 
 /// The drawer in its own window (see [`XReveal::open_drawer_window`]). Changes go to the main
 /// window's [`XReveal`]; its keys and losing focus close the drawer.
@@ -1095,7 +1228,7 @@ impl Render for DrawerWindow {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has its own `test` attribute that would replace std's.
-    use super::{DrawerSide, Duration, Summary, near_drawer_edge, stats_inset, stats_rows};
+    use super::{DrawerSide, Duration, Summary, near_drawer_edge, saved_placement, stats_inset, stats_rows};
     use crate::setup::{Corner, StatsBox};
 
     fn value<'a>(rows: &'a [(&str, String)], label: &str) -> &'a str {
@@ -1137,6 +1270,15 @@ mod tests {
         assert_eq!(stats_inset(Corner::TopRight, DrawerSide::Right, 0.5, false), (202.0, 12.0), "follows the slide");
         assert_eq!(stats_inset(Corner::TopLeft, DrawerSide::Right, 1.0, false), (12.0, 12.0), "drawer on the other side");
         assert_eq!(stats_inset(Corner::BottomLeft, DrawerSide::Right, 0.0, true), (12.0, 52.0), "above the status line");
+    }
+
+    #[test]
+    fn the_window_keeps_its_size_across_launches() {
+        use gpui_kit::{Bounds, point, px, size};
+        // A 1280 × 917 content area under a 32 px title bar.
+        let frame = Bounds { origin: point(px(164.), px(33.)), size: size(px(1280.), px(949.)) };
+        let placement = saved_placement(frame, size(px(1280.), px(917.)));
+        assert_eq!((placement.x, placement.y, placement.width, placement.height), (164.0, 33.0, 1280.0, 917.0), "the content's size, not the frame's");
     }
 
     #[test]
