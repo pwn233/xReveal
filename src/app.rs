@@ -10,11 +10,11 @@ use gpui_kit::*;
 use crate::drawer::{self, DrawerEvent, DrawerModel, SettingsDrawer};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::platform::VideoPipeline;
-use crate::setup::{DrawerSide, Store};
+use crate::setup::{DrawerSide, Store, WindowMode, WindowPlacement};
 use crate::theme::palette;
 use crate::video::timing::Summary;
 
-actions!(xreveal, [ToggleDrawer, CloseDrawer, ToggleStats, ToggleFullscreen]);
+actions!(xreveal, [ToggleDrawer, CloseDrawer, ToggleStats, ToggleFullscreen, Quit]);
 
 /// The key context of xReveal's own bindings; deeper than GPUI Kit's root, so Tab is ours.
 const KEY_CONTEXT: &str = "XReveal";
@@ -25,9 +25,21 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", ToggleDrawer, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", CloseDrawer, Some(KEY_CONTEXT)),
         KeyBinding::new("f3", ToggleStats, Some(KEY_CONTEXT)),
-        // Windowed / fullscreen: an assumption to confirm (docs/spec/v1.md §8).
         KeyBinding::new("f11", ToggleFullscreen, Some(KEY_CONTEXT)),
+        // Windows closes the window on Alt+F4 by itself, which quits too.
+        KeyBinding::new("cmd-q", Quit, None),
     ]);
+    cx.on_action(|_: &Quit, cx| cx.quit());
+}
+
+/// Switches the window between a normal window and borderless fullscreen. On macOS that is GPUI's
+/// "simple" fullscreen (covering the screen, not a separate Space); on Windows its fullscreen is
+/// already borderless. Call it once per change: the switch happens a moment later.
+pub fn toggle_borderless(window: &Window) {
+    #[cfg(target_os = "macos")]
+    window.toggle_simple_fullscreen();
+    #[cfg(not(target_os = "macos"))]
+    window.toggle_fullscreen();
 }
 
 /// How close to the drawer's edge the pointer must be for the handle to appear.
@@ -111,6 +123,7 @@ impl XReveal {
             _subscriptions: vec![save_on_quit, on_drawer],
         };
         let follow = cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+            this.remember_placement(window, cx);
             if this.drawer_window.is_some() {
                 this.close_drawer_window(cx);
                 this.open_drawer_window(window, cx);
@@ -145,7 +158,14 @@ impl XReveal {
 
     fn drawer_model(&self) -> DrawerModel {
         let setup = &self.store.setup;
-        let mut model = DrawerModel { picture: setup.picture, delay: setup.delay, side: setup.drawer_side, frame_interval: 1.0 / 60.0, ..Default::default() };
+        let mut model = DrawerModel {
+            picture: setup.picture,
+            delay: setup.delay,
+            side: setup.drawer_side,
+            window_mode: setup.window_mode,
+            frame_interval: 1.0 / 60.0,
+            ..Default::default()
+        };
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(video) = &self.video {
             model.sources = video.sources().to_vec();
@@ -158,6 +178,41 @@ impl XReveal {
             }
         }
         model
+    }
+
+    /// Remembers which monitor the window is on and, in Windowed mode, where on it.
+    fn remember_placement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let monitor = window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string());
+        let windowed = self.store.setup.window_mode == WindowMode::Windowed && !window.is_fullscreen();
+        // In fullscreen GPUI reports the bounds to go back to, which is just as good.
+        let b = window.window_bounds().get_bounds();
+        let placement = WindowPlacement { x: b.origin.x.as_f32(), y: b.origin.y.as_f32(), width: b.size.width.as_f32(), height: b.size.height.as_f32() };
+        self.store.update(|s| {
+            if monitor.is_some() {
+                s.monitor = monitor;
+            }
+            if windowed && placement.usable() {
+                s.window = Some(placement);
+            }
+        });
+    }
+
+    /// Windowed or Fullscreen (docs/spec/v1.md §2.2): remembered, and applied to the window.
+    fn set_window_mode(&mut self, mode: WindowMode, window: &mut Window, cx: &mut Context<Self>) {
+        if mode == self.store.setup.window_mode {
+            return;
+        }
+        self.store.update(|s| s.window_mode = mode);
+        // Fullscreen from the macOS green button is its own kind; leave it the same way.
+        if cfg!(target_os = "macos") && window.is_fullscreen() {
+            if mode == WindowMode::Windowed {
+                window.toggle_fullscreen();
+            }
+        } else {
+            toggle_borderless(window);
+        }
+        self.refresh_drawer(window, cx);
+        cx.notify();
     }
 
     fn refresh_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -173,12 +228,15 @@ impl XReveal {
     /// Opens the drawer as its own borderless, transparent window along the drawer side of this one.
     fn open_drawer_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let main = window.bounds();
+        // Over the content only, below the title bar if there is one.
+        let content = window.viewport_size();
+        let top = main.origin.y + (main.size.height - content.height).max(px(0.));
         let width = px(drawer::WIDTH);
         let x = match self.store.setup.drawer_side {
             DrawerSide::Right => main.origin.x + main.size.width - width,
             DrawerSide::Left => main.origin.x,
         };
-        let bounds = Bounds { origin: point(x, main.origin.y), size: size(width, main.size.height) };
+        let bounds = Bounds { origin: point(x, top), size: size(width, content.height) };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
@@ -260,6 +318,8 @@ impl XReveal {
                 }
             }
             DrawerEvent::Source(os_id, choice) => self.switch_source(os_id, choice, window, cx),
+            DrawerEvent::WindowMode(mode) => self.set_window_mode(mode, window, cx),
+            DrawerEvent::Quit => cx.quit(),
             DrawerEvent::ResetAll => self.reset_all_settings(window, cx),
         }
         cx.notify();
@@ -267,8 +327,14 @@ impl XReveal {
 
     /// Reset all settings (docs/spec/v1.md §2.3): forget everything and start as on first run.
     fn reset_all_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = self.store.setup.window_mode;
         if let Err(error) = self.store.reset_all() {
             self.status = format!("Couldn't reset settings: {error}");
+        }
+        // Back to a normal window, the default.
+        if mode != self.store.setup.window_mode {
+            self.store.update(|s| s.window_mode = mode);
+            self.set_window_mode(WindowMode::default(), window, cx);
         }
         // Until the Welcome screen exists, keep showing the current Source with default settings.
         self.showing_changed(window, cx);
@@ -453,15 +519,28 @@ impl Render for XReveal {
             }
         });
 
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let no_picture = self.video.as_ref().is_none_or(|v| v.current().is_none());
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let no_picture = true;
+
         div()
             .size_full()
             .relative()
+            // With no Source on screen nothing is drawn under this view: paint black, not see-through.
+            .when(no_picture, |d| d.bg(rgb(0x000000)))
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleDrawer, window, cx| this.set_drawer_open(!this.drawer_open, window, cx)))
             .on_action(cx.listener(|this, _: &CloseDrawer, window, cx| this.set_drawer_open(false, window, cx)))
             .on_action(cx.listener(|this, _: &ToggleStats, _, cx| this.toggle_stats(cx)))
-            .on_action(cx.listener(|_, _: &ToggleFullscreen, window, _| window.toggle_simple_fullscreen()))
+            .on_action(cx.listener(|this, _: &ToggleFullscreen, window, cx| {
+                let mode = match this.store.setup.window_mode {
+                    WindowMode::Windowed => WindowMode::Fullscreen,
+                    WindowMode::Fullscreen => WindowMode::Windowed,
+                };
+                this.set_window_mode(mode, window, cx);
+            }))
             // Right-click on the picture toggles the drawer; a click outside it closes it.
             .on_mouse_down(MouseButton::Right, cx.listener(|this, _, window, cx| this.set_drawer_open(!this.drawer_open, window, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
@@ -565,6 +644,12 @@ impl Render for DrawerWindow {
             .on_action(cx.listener(|this, _: &ToggleDrawer, _, cx| this.with_main(cx, |m, w, cx| m.set_drawer_open(false, w, cx))))
             .on_action(cx.listener(|this, _: &CloseDrawer, _, cx| this.with_main(cx, |m, w, cx| m.set_drawer_open(false, w, cx))))
             .on_action(cx.listener(|this, _: &ToggleStats, _, cx| this.with_main(cx, |m, _, cx| m.toggle_stats(cx))))
+            .on_action(cx.listener(|this, _: &ToggleFullscreen, _, cx| {
+                this.with_main(cx, |m, w, cx| {
+                    m.set_drawer_open(false, w, cx);
+                    w.dispatch_action(Box::new(ToggleFullscreen), cx);
+                })
+            }))
             .child(shell)
     }
 }

@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::{Duration, Instant};
 
-use crate::setup::DrawerSide;
+use crate::setup::{DrawerSide, WindowMode};
 use crate::source::{self, SourceIdentity, SourceInfo, VideoFormat};
 use crate::theme::{mono_family, palette::*};
 use crate::video::picture::{Adjustments, Choice, ColourRange, ColourSpace, FillMode, PictureSettings, TargetRatio};
@@ -81,6 +81,7 @@ pub struct DrawerModel {
     pub picture: PictureSettings,
     pub delay: DelaySettings,
     pub side: DrawerSide,
+    pub window_mode: WindowMode,
     /// The Source's frame interval in seconds, to say how much Buffering costs.
     pub frame_interval: f64,
 }
@@ -93,7 +94,9 @@ pub enum DrawerEvent {
     Picture(PictureSettings),
     Delay(DelaySettings),
     Side(DrawerSide),
+    WindowMode(WindowMode),
     ResetAll,
+    Quit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +134,7 @@ pub mod hints {
     pub const CARD: &str = "The capture card your console is plugged into. Black picture on a PS5? Turn off HDCP in its HDMI settings.";
     pub const VIDEO_FORMAT: &str = "What the card sends. Changing it restarts the picture for a moment.";
     pub const BUFFERING: &str = "Holds frames back to smooth uneven delivery. Off is fastest.";
+    pub const WINDOW_MODE: &str = "Fullscreen covers the whole screen with no border. F11 switches between them.";
     pub const TARGET_RATIO: &str = "The shape of the picture on your screen. Pick your monitor's shape, like 21:9 for ultrawide, to fill it.";
     pub const FILL_MODE: &str = "How the console's 16:9 picture fits that shape: Fit adds black bars, Stretch widens everything, Crop zooms in, Smart stretch keeps the middle natural.";
     pub const STRENGTH: &str = "0% looks just like Stretch. Higher keeps the centre more natural and stretches the edges more.";
@@ -438,7 +442,20 @@ impl SettingsDrawer {
                 }
             }),
         );
-        let mut out = vec![setting("Target ratio", hints::TARGET_RATIO, ratios)];
+        let modes = [WindowMode::Windowed, WindowMode::Fullscreen];
+        let window_mode = chips(
+            "window-mode",
+            &["Windowed", "Fullscreen"],
+            modes.iter().position(|m| *m == self.model.window_mode).unwrap_or(0),
+            cx.listener(move |this, i: &usize, _, cx| {
+                if modes[*i] != this.model.window_mode {
+                    this.model.window_mode = modes[*i];
+                    cx.emit(DrawerEvent::WindowMode(modes[*i]));
+                    cx.notify();
+                }
+            }),
+        );
+        let mut out = vec![setting("Window", hints::WINDOW_MODE, window_mode), setting("Target ratio", hints::TARGET_RATIO, ratios)];
         if self.custom_ratio {
             out.push(slider_setting("Custom ratio", hints::CUSTOM_RATIO, &self.sliders.custom_ratio, format!("{:.2}", p.target_ratio.0)));
         }
@@ -570,17 +587,18 @@ impl SettingsDrawer {
                 })))
                 .into_any_element()
         } else {
+            let link = |id: &'static str, label: &'static str| {
+                div().id(id).text_sm().text_color(rgb(SECONDARY)).cursor_pointer().hover(|d| d.text_color(rgb(TEXT))).child(label)
+            };
             div()
-                .id("reset-all")
-                .text_sm()
-                .text_color(rgb(SECONDARY))
-                .cursor_pointer()
-                .hover(|d| d.text_color(rgb(TEXT)))
-                .child("Reset all settings")
-                .on_click(cx.listener(|this, _, _, cx| {
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(link("reset-all", "Reset all settings").on_click(cx.listener(|this, _, _, cx| {
                     this.confirm_reset = true;
                     cx.notify();
-                }))
+                })))
+                .child(link("quit", "Quit xReveal").on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::Quit))))
                 .into_any_element()
         };
         div()
@@ -607,6 +625,7 @@ impl SettingsDrawer {
                     && p.fill_mode == d.fill_mode
                     && p.smart_stretch_strength == d.smart_stretch_strength
                     && self.model.side == DrawerSide::default()
+                    && self.model.window_mode == WindowMode::default()
                     && !self.custom_ratio
             }
             Tab::Colour => p.colour_range == d.colour_range && p.colour_space == d.colour_space && p.adjustments == d.adjustments,
@@ -644,6 +663,10 @@ impl SettingsDrawer {
                 if model.side != DrawerSide::default() {
                     model.side = DrawerSide::default();
                     events.push(DrawerEvent::Side(model.side));
+                }
+                if model.window_mode != WindowMode::default() {
+                    model.window_mode = WindowMode::default();
+                    events.push(DrawerEvent::WindowMode(model.window_mode));
                 }
             }
             Tab::Colour => {
