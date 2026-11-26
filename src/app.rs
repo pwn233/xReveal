@@ -451,7 +451,11 @@ impl XReveal {
 
     /// Remembers which monitor the window is on and, in Windowed mode, where on it.
     fn remember_placement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let monitor = window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string());
+        // The screen under the window's middle. GPUI's own idea of it can lag behind on Windows: after
+        // a Borderless window moves to another screen it still names the old one.
+        let middle = window.bounds().center();
+        let display = cx.displays().into_iter().find(|d| d.bounds().contains(&middle)).or_else(|| window.display(cx));
+        let monitor = display.and_then(|d| d.uuid().ok()).map(|u| u.to_string());
         let windowed = self.store.setup.window_mode == WindowMode::Windowed && !window.is_fullscreen();
         let b = window.window_bounds().get_bounds();
         let placement = saved_placement(b, window.viewport_size());
