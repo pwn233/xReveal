@@ -179,7 +179,11 @@ pub mod hints {
     pub const DEVICE_SETTINGS: &str = "The capture device's own settings window, from its driver";
     pub const BUFFERING: &str = "Holds frames back to smooth uneven delivery. Off is fastest.";
     pub const MONITOR: &str = "Which screen xReveal shows on. A window moves there; Fullscreen covers it.";
-    pub const WINDOW_MODE: &str = "Fullscreen covers the whole screen with no border. F11 switches between them.";
+    pub const WINDOW_MODE: &str = if cfg!(target_os = "windows") {
+        "Borderless keeps the window's size with no border, centred on the screen. Fullscreen covers the whole screen. F11 switches to Fullscreen and back."
+    } else {
+        "Fullscreen covers the whole screen with no border. F11 switches between them."
+    };
     pub const TARGET_RATIO: &str = "The shape of the picture on your screen. Pick your monitor's shape, like 21:9 for ultrawide, to fill it.";
     pub const FILL_MODE: &str = "How the console's 16:9 picture fits that shape";
     pub const STRENGTH: &str = "0% looks just like Stretch. Higher keeps the centre more natural and stretches the edges more.";
@@ -638,10 +642,11 @@ impl SettingsDrawer {
                 }
             }),
         );
-        let modes = [WindowMode::Windowed, WindowMode::Fullscreen];
+        let modes = WindowMode::OFFERED;
+        let mode_labels: Vec<&str> = modes.iter().map(|m| m.label()).collect();
         let window_mode = chips(
             "window-mode",
-            &["Windowed", "Fullscreen"],
+            &mode_labels,
             modes.iter().position(|m| *m == self.model.window_mode).unwrap_or(0),
             cx.listener(move |this, i: &usize, _, cx| {
                 if modes[*i] != this.model.window_mode {

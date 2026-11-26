@@ -148,8 +148,10 @@ impl SettingsDrawer {
             }
             Tab::Display => {
                 let mut s = 0;
-                rows.push(row("Window", s, Nav::Choice { len: 2, at: (self.model.window_mode == WindowMode::Fullscreen) as usize, pick: |this, i, _, cx| {
-                    let mode = [WindowMode::Windowed, WindowMode::Fullscreen][i];
+                let modes = WindowMode::OFFERED;
+                let at = modes.iter().position(|m| *m == self.model.window_mode).unwrap_or(0);
+                rows.push(row("Window", s, Nav::Choice { len: modes.len(), at, pick: |this, i, _, cx| {
+                    let mode = WindowMode::OFFERED[i];
                     if mode != this.model.window_mode {
                         this.model.window_mode = mode;
                         cx.emit(DrawerEvent::WindowMode(mode));

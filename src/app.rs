@@ -47,6 +47,20 @@ pub fn toggle_borderless(window: &Window) {
     window.toggle_fullscreen();
 }
 
+/// How long a fullscreen switch from [`toggle_borderless`] takes to happen.
+const FULLSCREEN_SWITCH: Duration = Duration::from_millis(350);
+
+/// Borderless window mode on or off (docs/spec/v1.md §2.2), centred on screen `display` (else the
+/// one it's on), after `delay`. Done outside GPUI's update, as the native call needs.
+pub fn set_borderless(window: &Window, borderless: bool, display: Option<u64>, delay: Duration, cx: &mut App) {
+    let Some(handle) = crate::platform::window_handle(window) else { return };
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(delay).await;
+        crate::platform::set_borderless(handle, borderless, display);
+    })
+    .detach();
+}
+
 /// How close to the drawer's edge the pointer must be for the handle to appear.
 const EDGE: f32 = 48.0;
 /// The edge handle (assets/notch): its body is 24 wide and 96 tall; concave curves 10 tall above and
@@ -75,6 +89,8 @@ pub struct XReveal {
     /// (Windows). `XREVEAL_OVERLAY_WINDOW=1` forces it elsewhere, for testing.
     overlays_in_own_window: bool,
     overlay_window: Option<(AnyWindowHandle, Entity<OverlayWindow>)>,
+    /// The Window mode F11 goes back to from Fullscreen: Windowed or Borderless, whichever was last.
+    before_fullscreen: WindowMode,
     /// Where the window and its content were when the drawer and overlay windows were last placed.
     /// GPUI also reports a bounds change whenever the window gains or loses focus; only a real move,
     /// resize or scale change places them again.
@@ -161,6 +177,10 @@ impl XReveal {
             drawer_window: None,
             overlays_in_own_window: cfg!(target_os = "windows") || std::env::var_os("XREVEAL_OVERLAY_WINDOW").is_some(),
             overlay_window: None,
+            before_fullscreen: match store.setup.window_mode {
+                WindowMode::Fullscreen => WindowMode::Windowed,
+                mode => mode,
+            },
             placed: (window.bounds(), window.viewport_size(), window.scale_factor()),
             near_edge: false,
             handle_slide: drawer::Slide::closed(),
@@ -454,7 +474,11 @@ impl XReveal {
 
     /// Remembers which monitor the window is on and, in Windowed mode, where on it.
     fn remember_placement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let monitor = window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string());
+        // The screen under the window's middle. GPUI's own idea of it can lag behind on Windows: after
+        // a Borderless window moves to another screen it still names the old one.
+        let middle = window.bounds().center();
+        let display = cx.displays().into_iter().find(|d| d.bounds().contains(&middle)).or_else(|| window.display(cx));
+        let monitor = display.and_then(|d| d.uuid().ok()).map(|u| u.to_string());
         let windowed = self.store.setup.window_mode == WindowMode::Windowed && !window.is_fullscreen();
         let b = window.window_bounds().get_bounds();
         let placement = saved_placement(b, window.viewport_size());
@@ -469,41 +493,55 @@ impl XReveal {
     }
 
     /// Moves xReveal to the screen with identity `uuid` (docs/spec/v1.md §2.3 Monitor). In
-    /// Fullscreen it leaves fullscreen, moves, and covers the new screen.
+    /// Fullscreen it leaves fullscreen, moves, and covers the new screen; a Borderless window is
+    /// centred on it.
     fn move_to_monitor(&mut self, uuid: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(display) = cx.displays().into_iter().find(|d| d.uuid().is_ok_and(|u| u.to_string() == uuid)) else { return };
         let id = u64::from(display.id());
         self.store.update(|s| s.monitor = Some(uuid));
         let Some(handle) = crate::platform::window_handle(window) else { return };
         // The move itself runs outside this update (see `platform::move_window`).
-        if self.store.setup.window_mode == WindowMode::Windowed {
-            cx.spawn(async move |_, _| crate::platform::move_window(handle, id)).detach();
-            return;
+        match self.store.setup.window_mode {
+            WindowMode::Windowed => cx.spawn(async move |_, _| crate::platform::move_window(handle, id)).detach(),
+            WindowMode::Borderless => set_borderless(window, true, Some(id), Duration::ZERO, cx),
+            WindowMode::Fullscreen => {
+                // Fullscreen switches happen a moment after they're asked for: leave, move, come back.
+                toggle_borderless(window);
+                cx.spawn_in(window, async move |_, cx| {
+                    cx.background_executor().timer(FULLSCREEN_SWITCH).await;
+                    crate::platform::move_window(handle, id);
+                    cx.background_executor().timer(FULLSCREEN_SWITCH).await;
+                    let _ = cx.update(|window, _| toggle_borderless(window));
+                })
+                .detach();
+            }
         }
-        // Fullscreen switches happen a moment after they're asked for: leave, move, come back.
-        toggle_borderless(window);
-        cx.spawn_in(window, async move |_, cx| {
-            cx.background_executor().timer(Duration::from_millis(350)).await;
-            crate::platform::move_window(handle, id);
-            cx.background_executor().timer(Duration::from_millis(350)).await;
-            let _ = cx.update(|window, _| toggle_borderless(window));
-        })
-        .detach();
     }
 
-    /// Windowed or Fullscreen (docs/spec/v1.md §2.2): remembered, and applied to the window.
+    /// Windowed, Borderless or Fullscreen (docs/spec/v1.md §2.2): remembered, and applied to the
+    /// window.
     fn set_window_mode(&mut self, mode: WindowMode, window: &mut Window, cx: &mut Context<Self>) {
-        if mode == self.store.setup.window_mode {
+        let was = self.store.setup.window_mode;
+        if mode == was {
             return;
         }
         self.store.update(|s| s.window_mode = mode);
+        if mode != WindowMode::Fullscreen {
+            self.before_fullscreen = mode;
+        }
         // Fullscreen from the macOS green button is its own kind; leave it the same way.
         if cfg!(target_os = "macos") && window.is_fullscreen() {
-            if mode == WindowMode::Windowed {
+            if mode != WindowMode::Fullscreen {
                 window.toggle_fullscreen();
             }
-        } else {
+        } else if was == WindowMode::Fullscreen || mode == WindowMode::Fullscreen {
             toggle_borderless(window);
+            // Leaving fullscreen brings back the frame the window had before; then the one asked for.
+            if was == WindowMode::Fullscreen {
+                set_borderless(window, mode == WindowMode::Borderless, None, FULLSCREEN_SWITCH, cx);
+            }
+        } else {
+            set_borderless(window, mode == WindowMode::Borderless, None, Duration::ZERO, cx);
         }
         self.refresh_drawer(window, cx);
         cx.notify();
@@ -1224,8 +1262,8 @@ impl Render for XReveal {
             .on_action(cx.listener(|this, _: &ToggleStats, window, cx| this.toggle_stats(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleFullscreen, window, cx| {
                 let mode = match this.store.setup.window_mode {
-                    WindowMode::Windowed => WindowMode::Fullscreen,
-                    WindowMode::Fullscreen => WindowMode::Windowed,
+                    WindowMode::Fullscreen => this.before_fullscreen,
+                    _ => WindowMode::Fullscreen,
                 };
                 this.set_window_mode(mode, window, cx);
             }))

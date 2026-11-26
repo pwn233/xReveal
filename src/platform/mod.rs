@@ -48,6 +48,18 @@ pub fn move_window(window: raw_window_handle::RawWindowHandle, display: u64) {
     let _ = (window, display);
 }
 
+/// Borderless (docs/spec/v1.md §2.2, Windows only for now): takes the title bar and border away
+/// from `window`, keeping its content's size, and centres it on screen `display` (else the one it's
+/// on); or gives them back. GPUI has no call for it. Call it outside a GPUI update.
+pub fn set_borderless(window: raw_window_handle::RawWindowHandle, borderless: bool, display: Option<u64>) {
+    #[cfg(target_os = "windows")]
+    if let raw_window_handle::RawWindowHandle::Win32(win32) = window {
+        windows::screens::set_borderless(::windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _), borderless, display);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (window, borderless, display);
+}
+
 /// Makes `overlay` a click-through layer over `owner`, for the overlays that would otherwise sit
 /// under the video surface (Windows) — see `app::OverlayWindow`.
 pub fn make_overlay(overlay: &gpui_kit::Window, owner: raw_window_handle::RawWindowHandle) {
