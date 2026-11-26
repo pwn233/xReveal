@@ -35,8 +35,12 @@ pub struct Setup {
     /// Buffering and the A/V sync offset.
     pub delay: DelaySettings,
     pub audio: AudioRoute,
-    /// The monitor to go fullscreen on, by the display's own identity.
+    /// The monitor xReveal was last on (and goes fullscreen on), by the display's own identity.
     pub monitor: Option<String>,
+    /// A normal window (the default) or borderless fullscreen on `monitor` (docs/spec/v1.md §2.2).
+    pub window_mode: WindowMode,
+    /// Where the window last was on `monitor` in Windowed mode.
+    pub window: Option<WindowPlacement>,
     pub drawer_side: DrawerSide,
     /// Every Source ever seen, with its own colour choices. Never trimmed.
     pub sources: Vec<SourceEntry>,
@@ -54,6 +58,8 @@ impl Default for Setup {
             delay: DelaySettings::default(),
             audio: AudioRoute::default(),
             monitor: None,
+            window_mode: WindowMode::Windowed,
+            window: None,
             drawer_side: DrawerSide::Right,
             sources: Vec::new(),
             audio_buffers: BTreeMap::new(),
@@ -85,6 +91,35 @@ pub enum DrawerSide {
     #[default]
     Right,
     Left,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowMode {
+    /// A normal window with a title bar: close, minimise, maximise, resize.
+    #[default]
+    Windowed,
+    /// Borderless, covering the whole monitor.
+    Fullscreen,
+}
+
+/// A window's place and size on its monitor, in logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct WindowPlacement {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl WindowPlacement {
+    /// The smallest window worth restoring; anything smaller opens at the default size instead.
+    pub const MIN: (f32, f32) = (480.0, 270.0);
+
+    pub fn usable(&self) -> bool {
+        self.width >= Self::MIN.0 && self.height >= Self::MIN.1 && [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite())
+    }
 }
 
 /// One Source xReveal has shown, with the choices that belong to it.
@@ -366,6 +401,8 @@ mod tests {
             source: Some(onten("port-A")),
             video_format: Some(VideoFormat { width: 1280, height: 720, fps: 60.0 }),
             monitor: Some("ultrawide-uuid".into()),
+            window_mode: WindowMode::Fullscreen,
+            window: Some(WindowPlacement { x: 40.0, y: 60.0, width: 1600.0, height: 900.0 }),
             ..Default::default()
         };
         setup.picture.fill_mode = FillMode::SmartStretch;
@@ -384,6 +421,17 @@ mod tests {
         assert!(!dir.file().with_extension("toml.tmp").exists());
         let text = std::fs::read_to_string(dir.file()).unwrap();
         assert!(text.contains("version = 1"), "{text}");
+    }
+
+    #[test]
+    fn starts_in_a_window_and_ignores_a_window_too_small_to_use() {
+        assert_eq!(Setup::default().window_mode, WindowMode::Windowed);
+        let dir = TempDir::new("window");
+        std::fs::write(dir.file(), "window-mode = \"fullscreen\"\n[window]\nx = 0.0\ny = 0.0\nwidth = 120.0\nheight = 80.0\n").unwrap();
+        let Loaded::Setup(setup) = load(&dir.file()) else { panic!("should load") };
+        assert_eq!(setup.window_mode, WindowMode::Fullscreen);
+        assert!(!setup.window.unwrap().usable());
+        assert!(WindowPlacement { x: -1900.0, y: 30.0, width: 1280.0, height: 720.0 }.usable(), "a monitor left of the primary");
     }
 
     #[test]
