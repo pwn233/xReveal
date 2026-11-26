@@ -64,6 +64,17 @@ pub fn make_overlay(overlay: &gpui_kit::Window, owner: raw_window_handle::RawWin
     let _ = (overlay, owner);
 }
 
+/// Gives the keys back to `window` (Windows), from another window of xReveal's that has them.
+/// Call it outside a GPUI update.
+pub fn activate(window: raw_window_handle::RawWindowHandle) {
+    #[cfg(target_os = "windows")]
+    if let raw_window_handle::RawWindowHandle::Win32(win32) = window {
+        windows::screens::activate(::windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _));
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = window;
+}
+
 /// The native handle of `window` (for [`make_overlay`]).
 pub fn window_handle(window: &gpui_kit::Window) -> Option<raw_window_handle::RawWindowHandle> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
