@@ -82,6 +82,8 @@ impl Slide {
 pub struct DrawerModel {
     pub sources: Vec<SourceInfo>,
     pub current: Option<(SourceIdentity, VideoFormat)>,
+    /// The device on screen offers its own settings window (Windows drivers).
+    pub device_settings: bool,
     /// The picture settings in effect, including the current Source's colour choices.
     pub picture: PictureSettings,
     pub delay: DelaySettings,
@@ -108,6 +110,8 @@ pub enum DrawerEvent {
     WindowMode(WindowMode),
     /// Show xReveal on this screen (by its identity).
     Monitor(String),
+    /// Open the capture device's own settings window.
+    DeviceSettings,
     Stats(StatsBox),
     Look(Look),
     /// The sound input: `None` follows the card (its own audio).
@@ -157,6 +161,7 @@ impl Tab {
 pub mod hints {
     pub const CARD: &str = "The device your console is plugged into. Black picture on a PS5? Turn off HDCP in its HDMI settings.";
     pub const VIDEO_FORMAT: &str = "What the input sends. Changing it restarts the picture for a moment.";
+    pub const DEVICE_SETTINGS: &str = "The capture device's own settings window, from its driver";
     pub const BUFFERING: &str = "Holds frames back to smooth uneven delivery. Off is fastest.";
     pub const MONITOR: &str = "Which screen xReveal shows on. A window moves there; Fullscreen covers it.";
     pub const WINDOW_MODE: &str = "Fullscreen covers the whole screen with no border. F11 switches between them.";
@@ -545,12 +550,17 @@ impl SettingsDrawer {
             cx.listener(|this, i: &usize, _, cx| this.set_delay(DelaySettings { buffering_frames: *i as u8, ..this.model.delay }, cx)),
         );
         let warning = input_lag_warning(DelaySettings { av_sync_offset_ms: 0, ..delay }, self.model.frame_interval);
-        vec![
+        let mut rows = vec![
             self.live(),
             setting("Input", hints::CARD, Select::new(&self.card_select).placeholder("No input").menu_max_h(rems(18.))),
             setting("Video format", hints::VIDEO_FORMAT, Select::new(&self.format_select).placeholder("No formats").menu_max_h(rems(18.))),
             setting("Buffering", hints::BUFFERING, div().flex().flex_col().gap_2().child(buffering).children(warning.map(warn))),
-        ]
+        ];
+        if self.model.device_settings {
+            let open = quiet_button("device-settings", IconName::Settings, "Device settings…").on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::DeviceSettings)));
+            rows.push(setting("Device settings…", hints::DEVICE_SETTINGS, div().flex().child(open)));
+        }
+        rows
     }
 
     fn display_tab(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {

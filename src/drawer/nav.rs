@@ -137,6 +137,9 @@ impl SettingsDrawer {
                 rows.push(row("Buffering", 3, Nav::Choice { len: 3, at: self.model.delay.buffering_frames as usize, pick: |this, i, _, cx| {
                     this.set_delay(DelaySettings { buffering_frames: i as u8, ..this.model.delay }, cx);
                 } }));
+                if self.model.device_settings {
+                    rows.push(row("Device settings…", 4, Nav::Press(|_, _, cx| cx.emit(DrawerEvent::DeviceSettings))));
+                }
             }
             Tab::Display => {
                 let mut s = 0;

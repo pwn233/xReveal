@@ -2,12 +2,14 @@
 //! GPUI's window (docs/spec/v1.md §3.1, §3.3, §3.4; ADR 0001, ADR 0002).
 
 pub mod container;
+mod device_settings;
 pub mod media;
 mod render;
 pub mod screens;
 mod surface;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -37,6 +39,12 @@ pub struct VideoPipeline {
     started: Option<Instant>,
     /// The video surface's child window, hidden while a screen without a picture shows.
     child: HWND,
+    /// The device offers its own settings window; and that window's state while open.
+    has_device_settings: bool,
+    device_settings: Option<Arc<AtomicU8>>,
+    settings_owner: Option<isize>,
+    /// The stream was closed so the settings window could open (it reopens when that closes).
+    paused_for_settings: bool,
     slot: Arc<FrameSlot<Frame>>,
     shared: Arc<VideoShared>,
     video_thread: Option<JoinHandle<()>>,
@@ -73,6 +81,10 @@ impl VideoPipeline {
             open_error: None,
             started: None,
             child,
+            has_device_settings: false,
+            device_settings: None,
+            settings_owner: None,
+            paused_for_settings: false,
             status: "No input found.".into(),
             sources: if started.is_ok() { media::list_sources() } else { Vec::new() },
             slot,
@@ -126,6 +138,8 @@ impl VideoPipeline {
         let identity = info.identity.clone();
         self.wanted = Some((identity.clone(), choice));
         self.release();
+        // Asked before Media Foundation opens the device: the check creates its DirectShow filter.
+        self.has_device_settings = device_settings::available(os_id);
         let capture = DeviceCapture::start(os_id, name.clone(), native, self.slot.clone()).map_err(|e| {
             let error = if e.code() == windows::Win32::Foundation::E_ACCESSDENIED {
                 OpenError::Blocked("Windows is blocking camera access for desktop apps".into())
@@ -190,6 +204,52 @@ impl VideoPipeline {
             since_start: started.map_or_else(Default::default, |t| t.elapsed()),
             since_frame: self.slot.last_put().filter(|t| started.is_some_and(|s| *t >= s)).map(|t| t.elapsed()),
         })
+    }
+
+    /// Whether the device on screen offers its own settings window (docs/spec/v1.md §2.3).
+    pub fn has_device_settings(&self) -> bool {
+        self.has_device_settings && self.current.is_some()
+    }
+
+    /// Opens the device's own settings window over `window`.
+    pub fn open_device_settings(&mut self, window: &gpui_kit::Window) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Some((identity, _)) = self.current.clone().or_else(|| self.wanted.clone()) else { return };
+        let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+        let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+        let state = Arc::new(AtomicU8::new(device_settings::OPEN));
+        device_settings::open(&identity.os_id, &format!("{} settings", identity.name), HWND(win32.hwnd.get() as *mut _), state.clone());
+        self.device_settings = Some(state);
+        self.settings_owner = Some(win32.hwnd.get());
+    }
+
+    /// Twice a second: if the driver wouldn't open its settings while Media Foundation streamed,
+    /// closes the stream and opens them again; reopens the stream once they close. `true` when
+    /// the stream was reopened.
+    /// The stream is closed while the device's settings window is open.
+    pub fn settings_paused(&self) -> bool {
+        self.paused_for_settings
+    }
+
+    pub fn poll_device_settings(&mut self) -> bool {
+        let Some(state) = &self.device_settings else { return false };
+        match state.load(Ordering::SeqCst) {
+            device_settings::REFUSED if !self.paused_for_settings => {
+                self.release();
+                self.paused_for_settings = true;
+                if let (Some((identity, _)), Some(owner)) = (self.wanted.clone(), self.settings_owner) {
+                    let state = Arc::new(AtomicU8::new(device_settings::OPEN));
+                    device_settings::open(&identity.os_id, &format!("{} settings", identity.name), HWND(owner as *mut _), state.clone());
+                    self.device_settings = Some(state);
+                }
+                false
+            }
+            device_settings::CLOSED | device_settings::REFUSED => {
+                self.device_settings = None;
+                std::mem::take(&mut self.paused_for_settings) && self.retry().is_ok()
+            }
+            _ => false,
+        }
     }
 
     /// Windows gives a card to one app at a time, so no other app can change its format under us.

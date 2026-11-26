@@ -203,6 +203,15 @@ impl XReveal {
                 break 'screen Screen::Permission { denied: camera == Access::Denied };
             }
             let Some(video) = &mut self.video else { return };
+            // The device's own settings window (Windows): its stream may be closed while it's open.
+            if video.poll_device_settings() {
+                self.status = video.description().to_owned();
+                self.showing_changed(window, cx);
+                return self.watch_signal(window, cx);
+            }
+            if video.settings_paused() {
+                break 'screen Screen::Starting;
+            }
             if std::mem::take(&mut self.pending_launch) {
                 let remembered = self.store.setup.source.clone();
                 video.show_launch(remembered.as_ref().map(|s| (s, self.store.setup.video_format)));
@@ -420,6 +429,7 @@ impl XReveal {
         if let Some(video) = &self.video {
             model.sources = video.sources().to_vec();
             model.current = video.current().cloned();
+            model.device_settings = video.has_device_settings();
             if let Some((identity, _)) = &model.current {
                 model.picture = setup.picture_for(identity);
             }
@@ -608,6 +618,12 @@ impl XReveal {
             DrawerEvent::Source(os_id, choice) => self.switch_source(os_id, choice, window, cx),
             DrawerEvent::WindowMode(mode) => self.set_window_mode(mode, window, cx),
             DrawerEvent::Monitor(uuid) => self.move_to_monitor(uuid, window, cx),
+            DrawerEvent::DeviceSettings => {
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                if let Some(video) = &mut self.video {
+                    video.open_device_settings(window);
+                }
+            }
             DrawerEvent::Stats(stats) => self.apply_stats(stats, cx),
             DrawerEvent::Look(look) => {
                 self.store.update(|s| s.look = look);
