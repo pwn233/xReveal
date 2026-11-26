@@ -49,19 +49,74 @@ pub fn activate(hwnd: HWND) {
     }
 }
 
-/// Turns `overlay` into a layer over `owner` (xReveal's overlays on Windows): owned by it, so it
-/// stays just above it and minimises with it, not over other apps; never takes focus; and lets
-/// every click and mouse move through to `owner` underneath.
+/// Makes pop-up `popup` (the drawer's or the overlays' window) part of `owner`: owned by it, so it
+/// stays just above it and minimises with it, never over other apps; and without the frame,
+/// rounded corners, shadow and open and close animations Windows gives a window of its kind.
+pub fn own_popup(popup: HWND, owner: HWND) {
+    use windows::Win32::Graphics::Dwm::{
+        DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+        DwmSetWindowAttribute,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GWLP_HWNDPARENT, GetWindowLongPtrW, HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE, SetWindowLongPtrW, WS_EX_TOPMOST};
+    unsafe {
+        SetWindowLongPtrW(popup, GWLP_HWNDPARENT, owner.0 as isize);
+        let style = GetWindowLongPtrW(popup, GWL_EXSTYLE);
+        SetWindowLongPtrW(popup, GWL_EXSTYLE, style & !(WS_EX_TOPMOST.0 as isize));
+        let _ = SetWindowPos(popup, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        let set = |attribute, value: u32| {
+            let _ = DwmSetWindowAttribute(popup, attribute, (&raw const value).cast(), size_of::<u32>() as u32);
+        };
+        set(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED.0 as u32);
+        set(DWMWA_TRANSITIONS_FORCEDISABLED, 1);
+        set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND.0 as u32);
+        set(DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
+    }
+}
+
+/// Moves pop-up `popup` so its content covers `area` (left, top, right, bottom, in device pixels
+/// from the top-left of `owner`'s content), keeping its place in the stack and without focusing it.
+/// GPUI places a pop-up by its frame, which puts the content a few pixels off. Synchronously: call
+/// it outside a GPUI update, so GPUI handles the move and resize as they happen.
+pub fn place_popup(popup: HWND, owner: HWND, area: [i32; 4]) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+    let (mut origin, mut inner) = (POINT::default(), POINT::default());
+    let (mut frame, mut client) = (RECT::default(), RECT::default());
+    unsafe {
+        if !ClientToScreen(owner, &mut origin).as_bool()
+            || !ClientToScreen(popup, &mut inner).as_bool()
+            || GetWindowRect(popup, &mut frame).is_err()
+            || GetClientRect(popup, &mut client).is_err()
+        {
+            return;
+        }
+    }
+    // The pop-up's frame around its content, on each side.
+    let (left, top) = (inner.x - frame.left, inner.y - frame.top);
+    let (right, bottom) = (frame.right - inner.x - client.right, frame.bottom - inner.y - client.bottom);
+    let x = origin.x + area[0] - left;
+    let y = origin.y + area[1] - top;
+    let width = area[2] - area[0] + left + right;
+    let height = area[3] - area[1] + top + bottom;
+    if [x, y, width, height] == [frame.left, frame.top, frame.right - frame.left, frame.bottom - frame.top] {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(popup, None, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// Turns `overlay` into a layer over `owner` (xReveal's overlays on Windows): part of it (see
+/// [`own_popup`]); never takes focus; and lets every click and mouse move through to `owner`
+/// underneath.
 pub fn make_overlay(overlay: HWND, owner: HWND) {
     use windows::Win32::UI::Shell::SetWindowSubclass;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GWLP_HWNDPARENT, GetWindowLongPtrW, HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE, SetWindowLongPtrW, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE};
+    own_popup(overlay, owner);
     unsafe {
-        SetWindowLongPtrW(overlay, GWLP_HWNDPARENT, owner.0 as isize);
         let style = GetWindowLongPtrW(overlay, GWL_EXSTYLE);
-        SetWindowLongPtrW(overlay, GWL_EXSTYLE, (style | WS_EX_NOACTIVATE.0 as isize) & !(WS_EX_TOPMOST.0 as isize));
-        let _ = SetWindowPos(overlay, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowLongPtrW(overlay, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
         let _ = SetWindowSubclass(overlay, Some(pass_mouse_through), 1, 0);
     }
 }
