@@ -53,6 +53,11 @@ pub struct Spacing {
     pub gap: f32,
     /// The height of chips and small buttons.
     pub chip: f32,
+    /// The window's base text size (1 rem): text, icons and rem-based gaps scale with it.
+    pub rem: f32,
+    /// The drawer's width and its tab rail's.
+    pub drawer: f32,
+    pub rail: f32,
 }
 
 fn hex(rgb_hex: u32) -> Hsla {
@@ -141,9 +146,9 @@ pub fn palette_for(look: &Look, system_dark: bool) -> Palette {
 
 pub fn spacing_for(density: Density) -> Spacing {
     match density {
-        Density::Compact => Spacing { section: 14.0, gap: 16.0, chip: 26.0 },
-        Density::Default => Spacing { section: 20.0, gap: 24.0, chip: 30.0 },
-        Density::Spacious => Spacing { section: 28.0, gap: 32.0, chip: 34.0 },
+        Density::Compact => Spacing { section: 14.0, gap: 16.0, chip: 26.0, rem: 14.0, drawer: 340.0, rail: 64.0 },
+        Density::Default => Spacing { section: 20.0, gap: 24.0, chip: 30.0, rem: 16.0, drawer: 380.0, rail: 72.0 },
+        Density::Spacious => Spacing { section: 28.0, gap: 32.0, chip: 34.0, rem: 17.5, drawer: 430.0, rail: 80.0 },
     }
 }
 
@@ -162,9 +167,25 @@ pub fn spacing() -> Spacing {
     CURRENT.with(|c| c.get().1)
 }
 
-/// The font for figures and readouts (formats, values): the OS's monospace.
+/// xReveal's type: IBM Plex Sans for the interface, Plex Mono for figures and readouts. Bundled
+/// (assets/fonts, SIL Open Font License), so nothing is fetched.
+pub const SANS: &str = "IBM Plex Sans";
+pub const MONO: &str = "IBM Plex Mono";
+
+/// The font for figures and readouts (formats, values).
 pub fn mono_family() -> &'static str {
-    if cfg!(target_os = "windows") { "Consolas" } else { "Menlo" }
+    MONO
+}
+
+/// Registers the bundled Plex fonts. Call once at startup, before [`apply`].
+pub fn load_fonts(cx: &App) {
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/IBMPlexSans-Medium.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/IBMPlexMono-Medium.ttf")),
+    ];
+    let _ = cx.text_system().add_fonts(fonts);
 }
 
 /// Makes `look` the current look, points GPUI Kit's component theme at it and redraws every window.
@@ -177,6 +198,8 @@ pub fn apply(look: &Look, system_dark: bool, cx: &mut App) {
     // Through `update`, which also refreshes the component tokens (the slider reads those) and
     // redraws every window.
     Theme::update(cx, |theme| {
+        theme.font_family = SANS.into();
+        theme.mono_font_family = MONO.into();
         theme.background = solid(p.panel);
         theme.foreground = p.text;
         theme.border = p.line;
