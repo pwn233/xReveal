@@ -38,13 +38,16 @@ pub struct Observed {
 pub enum OpenError {
     /// Another app has it (docs/spec/v1.md §2.8 Source busy): try again every [`BUSY_RETRY`].
     Busy(String),
+    /// Windows' privacy switch blocks camera access for desktop apps (docs/spec/v1.md §2.1).
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code, reason = "only Windows has the switch"))]
+    Blocked(String),
     Failed(String),
 }
 
 impl OpenError {
     pub fn message(&self) -> &str {
         match self {
-            OpenError::Busy(m) | OpenError::Failed(m) => m,
+            OpenError::Busy(m) | OpenError::Blocked(m) | OpenError::Failed(m) => m,
         }
     }
 }

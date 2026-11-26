@@ -1,6 +1,7 @@
 //! macOS: AVFoundation capture → video thread → Metal layer under GPUI's view
 //! (docs/spec/v1.md §3.1, §3.3, §3.4; ADR 0001).
 
+pub mod access;
 mod capture;
 mod render;
 mod surface;
@@ -40,7 +41,7 @@ pub struct VideoPipeline {
 impl VideoPipeline {
     /// Puts a video surface under GPUI's content in `window` and starts showing a Source: the
     /// first card at its default Video format. Must be called on the main thread.
-    pub fn start(window: &gpui_kit::Window, remembered: Option<(&SourceIdentity, Option<VideoFormat>)>) -> Result<Self, String> {
+    pub fn start(window: &gpui_kit::Window, remembered: Option<(&SourceIdentity, Option<VideoFormat>)>, show: bool) -> Result<Self, String> {
         let handle = HasWindowHandle::window_handle(window).map_err(|e| format!("no native window: {e}"))?;
         let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
             return Err("expected an AppKit window".into());
@@ -68,12 +69,16 @@ impl VideoPipeline {
             shared,
             video_thread: Some(video_thread),
         };
-        pipeline.show(source::launch_pick(&pipeline.sources, remembered));
+        if show {
+            pipeline.show_launch(remembered);
+        }
         Ok(pipeline)
     }
 
-    fn show(&mut self, pick: LaunchPick) {
-        match pick {
+    /// Shows the remembered Source, as at launch (docs/spec/v1.md §2.1). With nothing remembered,
+    /// the first card; when the remembered one isn't plugged in, nothing (the picker waits).
+    pub fn show_launch(&mut self, remembered: Option<(&SourceIdentity, Option<VideoFormat>)>) {
+        match source::launch_pick(&self.sources, remembered) {
             LaunchPick::Show(index, choice) => {
                 let os_id = self.sources[index].identity.os_id.clone();
                 if let Err(error) = self.switch_to(&os_id, choice) {
@@ -115,6 +120,18 @@ impl VideoPipeline {
         self.status = capture.description.clone();
         self.capture = Some(capture);
         Ok(())
+    }
+
+    /// Stops showing anything and forgets the wanted Source (Reset all: back to the picker).
+    pub fn forget(&mut self) {
+        self.release();
+        self.wanted = None;
+        self.open_error = None;
+    }
+
+    /// Why the wanted Source didn't open, if it didn't.
+    pub fn open_error(&self) -> Option<&OpenError> {
+        self.open_error.as_ref()
     }
 
     /// Stops the capture (the card is gone); the Source stays wanted.
