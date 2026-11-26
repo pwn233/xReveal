@@ -64,6 +64,32 @@ pub fn make_overlay(overlay: &gpui_kit::Window, owner: raw_window_handle::RawWin
     let _ = (overlay, owner);
 }
 
+/// Makes the drawer's window `popup` part of `owner`, so it stays just above it and never floats
+/// over other apps, without the frame and animations Windows gives it (Windows).
+pub fn own_popup(popup: &gpui_kit::Window, owner: raw_window_handle::RawWindowHandle) {
+    #[cfg(target_os = "windows")]
+    if let (Some(raw_window_handle::RawWindowHandle::Win32(top)), raw_window_handle::RawWindowHandle::Win32(below)) = (raw_window(popup), owner) {
+        use ::windows::Win32::Foundation::HWND;
+        windows::screens::own_popup(HWND(top.hwnd.get() as *mut _), HWND(below.hwnd.get() as *mut _));
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (popup, owner);
+}
+
+/// Puts pop-up `popup` exactly over `area` of `owner`'s content (GPUI's pixels from its top-left,
+/// at `scale`), keeping its place in the stack and without focusing it (Windows). Call it outside
+/// a GPUI update.
+pub fn place_popup(popup: raw_window_handle::RawWindowHandle, owner: raw_window_handle::RawWindowHandle, area: gpui_kit::Bounds<gpui_kit::Pixels>, scale: f32) {
+    #[cfg(target_os = "windows")]
+    if let (raw_window_handle::RawWindowHandle::Win32(top), raw_window_handle::RawWindowHandle::Win32(below)) = (popup, owner) {
+        use ::windows::Win32::Foundation::HWND;
+        let edges = [area.left(), area.top(), area.right(), area.bottom()].map(|e| (e.as_f32() * scale).round() as i32);
+        windows::screens::place_popup(HWND(top.hwnd.get() as *mut _), HWND(below.hwnd.get() as *mut _), edges);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (popup, owner, area, scale);
+}
+
 /// The native handle of `window` (for [`make_overlay`]).
 pub fn window_handle(window: &gpui_kit::Window) -> Option<raw_window_handle::RawWindowHandle> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]

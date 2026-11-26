@@ -181,12 +181,18 @@ impl XReveal {
                 // would close it at once.
                 return;
             }
-            this.placed = placed;
+            let (_, _, was_scale) = std::mem::replace(&mut this.placed, placed);
             this.remember_placement(window, cx);
             // On another screen the pixel density may differ (Retina and 1×).
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(video) = &this.video {
                 video.set_scale(window.scale_factor());
+            }
+            if cfg!(target_os = "windows") && placed.2 == was_scale {
+                // Moved or resized at the same density: the pop-ups move along with the window.
+                // Reopening them on every step of a drag would flicker and replay the drawer's slide.
+                this.place_popups(window, cx);
+                return;
             }
             // The overlay first, so the drawer (opened after it) stays on top.
             if this.overlay_window.is_some() {
@@ -508,16 +514,8 @@ impl XReveal {
 
     /// Opens the drawer as its own borderless, transparent window along the drawer side of this one.
     fn open_drawer_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let main = window.bounds();
-        // Over the content only, below the title bar if there is one.
-        let content = window.viewport_size();
-        let top = main.origin.y + (main.size.height - content.height).max(px(0.));
-        let width = px(drawer::width());
-        let x = match self.store.setup.drawer_side {
-            DrawerSide::Right => main.origin.x + main.size.width - width,
-            DrawerSide::Left => main.origin.x,
-        };
-        let bounds = Bounds { origin: point(x, top), size: size(width, content.height) };
+        let area = drawer_area(window.viewport_size(), self.store.setup.drawer_side);
+        let bounds = Bounds { origin: content_origin(window.bounds(), window.viewport_size()) + area.origin, size: area.size };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
@@ -535,6 +533,7 @@ impl XReveal {
         let main_entity = cx.entity().downgrade();
         let main_window = window.window_handle();
         let side = self.store.setup.drawer_side;
+        let owner = crate::platform::window_handle(window);
         match gpui_kit::open_window(options, cx, move |window, cx| {
             window.set_rem_size(px(theme::spacing().rem));
             cx.new(|cx| DrawerWindow::new(model, side, main_entity, main_window, window, cx))
@@ -542,10 +541,14 @@ impl XReveal {
             Ok((handle, host)) => {
                 let _ = handle.update(cx, |_, window, cx| {
                     gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
+                    if let Some(owner) = owner {
+                        crate::platform::own_popup(window, owner);
+                    }
                     // Its first frame was drawn before the root was made see-through; draw it again.
                     window.refresh();
                 });
                 self.drawer_window = Some((handle, host));
+                self.place_popups(window, cx);
             }
             Err(error) => self.status = format!("Couldn't open settings: {error}"),
         }
@@ -553,10 +556,7 @@ impl XReveal {
 
     /// Opens the click-through overlay window over this one's content (see [`OverlayWindow`]).
     fn open_overlay_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let main = window.bounds();
-        let content = window.viewport_size();
-        let top = main.origin.y + (main.size.height - content.height).max(px(0.));
-        let bounds = Bounds { origin: point(main.origin.x, top), size: size(main.size.width, content.height) };
+        let bounds = Bounds { origin: content_origin(window.bounds(), window.viewport_size()), size: window.viewport_size() };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
@@ -584,6 +584,20 @@ impl XReveal {
                 window.refresh();
             });
             self.overlay_window = Some((handle, host));
+            self.place_popups(window, cx);
+        }
+    }
+
+    /// Puts the drawer's and the overlays' windows exactly over this window's content (Windows).
+    fn place_popups(&self, window: &Window, cx: &mut Context<Self>) {
+        let Some(owner) = crate::platform::window_handle(window) else { return };
+        let (content, scale) = (window.viewport_size(), window.scale_factor());
+        let overlay = self.overlay_window.as_ref().map(|(h, _)| (*h, Bounds { origin: Point::default(), size: content }));
+        let drawer = self.drawer_window.as_ref().map(|(h, _)| (*h, drawer_area(content, self.store.setup.drawer_side)));
+        for (handle, area) in overlay.into_iter().chain(drawer) {
+            let Ok(Some(popup)) = handle.update(cx, |_, window, _| crate::platform::window_handle(window)) else { continue };
+            // After this update: GPUI handles a window's move as it happens, which it can't mid-update.
+            cx.spawn(async move |_, _| crate::platform::place_popup(popup, owner, area, scale)).detach();
         }
     }
 
@@ -1085,6 +1099,23 @@ pub fn saved_placement(frame: Bounds<Pixels>, content: Size<Pixels>) -> WindowPl
     WindowPlacement { x: frame.origin.x.as_f32(), y: frame.origin.y.as_f32(), width: content.width.as_f32(), height: content.height.as_f32() }
 }
 
+/// Where the content area `content` of a window with outer frame `frame` starts on the screen:
+/// below the title bar if there is one.
+pub fn content_origin(frame: Bounds<Pixels>, content: Size<Pixels>) -> Point<Pixels> {
+    point(frame.origin.x, frame.origin.y + (frame.size.height - content.height).max(px(0.)))
+}
+
+/// The drawer window's part of the content area `content`, from its top-left: the full height,
+/// along the `side` edge.
+pub fn drawer_area(content: Size<Pixels>, side: DrawerSide) -> Bounds<Pixels> {
+    let width = px(drawer::width());
+    let x = match side {
+        DrawerSide::Right => content.width - width,
+        DrawerSide::Left => px(0.),
+    };
+    Bounds { origin: point(x, px(0.)), size: size(width, content.height) }
+}
+
 /// Whether the pointer at `x` is near the drawer's edge of a window `width` wide.
 pub fn near_drawer_edge(x: f32, width: f32, side: DrawerSide) -> bool {
     match side {
@@ -1330,7 +1361,7 @@ impl Render for DrawerWindow {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has its own `test` attribute that would replace std's.
-    use super::{DrawerSide, Duration, Summary, near_drawer_edge, saved_placement, stats_inset, stats_rows};
+    use super::{DrawerSide, Duration, Summary, content_origin, drawer_area, near_drawer_edge, saved_placement, stats_inset, stats_rows};
     use crate::setup::{Corner, StatsBox};
 
     fn value<'a>(rows: &'a [(&str, String)], label: &str) -> &'a str {
@@ -1389,5 +1420,20 @@ mod tests {
         assert!(!near_drawer_edge(20.0, 1920.0, DrawerSide::Right));
         assert!(near_drawer_edge(20.0, 1920.0, DrawerSide::Left));
         assert!(!near_drawer_edge(960.0, 1920.0, DrawerSide::Left));
+    }
+
+    #[test]
+    fn pop_ups_cover_the_content_below_the_title_bar() {
+        use gpui_kit::{Bounds, point, px, size};
+        // A 1280 × 917 content area under a 32 px title bar.
+        let frame = Bounds { origin: point(px(164.), px(33.)), size: size(px(1280.), px(949.)) };
+        let content = size(px(1280.), px(917.));
+        assert_eq!(content_origin(frame, content), point(px(164.), px(65.)));
+        // No title bar (Windows reports the content area as the window's bounds).
+        assert_eq!(content_origin(Bounds { origin: frame.origin, size: content }, content), point(px(164.), px(33.)));
+        let right = drawer_area(content, DrawerSide::Right);
+        let left = drawer_area(content, DrawerSide::Left);
+        assert_eq!((right.right(), right.top(), right.bottom()), (px(1280.), px(0.), px(917.)), "along the right edge, full height");
+        assert_eq!((left.left(), left.size), (px(0.), right.size));
     }
 }
