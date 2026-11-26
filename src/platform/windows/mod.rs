@@ -206,6 +206,9 @@ impl VideoPipeline {
         })
     }
 
+    /// The swap chain follows the parent window's size in pixels, so there's nothing to do here.
+    pub fn set_scale(&self, _scale: f32) {}
+
     /// Whether the device on screen offers its own settings window (docs/spec/v1.md §2.3).
     pub fn has_device_settings(&self) -> bool {
         self.has_device_settings && self.current.is_some()

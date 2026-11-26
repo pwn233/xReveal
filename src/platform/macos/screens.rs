@@ -24,7 +24,21 @@ pub fn names() -> Vec<(u64, String)> {
 
 /// Moves the window holding `view` to the middle of screen `display`, keeping its size (shrunk to
 /// fit if the screen is smaller).
+///
+/// The move runs a moment later from the main queue, not straight away: macOS reports the new
+/// frame and screen back to GPUI during `setFrame`, and doing that while GPUI is still handling
+/// the click that asked for it left the app unresponsive (#82).
 pub fn move_window(view: &NSView, display: u64) {
+    let view = view as *const NSView as usize;
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        // SAFETY: the main queue runs on the main thread, and GPUI's view lives as long as its
+        // window, which outlives this moment.
+        let view = unsafe { &*(view as *const NSView) };
+        move_now(view, display);
+    });
+}
+
+fn move_now(view: &NSView, display: u64) {
     let Some(window) = view.window() else { return };
     let Some(screen) = screens().into_iter().find(|s| display_id(s) == Some(display)) else { return };
     let area = screen.visibleFrame();

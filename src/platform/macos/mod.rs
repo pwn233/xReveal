@@ -37,6 +37,8 @@ pub struct VideoPipeline {
     slot: Arc<FrameSlot<PixelBuffer>>,
     shared: Arc<VideoShared>,
     video_thread: Option<JoinHandle<()>>,
+    /// The video layer, to keep its pixel density in step with the window's screen.
+    layer: objc2::rc::Retained<objc2_quartz_core::CAMetalLayer>,
 }
 
 impl VideoPipeline {
@@ -48,6 +50,7 @@ impl VideoPipeline {
             return Err("expected an AppKit window".into());
         };
         let target = surface::attach_below(appkit.ns_view)?;
+        let layer = target.layer.clone();
 
         let slot = Arc::new(FrameSlot::new());
         let shared = Arc::new(VideoShared::default());
@@ -69,6 +72,7 @@ impl VideoPipeline {
             slot,
             shared,
             video_thread: Some(video_thread),
+            layer,
         };
         if show {
             pipeline.show_launch(remembered);
@@ -190,6 +194,14 @@ impl VideoPipeline {
 
     pub fn poll_device_settings(&mut self) -> bool {
         false
+    }
+
+    /// The window's pixel density changed (it moved between a Retina and a 1× screen): the video
+    /// thread sizes its drawable from the layer's scale, so keep that in step (#82).
+    pub fn set_scale(&self, scale: f32) {
+        if (self.layer.contentsScale() - scale as f64).abs() > f64::EPSILON {
+            self.layer.setContentsScale(scale as f64);
+        }
     }
 
     /// The video surface is under GPUI's view here, so GPUI's screens already cover it.
