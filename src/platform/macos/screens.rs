@@ -34,3 +34,12 @@ pub fn move_window(view: &NSView, display: u64) {
     let origin = NSPoint::new(area.origin.x + (area.size.width - frame.size.width) / 2.0, area.origin.y + (area.size.height - frame.size.height) / 2.0);
     window.setFrame_display(NSRect::new(origin, frame.size), true);
 }
+
+/// Turns the window holding `overlay` into a layer over the one holding `owner`: a child window
+/// (it moves with it and stays just above it, not over other apps) that lets the mouse through.
+pub fn make_overlay(overlay: &NSView, owner: &NSView) {
+    let (Some(overlay), Some(owner)) = (overlay.window(), owner.window()) else { return };
+    overlay.setIgnoresMouseEvents(true);
+    overlay.setLevel(objc2_app_kit::NSNormalWindowLevel);
+    unsafe { owner.addChildWindow_ordered(&overlay, objc2_app_kit::NSWindowOrderingMode::Above) };
+}
