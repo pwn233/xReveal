@@ -115,10 +115,15 @@ impl SettingsDrawer {
         match self.tab {
             Tab::Source => {
                 let current = self.model.current.as_ref();
-                let card = current.and_then(|(i, _)| self.card_ids.iter().position(|c| c == &i.os_id)).unwrap_or(0);
                 let format = current.and_then(|(_, f)| self.formats.iter().position(|c| c == f)).unwrap_or(0);
-                rows.push(row("Input", 1, Nav::Choice { len: self.card_ids.len(), at: card, pick: |this, i, _, cx| {
-                    if let Some(os_id) = this.card_ids.get(i).cloned()
+                // "None" first, then the inputs.
+                let card = current.and_then(|(i, _)| self.card_ids.iter().position(|c| c == &i.os_id)).map_or(0, |i| i + 1);
+                rows.push(row("Input", 1, Nav::Choice { len: self.card_ids.len() + 1, at: card, pick: |this, i, _, cx| {
+                    if i == 0 {
+                        if this.model.current.is_some() {
+                            cx.emit(DrawerEvent::NoInput);
+                        }
+                    } else if let Some(os_id) = this.card_ids.get(i - 1).cloned()
                         && this.model.current.as_ref().map(|(c, _)| &c.os_id) != Some(&os_id)
                         && let Some(info) = this.model.sources.iter().find(|s| s.identity.os_id == os_id)
                         && let Some(format) = source::default_choice(&info.formats)
@@ -202,17 +207,7 @@ impl SettingsDrawer {
                     rows.push(row("Corner", s, Nav::Choice { len: 4, at: Corner::ALL.iter().position(|c| *c == stats.corner).unwrap_or(0), pick: |this, i, _, cx| {
                         this.set_stats(StatsBox { corner: Corner::ALL[i], ..this.model.stats }, cx);
                     } }));
-                    rows.push(row("Shows", s, Nav::Switches { len: 4, flip: |this, i, cx| {
-                        let mut stats = this.model.stats;
-                        let flag = match i {
-                            0 => &mut stats.latency,
-                            1 => &mut stats.fps,
-                            2 => &mut stats.frames,
-                            _ => &mut stats.format,
-                        };
-                        *flag = !*flag;
-                        this.set_stats(stats, cx);
-                    } }));
+                    rows.push(row("Shows", s, Nav::Switches { len: 4, flip: |this, i, cx| this.set_stats(this.model.stats.flip(i), cx) }));
                 }
             }
             Tab::Colour => {

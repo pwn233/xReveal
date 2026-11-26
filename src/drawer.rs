@@ -112,6 +112,8 @@ pub enum DrawerEvent {
     Monitor(String),
     /// Open the capture device's own settings window.
     DeviceSettings,
+    /// "None" in the Input list: show no input.
+    NoInput,
     Stats(StatsBox),
     Look(Look),
     /// The sound input: `None` follows the card (its own audio).
@@ -188,7 +190,6 @@ pub mod hints {
     pub const AUDIO_INPUT: &str = "Where the sound comes from. Normally the input device's own audio.";
     pub const AUDIO_OUTPUT: &str = "Where you hear it. System output follows your computer's sound setting.";
     pub const VOLUME: &str = "xReveal's own volume, on top of your computer's";
-    pub const RESET_ALL: &str = "Puts every setting back to its default";
 }
 
 /// "+N ms input lag" for a picture delay, or `None` when there is none (docs/spec/v1.md §2.3).
@@ -332,9 +333,13 @@ impl SettingsDrawer {
             }
         }));
         subscriptions.push(cx.subscribe(&card_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
-            if let SelectEvent::Confirm(Some(_)) = event
-                && let Some(index) = select.read(cx).selected_index(cx)
-                && let Some(os_id) = this.card_ids.get(index.row).cloned()
+            let Some(row) = matches!(event, SelectEvent::Confirm(Some(_))).then(|| select.read(cx).selected_index(cx)).flatten().map(|i| i.row) else { return };
+            // Row 0 is "None"; the inputs follow.
+            if row == 0 {
+                if this.model.current.is_some() {
+                    cx.emit(DrawerEvent::NoInput);
+                }
+            } else if let Some(os_id) = this.card_ids.get(row - 1).cloned()
                 && this.model.current.as_ref().map(|(i, _)| &i.os_id) != Some(&os_id)
                 && let Some(info) = this.model.sources.iter().find(|s| s.identity.os_id == os_id)
                 && let Some(format) = source::default_choice(&info.formats)
@@ -413,8 +418,8 @@ impl SettingsDrawer {
         // Card list, with the one on screen selected.
         let current_id = model.current.as_ref().map(|(i, _)| i.os_id.clone());
         self.card_ids = model.sources.iter().map(|s| s.identity.os_id.clone()).collect();
-        let names: Vec<String> = model.sources.iter().map(|s| s.identity.name.clone()).collect();
-        let card_index = current_id.as_ref().and_then(|id| self.card_ids.iter().position(|c| c == id));
+        let names: Vec<String> = std::iter::once("None".to_owned()).chain(model.sources.iter().map(|s| s.identity.name.clone())).collect();
+        let card_index = Some(current_id.as_ref().and_then(|id| self.card_ids.iter().position(|c| c == id)).map_or(0, |i| i + 1));
         self.card_select.update(cx, |s, cx| {
             s.set_items(SearchableVec::new(names), window, cx);
             s.set_selected_index(card_index.map(IndexPath::new), window, cx);
@@ -479,8 +484,9 @@ impl SettingsDrawer {
             let on = tab == self.tab;
             div()
                 .id(SharedString::from(tab.label()))
-                .h(px(64.))
-                .mx_2()
+                // Square, centred in the rail.
+                .size(px(RAIL - 16.))
+                .mx_auto()
                 .rounded(px(10.))
                 .flex()
                 .flex_col()
@@ -499,12 +505,15 @@ impl SettingsDrawer {
                     cx.notify();
                 }))
         });
+        let left = self.model.side == DrawerSide::Left;
         div()
             .w(px(RAIL))
             .flex_none()
             .pt_3()
             .bg(pal.deep)
-            .border_r_1()
+            // The rail sits on the drawer's outer edge, so its inner border faces the content.
+            .when(left, |d| d.border_r_1())
+            .when(!left, |d| d.border_l_1())
             .border_color(pal.line)
             .flex()
             .flex_col()
@@ -723,17 +732,7 @@ impl SettingsDrawer {
                 &["Latency", "Frame rate", "Dropped frames", "Video format"],
                 &[stats.latency, stats.fps, stats.frames, stats.format],
                 nav::switch_cursor("Shows"),
-                cx.listener(|this, i: &usize, _, cx| {
-                    let mut stats = this.model.stats;
-                    let flag = match i {
-                        0 => &mut stats.latency,
-                        1 => &mut stats.fps,
-                        2 => &mut stats.frames,
-                        _ => &mut stats.format,
-                    };
-                    *flag = !*flag;
-                    this.set_stats(stats, cx);
-                }),
+                cx.listener(|this, i: &usize, _, cx| this.set_stats(this.model.stats.flip(*i), cx)),
             );
             section = section.child(setting("Corner", hints::STATS_CORNER, corner)).child(setting("Shows", hints::STATS_SHOWS, shows));
         }
@@ -906,7 +905,6 @@ impl SettingsDrawer {
             .flex_col()
             .gap_1()
             .child(body)
-            .when(!self.confirm_reset, |d| d.child(hint(hints::RESET_ALL)))
             .into_any_element()
     }
 
@@ -1063,6 +1061,8 @@ impl Render for SettingsDrawer {
         let root = div().size_full().key_context(nav::KEY_CONTEXT).track_focus(&self.focus);
         self.nav_handlers(root, cx)
             .flex()
+            // The rail on the outer edge: right of the content when the drawer is on the right.
+            .when(self.model.side == DrawerSide::Right, |d| d.flex_row_reverse())
             .text_color(pal.text)
             .bg(pal.panel)
             .child(rail)

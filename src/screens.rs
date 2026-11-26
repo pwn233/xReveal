@@ -9,27 +9,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::permission::Privacy;
-use crate::theme::{Palette, mono_family};
+use crate::theme::Palette;
 use crate::video::signal::Signal;
-
-/// One input the picker offers: its OS ID, name and the Video format it would start at.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PickerInput {
-    pub os_id: String,
-    pub name: String,
-    pub format: String,
-}
-
-/// Which picker shows when nothing is on screen yet.
-#[derive(Clone, Debug, PartialEq)]
-pub enum PickerKind {
-    /// The first launch (or after Reset all): the Welcome screen.
-    Welcome,
-    /// The remembered input isn't plugged in: the Card-not-found picker. Holds its name.
-    NotFound(String),
-    /// Nothing remembered and nothing chosen yet.
-    Choose,
-}
 
 /// What the window shows where the picture goes.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,8 +23,9 @@ pub enum Screen {
     Permission { denied: bool },
     /// Windows: the privacy switch blocks camera access for desktop apps.
     Blocked,
-    /// Choose an input; never starts one by itself (docs/spec/v1.md §2.1).
-    Picker { kind: PickerKind, inputs: Vec<PickerInput> },
+    /// No input on screen: none chosen yet, or the remembered one isn't plugged in. Settings
+    /// (Tab) is where one is chosen; nothing starts by itself (docs/spec/v1.md §2.1).
+    NoInput { title: String, hint: &'static str },
     /// The video pipeline couldn't start, or the input failed to open for another reason.
     NoCard { title: String },
     NoSignal { card: String },
@@ -52,15 +34,12 @@ pub enum Screen {
 }
 
 pub type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
-/// Starts the input with this OS ID.
-pub type ChooseHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
 pub type SettingsHandler = Rc<dyn Fn(Privacy, &mut Window, &mut App)>;
 
 /// What the screens' buttons do.
 #[derive(Clone)]
 pub struct Actions {
     pub pick_another: Handler,
-    pub choose: ChooseHandler,
     pub allow: Handler,
     pub open_settings: SettingsHandler,
 }
@@ -76,6 +55,14 @@ impl Screen {
             Signal::NoSignal => Screen::NoSignal { card },
             Signal::Unplugged => Screen::Unplugged { card },
             Signal::Busy => Screen::Busy { card },
+        }
+    }
+
+    /// The screen with nothing on it: no input chosen, or `missing` (the remembered one) unplugged.
+    pub fn no_input(missing: Option<&str>) -> Screen {
+        match missing {
+            Some(name) => Screen::NoInput { title: format!("{name} isn't connected"), hint: "Plug it back in, or press Tab to choose another input" },
+            None => Screen::NoInput { title: "No input selected".into(), hint: "Press Tab to open settings and choose your input" },
         }
     }
 
@@ -118,15 +105,7 @@ impl Screen {
                 "Windows is blocking camera access for desktop apps".into(),
                 "Turn on \"Let desktop apps access your camera\" in Windows' privacy settings, then come back here.".into(),
             ),
-            Screen::Picker { kind, inputs } => {
-                let (title, hint) = match kind {
-                    PickerKind::Welcome => ("Welcome to xReveal".to_owned(), "Choose the input your console is plugged into"),
-                    PickerKind::NotFound(name) => (format!("{name} isn't connected"), "Plug it back in and choose it below, or pick another input"),
-                    PickerKind::Choose => ("Choose an input".to_owned(), "Choose the input your console is plugged into"),
-                };
-                let hint = if inputs.is_empty() { "No inputs found. Plug in your capture device and it appears here." } else { hint };
-                (IconName::Cable, title, hint.to_owned())
-            }
+            Screen::NoInput { title, hint } => (IconName::Cable, title.clone(), (*hint).to_owned()),
             Screen::NoCard { title } => (IconName::Cable, title.clone(), "Plug in your input device, then choose it in Settings".into()),
             Screen::NoSignal { card } => (
                 IconName::MonitorOff,
@@ -170,7 +149,6 @@ impl Screen {
                 let label = if matches!(self, Screen::Blocked) { "Open Windows settings" } else { "Open System Settings" };
                 Some(button("open-settings", label, false).on_click(move |_, w, cx| open(Privacy::Camera, w, cx)).into_any_element())
             }
-            Screen::Picker { inputs, .. } => Some(picker_list(pal, inputs, actions.choose.clone())),
             Screen::NoCard { .. } | Screen::Unplugged { .. } | Screen::Busy { .. } => {
                 let pick = actions.pick_another.clone();
                 Some(button("pick-input", "Pick another input", false).on_click(move |_, w, cx| pick(w, cx)).into_any_element())
@@ -204,45 +182,10 @@ impl Screen {
     }
 }
 
-/// The inputs to choose from, one row each: name, and the format it would start at.
-fn picker_list(pal: Palette, inputs: &[PickerInput], choose: ChooseHandler) -> AnyElement {
-    div()
-        .id("picker")
-        .mt_3()
-        .w_full()
-        .max_h(px(300.))
-        .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .children(inputs.iter().enumerate().map(|(i, input)| {
-            let choose = choose.clone();
-            let os_id = input.os_id.clone();
-            div()
-                .id(("input", i))
-                .h(px(48.))
-                .px_4()
-                .rounded(px(10.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_4()
-                .cursor_pointer()
-                .bg(pal.raised)
-                .border_1()
-                .border_color(pal.line)
-                .hover(|d| d.bg(pal.raised_hover).border_color(pal.accent_line))
-                .child(div().min_w_0().truncate().text_sm().text_color(pal.text).child(input.name.clone()))
-                .child(div().flex_none().text_xs().font_family(mono_family()).text_color(pal.secondary).child(input.format.clone()))
-                .on_click(move |_, w, cx| choose(os_id.clone(), w, cx))
-        }))
-        .into_any_element()
-}
-
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has its own `test` attribute that would replace std's.
-    use super::{PickerKind, Screen, Signal};
+    use super::{Screen, Signal};
 
     #[test]
     fn each_signal_has_its_screen() {
@@ -259,7 +202,7 @@ mod tests {
         assert!(Screen::Picture.backdrop().is_none());
         assert_eq!(Screen::Unplugged { card: "x".into() }.backdrop().map(|c| c.a), Some(0.6));
         assert_eq!(Screen::NoSignal { card: "x".into() }.backdrop().map(|c| c.a), Some(1.0));
-        assert_eq!(Screen::Picker { kind: PickerKind::Welcome, inputs: vec![] }.backdrop().map(|c| c.a), Some(1.0));
+        assert_eq!(Screen::no_input(None).backdrop().map(|c| c.a), Some(1.0));
         assert_eq!(Screen::no_card("Couldn't open USB2 Video."), Screen::NoCard { title: "Couldn't open USB2 Video".into() });
     }
 }
