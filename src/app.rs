@@ -34,6 +34,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
+    drawer::bind_keys(cx);
 }
 
 /// Switches the window between a normal window and borderless fullscreen. On macOS that is GPUI's
@@ -664,6 +665,14 @@ impl XReveal {
         if open != self.drawer_open {
             self.slide = self.slide.toward(open);
         }
+        // The drawer takes the keys while it's open (its arrow keys), and gives them back after.
+        if !self.drawer_in_own_window {
+            if open {
+                self.drawer.read(cx).focus_handle().focus(window, cx);
+            } else {
+                self.focus.focus(window, cx);
+            }
+        }
         self.drawer_open = open;
         self.near_edge = false;
         cx.notify();
@@ -958,7 +967,9 @@ impl DrawerWindow {
     fn new(model: DrawerModel, side: DrawerSide, main: WeakEntity<XReveal>, main_window: AnyWindowHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let drawer = cx.new(|cx| SettingsDrawer::new(model, window, cx));
         let focus = cx.focus_handle();
-        focus.focus(window, cx);
+        // The drawer itself takes the keys, so its arrow keys work; this window's keys still reach
+        // the shell around it.
+        drawer.read(cx).focus_handle().focus(window, cx);
         let forward = cx.subscribe(&drawer, |this: &mut Self, _, event: &DrawerEvent, cx| {
             let event = event.clone();
             this.with_main(cx, move |main, window, cx| main.apply(event, window, cx));

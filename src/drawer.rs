@@ -14,6 +14,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::{Duration, Instant};
 
+mod nav;
+
+pub use nav::bind_keys;
+
 use crate::audio::AudioModel;
 use crate::setup::{Accent, Corner, Density, DrawerSide, Look, StatsBox, ThemeChoice, WindowMode};
 use crate::source::{self, SourceIdentity, SourceInfo, VideoFormat};
@@ -196,6 +200,13 @@ pub struct SettingsDrawer {
     model: DrawerModel,
     tab: Tab,
     more_open: bool,
+    /// Arrow-key navigation: the row under the cursor, the switch under it in a row of switches,
+    /// and whether the keyboard is in use (the highlight shows only then).
+    cursor: usize,
+    switch: usize,
+    keyboard: bool,
+    scroll: ScrollHandle,
+    focus: FocusHandle,
     confirm_reset: bool,
     custom_ratio: bool,
     sliders: Sliders,
@@ -335,6 +346,11 @@ impl SettingsDrawer {
             model: DrawerModel::default(),
             tab: Tab::Source,
             more_open: false,
+            cursor: 0,
+            switch: 0,
+            keyboard: false,
+            scroll: ScrollHandle::new(),
+            focus: cx.focus_handle(),
             confirm_reset: false,
             custom_ratio,
             sliders,
@@ -354,7 +370,14 @@ impl SettingsDrawer {
     pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
         self.confirm_reset = false;
+        self.cursor = 0;
+        self.switch = 0;
         cx.notify();
+    }
+
+    /// Focus this to give the drawer the arrow keys.
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
     }
 
     /// Replaces the snapshot (e.g. after a Source switch or a reset) and moves the controls to match.
@@ -663,6 +686,7 @@ impl SettingsDrawer {
                 "stats-shows",
                 &["Latency", "Frame rate", "Dropped frames", "Video format"],
                 &[stats.latency, stats.fps, stats.frames, stats.format],
+                nav::switch_cursor("Shows"),
                 cx.listener(|this, i: &usize, _, cx| {
                     let mut stats = this.model.stats;
                     let flag = match i {
@@ -719,7 +743,7 @@ impl SettingsDrawer {
             .items_center()
             .gap_2()
             .text_sm()
-            .text_color(pal.secondary)
+            .text_color(if nav::focused("More") { pal.text } else { pal.secondary })
             .cursor_pointer()
             .hover(|d| d.text_color(pal.text))
             .child(Icon::new(if self.more_open { IconName::ChevronDown } else { IconName::ChevronRight }).size_4())
@@ -761,6 +785,7 @@ impl SettingsDrawer {
             "mute",
             &["Mute"],
             &[audio.muted],
+            None,
             cx.listener(|this, _: &usize, _, cx| {
                 this.model.audio.muted = !this.model.audio.muted;
                 cx.emit(DrawerEvent::Mute(this.model.audio.muted));
@@ -821,7 +846,8 @@ impl SettingsDrawer {
                 .into_any_element()
         } else {
             let link = |id: &'static str, label: &'static str| {
-                div().id(id).text_sm().text_color(pal.secondary).cursor_pointer().hover(|d| d.text_color(pal.text)).child(label)
+                let colour = if nav::focused(label) { pal.text } else { pal.secondary };
+                div().id(id).text_sm().text_color(colour).cursor_pointer().hover(|d| d.text_color(pal.text)).child(label)
             };
             div()
                 .flex()
@@ -966,7 +992,15 @@ impl SettingsDrawer {
             .flex()
             .items_center()
             .justify_between()
-            .child(div().text_base().font_weight(FontWeight::MEDIUM).child(self.tab.label()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_base().font_weight(FontWeight::MEDIUM).child(self.tab.label()))
+                    // On the title, ←/→ switch tabs.
+                    .when(nav::focused(self.tab.label()), |d| d.child(div().text_xs().text_color(pal.muted).child("‹ ›"))),
+            )
             .child(reset)
             .into_any_element()
     }
@@ -975,6 +1009,7 @@ impl SettingsDrawer {
 impl Render for SettingsDrawer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette();
+        nav::set_focus(self.focus_for_render());
         let rows = match self.tab {
             Tab::Source => self.source_tab(cx),
             Tab::Display => self.display_tab(cx),
@@ -989,8 +1024,8 @@ impl Render for SettingsDrawer {
         let sections = rows.into_iter().enumerate().map(|(i, row)| {
             div().w_full().py(px(theme::spacing().section)).when(i > 0, |d| d.border_t_1().border_color(pal.line)).child(row)
         });
-        div()
-            .size_full()
+        let root = div().size_full().key_context(nav::KEY_CONTEXT).track_focus(&self.focus);
+        self.nav_handlers(root, cx)
             .flex()
             .text_color(pal.text)
             .bg(pal.panel)
@@ -1009,7 +1044,11 @@ impl Render for SettingsDrawer {
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
-                            .child(div().w_full().px_5().flex().flex_col().children(sections)),
+                            .track_scroll(&self.scroll)
+                            .px_5()
+                            .flex()
+                            .flex_col()
+                            .children(sections),
                     )
                     .child(reset_all),
             )
@@ -1028,8 +1067,21 @@ fn warn(text: String) -> Div {
 
 /// Title, control, hint: one setting.
 fn setting(title: &'static str, hint_text: &'static str, control: impl IntoElement) -> AnyElement {
+    let pal = theme::palette();
+    let focused = nav::focused(title);
     div()
-        .w_full()
+        // No fixed width: it spreads over the negative margins.
+        // Room for the arrow-key highlight without moving anything: a wash and an accent edge
+        // (2 px, taken off the left padding so the text stays put).
+        .pl(px(6.))
+        .pr_2()
+        .mx(px(-8.))
+        .py_1()
+        .my(px(-4.))
+        .rounded(px(8.))
+        .border_l_2()
+        .border_color(if focused { pal.accent } else { gpui_kit::transparent_black() })
+        .when(focused, |d| d.bg(pal.wash))
         .flex()
         .flex_col()
         .gap_2()
@@ -1076,7 +1128,7 @@ fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&u
 }
 
 /// Like [`chips`], but each one switches on and off by itself.
-fn toggles(id: &'static str, labels: &[&str], on: &[bool], on_toggle: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
+fn toggles(id: &'static str, labels: &[&str], on: &[bool], cursor: Option<usize>, on_toggle: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
     let pal = theme::palette();
     let on_toggle = std::rc::Rc::new(on_toggle);
     div().w_full().flex().flex_wrap().gap(px(6.)).children(labels.iter().enumerate().map(|(i, label)| {
@@ -1095,6 +1147,8 @@ fn toggles(id: &'static str, labels: &[&str], on: &[bool], on_toggle: impl Fn(&u
             .border_1()
             .when(chosen, |d| d.bg(pal.accent_fill).border_color(pal.accent_line).text_color(pal.accent).child(Icon::new(IconName::Check).size_3p5()))
             .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line).text_color(pal.secondary).hover(|d| d.bg(pal.raised_hover).text_color(pal.text)))
+            // The switch under the arrow-key cursor.
+            .when(cursor == Some(i), |d| d.border_color(pal.text))
             .child(label.to_string())
             .on_click(move |_, window, cx| on_toggle(&i, window, cx))
     }))
