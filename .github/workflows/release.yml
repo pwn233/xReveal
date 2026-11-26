@@ -1,28 +1,106 @@
-# Release assets (docs/spec/v1.md §6). A `v*` tag builds them on both OSes and attaches them to a
-# GitHub Release. Pull requests that touch packaging build them too, as artifacts only, so the
-# pipeline is proven before a tag needs it.
+# Release assets (docs/spec/v1.md §6). A release is made by hand: Actions › Release › Run workflow,
+# naming a `v*` tag that's already pushed and typing RELEASE to confirm. The workflow builds that
+# tag on both OSes and attaches the assets to a GitHub Release. Pushing a tag publishes nothing.
+# Pull requests that touch packaging build the assets too, as artifacts only, so the pipeline is
+# proven before a release needs it.
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release: one already pushed, e.g. v0.1.0"
+        required: true
+        type: string
+      confirm:
+        description: "Type RELEASE to publish it"
+        required: true
+        type: string
   pull_request:
     paths:
       - ".github/workflows/release.yml"
       - "packaging/**"
       - "scripts/package-*"
-  workflow_dispatch:
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-${{ inputs.tag || github.ref }}
+  # A release in progress is never cut short; a pull request's build is replaced by a newer push.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # What to build: the chosen tag (checked) for a release, the pull request's commit otherwise.
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.version.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Confirm the release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          CONFIRM: ${{ inputs.confirm }}
+        shell: bash
+        run: |
+          tags() {
+            local found
+            found=$(gh api "repos/$GITHUB_REPOSITORY/tags" --paginate --jq '.[].name | select(startswith("v"))' || true)
+            {
+              echo "### Tags you can release"
+              if [[ -n "$found" ]]; then
+                sed 's/^/- /' <<< "$found"
+              else
+                echo "None yet. Push one: \`git tag v0.1.0 && git push origin v0.1.0\`"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          if [[ "$CONFIRM" != "RELEASE" ]]; then
+            echo "::error::Type RELEASE (in capitals) in the confirmation box to publish"
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$TAG' isn't a version tag like v0.1.0"
+            tags
+            exit 1
+          fi
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            echo "::error::There's no tag $TAG. Push it first: git tag $TAG && git push origin $TAG"
+            tags
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::$TAG is already released"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+
+      # The tag names the version; it must match Cargo.toml's at that tag, so the app reports what
+      # it shipped as.
+      - name: Version
+        id: version
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "${TAG#v}" != "$version" ]]; then
+            echo "::error::Tag $TAG doesn't match Cargo.toml's version $version at that tag"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   build:
     name: ${{ matrix.name }}
+    needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +112,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.sha }}
 
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
@@ -42,24 +122,9 @@ jobs:
         if: runner.os == 'macOS'
         run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
 
-      # The tag names the version; it must match Cargo.toml's, so the app reports what it shipped as.
-      - name: Version
-        id: version
-        shell: bash
-        run: |
-          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            tag="${GITHUB_REF#refs/tags/v}"
-            if [[ "$tag" != "$cargo_version" ]]; then
-              echo "::error::Tag v$tag doesn't match Cargo.toml's version $cargo_version"
-              exit 1
-            fi
-          fi
-          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
-
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        run: scripts/package-macos.sh "${{ steps.version.outputs.version }}"
+        run: scripts/package-macos.sh "${{ needs.check.outputs.version }}"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -68,7 +133,7 @@ jobs:
           if (-not (Get-Command makensis -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
             choco install nsis --no-progress -y
           }
-          scripts/package-windows.ps1 -Version "${{ steps.version.outputs.version }}"
+          scripts/package-windows.ps1 -Version "${{ needs.check.outputs.version }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -81,8 +146,8 @@ jobs:
 
   release:
     name: Publish
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -95,8 +160,11 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" assets/* \
+          gh release create "$TAG" assets/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "xReveal ${GITHUB_REF_NAME#v}" \
+            --verify-tag \
+            --title "xReveal $VERSION" \
             --generate-notes
