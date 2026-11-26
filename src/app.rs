@@ -4,12 +4,14 @@
 
 use std::time::Duration;
 
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::drawer::{self, DrawerEvent, DrawerModel, SettingsDrawer};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::platform::VideoPipeline;
 use crate::setup::{DrawerSide, Store};
+use crate::theme::palette;
 use crate::video::timing::Summary;
 
 actions!(xreveal, [ToggleDrawer, CloseDrawer, ToggleStats, ToggleFullscreen]);
@@ -40,6 +42,12 @@ pub struct XReveal {
     video: Option<VideoPipeline>,
     drawer: Entity<SettingsDrawer>,
     drawer_open: bool,
+    /// The drawer sliding in or out (drawn in this window).
+    slide: drawer::Slide,
+    /// The drawer is drawn in its own transparent window (Windows: the video child window covers
+    /// GPUI's content; docs/spec/v1.md §3.5). `XREVEAL_DRAWER_WINDOW=1` forces it elsewhere, for testing.
+    drawer_in_own_window: bool,
+    drawer_window: Option<(AnyWindowHandle, Entity<DrawerWindow>)>,
     /// The pointer is near the drawer's edge: show the handle.
     near_edge: bool,
     /// The one-time "Blacks look grey?" tip, while it is up.
@@ -84,7 +92,7 @@ impl XReveal {
             status = format!("{notice} {status}");
         }
 
-        let drawer = cx.new(|cx| SettingsDrawer::new(DrawerModel::default(), cx));
+        let drawer = cx.new(|cx| SettingsDrawer::new(DrawerModel::default(), window, cx));
         let on_drawer = cx.subscribe_in(&drawer, window, |this, _, event: &DrawerEvent, window, cx| this.apply(event.clone(), window, cx));
         let mut this = Self {
             focus,
@@ -93,12 +101,22 @@ impl XReveal {
             video,
             drawer,
             drawer_open: false,
+            slide: drawer::Slide::closed(),
+            drawer_in_own_window: cfg!(target_os = "windows") || std::env::var_os("XREVEAL_DRAWER_WINDOW").is_some(),
+            drawer_window: None,
             near_edge: false,
             tip: None,
             stats_refresh: None,
             store,
             _subscriptions: vec![save_on_quit, on_drawer],
         };
+        let follow = cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+            if this.drawer_window.is_some() {
+                this.close_drawer_window(cx);
+                this.open_drawer_window(window, cx);
+            }
+        });
+        this._subscriptions.push(follow);
         this.showing_changed(window, cx);
         this
     }
@@ -144,7 +162,64 @@ impl XReveal {
 
     fn refresh_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let model = self.drawer_model();
+        if let Some((handle, host)) = self.drawer_window.clone() {
+            let model = model.clone();
+            let drawer = host.read(cx).drawer.clone();
+            let _ = handle.update(cx, |_, window, cx| drawer.update(cx, |d, cx| d.set_model(model, window, cx)));
+        }
         self.drawer.update(cx, |drawer, cx| drawer.set_model(model, window, cx));
+    }
+
+    /// Opens the drawer as its own borderless, transparent window along the drawer side of this one.
+    fn open_drawer_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let main = window.bounds();
+        let width = px(drawer::WIDTH);
+        let x = match self.store.setup.drawer_side {
+            DrawerSide::Right => main.origin.x + main.size.width - width,
+            DrawerSide::Left => main.origin.x,
+        };
+        let bounds = Bounds { origin: point(x, main.origin.y), size: size(width, main.size.height) };
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            kind: WindowKind::PopUp,
+            focus: true,
+            show: true,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id: window.display(cx).map(|d| d.id()),
+            window_background: WindowBackgroundAppearance::Transparent,
+            ..Default::default()
+        };
+        let model = self.drawer_model();
+        let main_entity = cx.entity().downgrade();
+        let main_window = window.window_handle();
+        let side = self.store.setup.drawer_side;
+        match gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| DrawerWindow::new(model, side, main_entity, main_window, window, cx))) {
+            Ok((handle, host)) => {
+                let _ = handle.update(cx, |_, window, cx| {
+                    gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
+                });
+                self.drawer_window = Some((handle, host));
+            }
+            Err(error) => self.status = format!("Couldn't open settings: {error}"),
+        }
+    }
+
+    /// Slides the drawer window's panel out, then closes the window.
+    fn close_drawer_window(&mut self, cx: &mut Context<Self>) {
+        if let Some((handle, host)) = self.drawer_window.take() {
+            host.update(cx, |host, cx| {
+                host.slide = host.slide.toward(false);
+                cx.notify();
+            });
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(drawer::SLIDE_OUT).await;
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            })
+            .detach();
+        }
     }
 
     /// Applies a change made in the drawer: live to the picture, and to the Remembered setup.
@@ -176,7 +251,14 @@ impl XReveal {
                 }
                 self.store.update(|s| s.delay = delay);
             }
-            DrawerEvent::Side(side) => self.store.update(|s| s.drawer_side = side),
+            DrawerEvent::Side(side) => {
+                self.store.update(|s| s.drawer_side = side);
+                // A drawer in its own window moves to the other edge.
+                if self.drawer_window.is_some() {
+                    self.close_drawer_window(cx);
+                    self.open_drawer_window(window, cx);
+                }
+            }
             DrawerEvent::Source(os_id, choice) => self.switch_source(os_id, choice, window, cx),
             DrawerEvent::ResetAll => self.reset_all_settings(window, cx),
         }
@@ -231,6 +313,16 @@ impl XReveal {
     fn set_drawer_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if open && !self.drawer_open {
             self.refresh_drawer(window, cx);
+        }
+        if self.drawer_in_own_window {
+            match open {
+                true if self.drawer_window.is_none() => self.open_drawer_window(window, cx),
+                false => self.close_drawer_window(cx),
+                _ => {}
+            }
+        }
+        if open != self.drawer_open && !self.drawer_in_own_window {
+            self.slide = self.slide.toward(open);
         }
         self.drawer_open = open;
         self.near_edge = false;
@@ -304,22 +396,26 @@ impl Render for XReveal {
                 "Blacks look grey? Open settings (Tab) › Colour and set Range to Limited, or set your console's RGB range to Full.",
             ))
         });
-        let drawer = self.drawer_open.then(|| {
+        let drawer = (!self.drawer_in_own_window && self.slide.visible()).then(|| {
+            if self.slide.moving() {
+                window.request_animation_frame();
+            }
+            let offset = self.slide.offset();
             let shell = div()
                 .id("drawer")
                 .absolute()
                 .top_0()
                 .bottom_0()
                 .w(px(drawer::WIDTH))
-                .border_color(rgba(drawer::LINE))
+                .border_color(rgba(palette::LINE))
                 .occlude()
                 // Clicks inside the drawer must not reach the picture (which closes it).
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .child(self.drawer.clone());
             match side {
-                DrawerSide::Right => shell.right_0().border_l_1(),
-                DrawerSide::Left => shell.left_0().border_r_1(),
+                DrawerSide::Right => shell.right(offset).border_l_1(),
+                DrawerSide::Left => shell.left(offset).border_r_1(),
             }
         });
         let handle = (!self.drawer_open && self.near_edge).then(|| {
@@ -328,13 +424,25 @@ impl Render for XReveal {
                 .absolute()
                 .top(relative(0.5))
                 .mt(px(-36.))
-                .w(px(22.))
-                .h(px(72.))
-                .rounded_lg()
-                .bg(rgba(drawer::GLASS))
+                .w(px(20.))
+                .h(px(64.))
+                .rounded(px(10.))
+                .bg(rgba(palette::PANEL))
                 .border_1()
-                .border_color(rgba(drawer::LINE))
+                .border_color(rgba(palette::LINE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(palette::SECONDARY))
+                .hover(|d| d.text_color(rgb(palette::TEXT)))
                 .cursor_pointer()
+                .child(
+                    gpui_kit::component::Icon::new(match side {
+                        DrawerSide::Right => gpui_kit::assets::IconName::ChevronLeft,
+                        DrawerSide::Left => gpui_kit::assets::IconName::ChevronRight,
+                    })
+                    .size_4(),
+                )
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
                     this.set_drawer_open(true, window, cx);
@@ -371,11 +479,93 @@ impl Render for XReveal {
             .flex()
             .items_end()
             .p_3()
-            .child(panel(div()).child(self.status.clone()))
+            // While the drawer is open its live readout says the same, and the status would sit under it.
+            .when(!self.drawer_open, |d| d.child(panel(div()).child(self.status.clone())))
             .children(tip)
             .children(overlay)
             .children(handle)
             .children(drawer)
+    }
+}
+
+
+/// The drawer in its own window (see [`XReveal::open_drawer_window`]). Changes go to the main
+/// window's [`XReveal`]; its keys and losing focus close the drawer.
+pub struct DrawerWindow {
+    drawer: Entity<SettingsDrawer>,
+    /// Which edge of the screen it sits on (it is opened again when that changes).
+    side: DrawerSide,
+    slide: drawer::Slide,
+    focus: FocusHandle,
+    main: WeakEntity<XReveal>,
+    main_window: AnyWindowHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl DrawerWindow {
+    fn new(model: DrawerModel, side: DrawerSide, main: WeakEntity<XReveal>, main_window: AnyWindowHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let drawer = cx.new(|cx| SettingsDrawer::new(model, window, cx));
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let forward = cx.subscribe(&drawer, |this: &mut Self, _, event: &DrawerEvent, cx| {
+            let event = event.clone();
+            this.with_main(cx, move |main, window, cx| main.apply(event, window, cx));
+        });
+        // Losing focus to another app closes the drawer, so the pop-up never floats over other
+        // apps. A click on the picture moves focus to the main window, which closes it anyway.
+        let blur = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+            if window.is_window_active() {
+                return;
+            }
+            let (main, main_window) = (this.main.clone(), this.main_window);
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                let _ = main_window.update(cx, |_, window, cx| {
+                    if !window.is_window_active()
+                        && let Some(main) = main.upgrade()
+                    {
+                        main.update(cx, |main, cx| main.set_drawer_open(false, window, cx));
+                    }
+                });
+            })
+            .detach();
+        });
+        let slide = drawer::Slide::closed().toward(true);
+        Self { drawer, side, slide, focus, main, main_window, _subscriptions: vec![forward, blur] }
+    }
+
+    /// Runs `f` on the main window's view, in the main window.
+    fn with_main(&self, cx: &mut App, f: impl FnOnce(&mut XReveal, &mut Window, &mut Context<XReveal>) + 'static) {
+        let main = self.main.clone();
+        let _ = self.main_window.update(cx, move |_, window, cx| {
+            if let Some(main) = main.upgrade() {
+                main.update(cx, |main, cx| f(main, window, cx));
+            }
+        });
+    }
+}
+
+impl Render for DrawerWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.slide.moving() {
+            window.request_animation_frame();
+        }
+        let offset = self.slide.offset();
+        let shell = div().absolute().top_0().bottom_0().w(px(drawer::WIDTH)).border_color(rgba(palette::LINE)).child(self.drawer.clone());
+        let shell = match self.side {
+            DrawerSide::Right => shell.right(offset).border_l_1(),
+            DrawerSide::Left => shell.left(offset).border_r_1(),
+        };
+        div()
+            .size_full()
+            .relative()
+            .overflow_hidden()
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &ToggleDrawer, _, cx| this.with_main(cx, |m, w, cx| m.set_drawer_open(false, w, cx))))
+            .on_action(cx.listener(|this, _: &CloseDrawer, _, cx| this.with_main(cx, |m, w, cx| m.set_drawer_open(false, w, cx))))
+            .on_action(cx.listener(|this, _: &ToggleStats, _, cx| this.with_main(cx, |m, _, cx| m.toggle_stats(cx))))
+            .child(shell)
     }
 }
 
