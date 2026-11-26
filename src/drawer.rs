@@ -87,6 +87,9 @@ pub struct DrawerModel {
     pub delay: DelaySettings,
     pub side: DrawerSide,
     pub window_mode: WindowMode,
+    /// Every screen (its identity and the name to show), and the one xReveal is on.
+    pub monitors: Vec<(String, String)>,
+    pub monitor: Option<String>,
     pub stats: StatsBox,
     pub look: Look,
     pub audio: AudioModel,
@@ -103,6 +106,8 @@ pub enum DrawerEvent {
     Delay(DelaySettings),
     Side(DrawerSide),
     WindowMode(WindowMode),
+    /// Show xReveal on this screen (by its identity).
+    Monitor(String),
     Stats(StatsBox),
     Look(Look),
     /// The sound input: `None` follows the card (its own audio).
@@ -153,6 +158,7 @@ pub mod hints {
     pub const CARD: &str = "The device your console is plugged into. Black picture on a PS5? Turn off HDCP in its HDMI settings.";
     pub const VIDEO_FORMAT: &str = "What the input sends. Changing it restarts the picture for a moment.";
     pub const BUFFERING: &str = "Holds frames back to smooth uneven delivery. Off is fastest.";
+    pub const MONITOR: &str = "Which screen xReveal shows on. A window moves there; Fullscreen covers it.";
     pub const WINDOW_MODE: &str = "Fullscreen covers the whole screen with no border. F11 switches between them.";
     pub const TARGET_RATIO: &str = "The shape of the picture on your screen. Pick your monitor's shape, like 21:9 for ultrawide, to fill it.";
     pub const FILL_MODE: &str = "How the console's 16:9 picture fits that shape: Fit adds black bars, Stretch widens everything, Crop zooms in, Smart stretch keeps the middle natural.";
@@ -584,7 +590,27 @@ impl SettingsDrawer {
                 }
             }),
         );
-        let mut out = vec![setting("Window", hints::WINDOW_MODE, window_mode), setting("Target ratio", hints::TARGET_RATIO, ratios)];
+        let labels: Vec<&str> = self.model.monitors.iter().map(|(_, label)| label.as_str()).collect();
+        let at = self.model.monitor.as_ref().and_then(|m| self.model.monitors.iter().position(|(id, _)| id == m)).unwrap_or(usize::MAX);
+        let monitor = chips(
+            "monitor",
+            &labels,
+            at,
+            cx.listener(|this, i: &usize, _, cx| {
+                if let Some((id, _)) = this.model.monitors.get(*i).cloned()
+                    && this.model.monitor.as_ref() != Some(&id)
+                {
+                    this.model.monitor = Some(id.clone());
+                    cx.emit(DrawerEvent::Monitor(id));
+                    cx.notify();
+                }
+            }),
+        );
+        let mut out = vec![
+            setting("Window", hints::WINDOW_MODE, window_mode),
+            setting("Monitor", hints::MONITOR, monitor),
+            setting("Target ratio", hints::TARGET_RATIO, ratios),
+        ];
         if self.custom_ratio {
             out.push(slider_setting("Custom ratio", hints::CUSTOM_RATIO, &self.sliders.custom_ratio, format!("{:.2}", p.target_ratio.0)));
         }

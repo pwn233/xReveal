@@ -149,6 +149,15 @@ impl SettingsDrawer {
                     }
                 } }));
                 s += 1;
+                let monitor = self.model.monitor.as_ref().and_then(|m| self.model.monitors.iter().position(|(id, _)| id == m)).unwrap_or(0);
+                rows.push(row("Monitor", s, Nav::Choice { len: self.model.monitors.len(), at: monitor, pick: |this, i, _, cx| {
+                    if let Some((id, _)) = this.model.monitors.get(i).cloned() {
+                        this.model.monitor = Some(id.clone());
+                        cx.emit(DrawerEvent::Monitor(id));
+                        cx.notify();
+                    }
+                } }));
+                s += 1;
                 let presets = TargetRatio::PRESETS.len();
                 let at = if self.custom_ratio { presets } else { preset_label(p.target_ratio).and_then(|l| TargetRatio::PRESETS.iter().position(|(x, _)| *x == l)).unwrap_or(1) };
                 rows.push(row("Target ratio", s, Nav::Choice { len: presets + 1, at, pick: |this, i, _, cx| match TargetRatio::PRESETS.get(i) {
