@@ -42,6 +42,8 @@ pub struct Setup {
     /// Where the window last was on `monitor` in Windowed mode.
     pub window: Option<WindowPlacement>,
     pub drawer_side: DrawerSide,
+    /// How xReveal's own panels look: theme, accent, opacity, density.
+    pub look: Look,
     /// The performance box (F3): whether it shows, where, and what it lists.
     pub stats: StatsBox,
     /// Every Source ever seen, with its own colour choices. Never trimmed.
@@ -63,6 +65,7 @@ impl Default for Setup {
             window_mode: WindowMode::Windowed,
             window: None,
             drawer_side: DrawerSide::Right,
+            look: Look::default(),
             stats: StatsBox::default(),
             sources: Vec::new(),
             audio_buffers: BTreeMap::new(),
@@ -104,6 +107,67 @@ pub enum WindowMode {
     Windowed,
     /// Borderless, covering the whole monitor.
     Fullscreen,
+}
+
+/// How xReveal's own panels look (the Interface tab). The picture is never affected.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Look {
+    pub theme: ThemeChoice,
+    pub accent: Accent,
+    /// How solid the panels over the picture are, 0.6..=1.
+    pub opacity: f32,
+    pub density: Density,
+}
+
+impl Look {
+    pub const OPACITY: (f32, f32) = (0.6, 1.0);
+
+    /// The opacity, kept within its range (a hand-edited file may say anything).
+    pub fn opacity(&self) -> f32 {
+        if self.opacity.is_finite() { self.opacity.clamp(Self::OPACITY.0, Self::OPACITY.1) } else { Look::default().opacity }
+    }
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self { theme: ThemeChoice::Dark, accent: Accent::Blue, opacity: 0.98, density: Density::Default }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeChoice {
+    /// Follows the OS's light or dark appearance.
+    System,
+    /// Graphite, for playing in a dark room. The default.
+    #[default]
+    Dark,
+    Light,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Accent {
+    #[default]
+    Blue,
+    Teal,
+    Green,
+    Amber,
+    Pink,
+}
+
+impl Accent {
+    pub const ALL: [Accent; 5] = [Accent::Blue, Accent::Teal, Accent::Green, Accent::Amber, Accent::Pink];
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Density {
+    Compact,
+    #[default]
+    Default,
+    Spacious,
 }
 
 /// The performance box over the picture (docs/spec/v1.md §3.3). Hidden by default.
@@ -478,6 +542,8 @@ mod tests {
         assert_eq!(setup.window_mode, WindowMode::Fullscreen);
         assert!(!setup.window.unwrap().usable());
         assert!(!setup.stats.shown && setup.stats.latency, "the performance box starts hidden, listing everything");
+        assert_eq!(setup.look, Look::default(), "graphite dark by default");
+        assert_eq!(Look { opacity: 0.1, ..Look::default() }.opacity(), 0.6, "never fully see-through");
         assert!(WindowPlacement { x: -1900.0, y: 30.0, width: 1280.0, height: 720.0 }.usable(), "a monitor left of the primary");
     }
 

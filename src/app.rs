@@ -11,7 +11,7 @@ use crate::drawer::{self, DrawerEvent, DrawerModel, SettingsDrawer};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::platform::VideoPipeline;
 use crate::setup::{DrawerSide, StatsBox, Store, WindowMode, WindowPlacement};
-use crate::theme::palette;
+use crate::theme;
 use crate::video::timing::Summary;
 
 actions!(xreveal, [ToggleDrawer, CloseDrawer, ToggleStats, ToggleFullscreen, Quit]);
@@ -130,6 +130,12 @@ impl XReveal {
             }
         });
         this._subscriptions.push(follow);
+        // The remembered look; with System it follows the OS's appearance as that changes.
+        theme::apply(&this.store.setup.look, theme::appearance_is_dark(window.appearance()), cx);
+        let appearance = cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
+            theme::apply(&this.store.setup.look, theme::appearance_is_dark(window.appearance()), cx);
+        });
+        this._subscriptions.push(appearance);
         this.showing_changed(window, cx);
         let stats = this.store.setup.stats;
         this.stats_refresh = None;
@@ -167,6 +173,7 @@ impl XReveal {
             side: setup.drawer_side,
             window_mode: setup.window_mode,
             stats: setup.stats,
+            look: setup.look,
             frame_interval: 1.0 / 60.0,
             ..Default::default()
         };
@@ -324,6 +331,10 @@ impl XReveal {
             DrawerEvent::Source(os_id, choice) => self.switch_source(os_id, choice, window, cx),
             DrawerEvent::WindowMode(mode) => self.set_window_mode(mode, window, cx),
             DrawerEvent::Stats(stats) => self.apply_stats(stats, cx),
+            DrawerEvent::Look(look) => {
+                self.store.update(|s| s.look = look);
+                theme::apply(&look, theme::appearance_is_dark(window.appearance()), cx);
+            }
             DrawerEvent::Quit => cx.quit(),
             DrawerEvent::ResetAll => self.reset_all_settings(window, cx),
         }
@@ -484,7 +495,8 @@ pub fn near_drawer_edge(x: f32, width: f32, side: DrawerSide) -> bool {
 
 impl Render for XReveal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let panel = |child: Div| child.px_2().py_1().rounded_md().bg(rgba(0x0000_00aa)).text_color(rgb(0xffffff)).text_sm();
+        let pal = theme::palette();
+        let panel = |child: Div| child.px_2().py_1().rounded(px(8.)).bg(pal.panel).border_1().border_color(pal.line).text_color(pal.text).text_sm();
         let side = self.store.setup.drawer_side;
         let width = window.bounds().size.width.as_f32();
 
@@ -501,8 +513,8 @@ impl Render for XReveal {
                     .flex()
                     .justify_between()
                     .gap_4()
-                    .child(div().text_color(rgb(palette::MUTED)).child(label))
-                    .child(div().text_color(rgb(palette::TEXT)).child(value))
+                    .child(div().text_color(pal.muted).child(label))
+                    .child(div().text_color(pal.text).child(value))
             });
             let corner = stats.corner;
             div()
@@ -514,10 +526,10 @@ impl Render for XReveal {
                 .px_3()
                 .py_2()
                 .rounded(px(10.))
-                .bg(rgba(palette::PANEL))
+                .bg(pal.panel)
                 .border_1()
-                .border_color(rgba(palette::LINE))
-                .font_family(crate::theme::mono_family())
+                .border_color(pal.line)
+                .font_family(theme::mono_family())
                 .text_xs()
                 .line_height(px(18.))
                 .flex()
@@ -540,7 +552,7 @@ impl Render for XReveal {
                 .top_0()
                 .bottom_0()
                 .w(px(drawer::WIDTH))
-                .border_color(rgba(palette::LINE))
+                .border_color(pal.line)
                 .occlude()
                 // Clicks inside the drawer must not reach the picture (which closes it).
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -560,14 +572,14 @@ impl Render for XReveal {
                 .w(px(20.))
                 .h(px(64.))
                 .rounded(px(10.))
-                .bg(rgba(palette::PANEL))
+                .bg(pal.panel)
                 .border_1()
-                .border_color(rgba(palette::LINE))
+                .border_color(pal.line)
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(palette::SECONDARY))
-                .hover(|d| d.text_color(rgb(palette::TEXT)))
+                .text_color(pal.secondary)
+                .hover(|d| d.text_color(pal.text))
                 .cursor_pointer()
                 .child(
                     gpui_kit::component::Icon::new(match side {
@@ -693,11 +705,12 @@ impl DrawerWindow {
 
 impl Render for DrawerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = theme::palette();
         if self.slide.moving() {
             window.request_animation_frame();
         }
         let offset = self.slide.offset();
-        let shell = div().absolute().top_0().bottom_0().w(px(drawer::WIDTH)).border_color(rgba(palette::LINE)).child(self.drawer.clone());
+        let shell = div().absolute().top_0().bottom_0().w(px(drawer::WIDTH)).border_color(pal.line).child(self.drawer.clone());
         let shell = match self.side {
             DrawerSide::Right => shell.right(offset).border_l_1(),
             DrawerSide::Left => shell.left(offset).border_r_1(),
