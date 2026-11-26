@@ -41,6 +41,14 @@ pub fn move_window(hwnd: HWND, monitor: u64) {
     }
 }
 
+/// Makes `hwnd` (a window of this thread) the active one, so it takes the keys. Synchronously:
+/// call it outside a GPUI update, so GPUI sees the change.
+pub fn activate(hwnd: HWND) {
+    unsafe {
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow(hwnd);
+    }
+}
+
 /// Makes pop-up `popup` (the drawer's or the overlays' window) part of `owner`: owned by it, so it
 /// stays just above it and minimises with it, never over other apps; and without the frame,
 /// rounded corners, shadow and open and close animations Windows gives a window of its kind.

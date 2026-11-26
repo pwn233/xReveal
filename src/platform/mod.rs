@@ -64,6 +64,17 @@ pub fn make_overlay(overlay: &gpui_kit::Window, owner: raw_window_handle::RawWin
     let _ = (overlay, owner);
 }
 
+/// Gives the keys back to `window` (Windows), from another window of xReveal's that has them.
+/// Call it outside a GPUI update.
+pub fn activate(window: raw_window_handle::RawWindowHandle) {
+    #[cfg(target_os = "windows")]
+    if let raw_window_handle::RawWindowHandle::Win32(win32) = window {
+        windows::screens::activate(::windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _));
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = window;
+}
+
 /// Makes the drawer's window `popup` part of `owner`, so it stays just above it and never floats
 /// over other apps, without the frame and animations Windows gives it (Windows).
 pub fn own_popup(popup: &gpui_kit::Window, owner: raw_window_handle::RawWindowHandle) {
