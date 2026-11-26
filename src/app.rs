@@ -542,6 +542,8 @@ impl XReveal {
             Ok((handle, host)) => {
                 let _ = handle.update(cx, |_, window, cx| {
                     gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
+                    // Its first frame was drawn before the root was made see-through; draw it again.
+                    window.refresh();
                 });
                 self.drawer_window = Some((handle, host));
             }
@@ -578,6 +580,8 @@ impl XReveal {
             let _ = handle.update(cx, |_, window, cx| {
                 gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
                 crate::platform::make_overlay(window, owner);
+                // Its first frame was drawn before the root was made see-through; draw it again.
+                window.refresh();
             });
             self.overlay_window = Some((handle, host));
         }
