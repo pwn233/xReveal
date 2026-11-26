@@ -174,7 +174,8 @@ pub mod hints {
     pub const DRAWER_SIDE: &str = "Which side this panel opens from";
     pub const THEME: &str = "How xReveal's panels look. System follows your computer's light or dark mode.";
     pub const ACCENT: &str = "The colour that marks what's selected";
-    pub const OPACITY: &str = "How much of the game shows through this panel and the performance box";
+    pub const OPACITY: &str = "How much of the game shows through this panel";
+    pub const STATS_OPACITY: &str = "How much of the game shows through the box";
     pub const DENSITY: &str = "How tightly the settings are packed";
     pub const STATS: &str = "Live timing over the picture. Click a corner to show it there, or the middle to hide it. F3 shows or hides it too.";
     pub const STATS_SHOWS: &str = "What the box lists";
@@ -242,6 +243,7 @@ struct Sliders {
     av_sync: Entity<SliderState>,
     opacity: Entity<SliderState>,
     volume: Entity<SliderState>,
+    stats_opacity: Entity<SliderState>,
 }
 
 impl EventEmitter<DrawerEvent> for SettingsDrawer {}
@@ -262,6 +264,7 @@ impl SettingsDrawer {
             hue: slider(cx, -180.0, 180.0, 1.0, p.adjustments.hue),
             av_sync: slider(cx, -500.0, 500.0, 1.0, model.delay.av_sync_offset_ms as f32),
             volume: slider(cx, 0.0, 100.0, 1.0, model.audio.volume * 100.0),
+            stats_opacity: slider(cx, StatsBox::OPACITY.0 * 100.0, StatsBox::OPACITY.1 * 100.0, 1.0, model.stats.opacity() * 100.0),
             opacity: slider(cx, Look::OPACITY.0 * 100.0, Look::OPACITY.1 * 100.0, 1.0, model.look.opacity() * 100.0),
         };
         let card_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
@@ -290,6 +293,11 @@ impl SettingsDrawer {
             if let SliderEvent::Change(SliderValue::Single(value)) = event {
                 let delay = DelaySettings { av_sync_offset_ms: value.round() as i32, ..this.model.delay };
                 this.set_delay(delay, cx);
+            }
+        }));
+        subscriptions.push(cx.subscribe(&sliders.stats_opacity, |this: &mut Self, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(SliderValue::Single(value)) = event {
+                this.set_stats(StatsBox { opacity: value.round() / 100.0, ..this.model.stats }, cx);
             }
         }));
         subscriptions.push(cx.subscribe(&sliders.volume, |this: &mut Self, _, event: &SliderEvent, cx| {
@@ -409,6 +417,7 @@ impl SettingsDrawer {
             (&self.sliders.av_sync, model.delay.av_sync_offset_ms as f32),
             (&self.sliders.opacity, model.look.opacity() * 100.0),
             (&self.sliders.volume, model.audio.volume * 100.0),
+            (&self.sliders.stats_opacity, model.stats.opacity() * 100.0),
         ];
         for (state, value) in values {
             state.update(cx, |s, cx| s.set_value(value, window, cx));
@@ -722,12 +731,18 @@ impl SettingsDrawer {
         if stats.shown {
             let shows = checkboxes(
                 "stats-shows",
-                &["Latency", "Frame rate", "Dropped frames", "Video format"],
+                &[
+                    ("Latency", "Capture to screen, and xReveal's share of it"),
+                    ("Frame rate", "Frames per second actually arriving"),
+                    ("Dropped frames", "Frames that came late or never arrived"),
+                    ("Video format", "Resolution, frame rate and pixel format on screen"),
+                ],
                 &[stats.latency, stats.fps, stats.frames, stats.format],
                 nav::switch_cursor("Shows"),
                 cx.listener(|this, i: &usize, _, cx| this.set_stats(this.model.stats.flip(*i), cx)),
             );
-            section = section.child(setting("Shows", hints::STATS_SHOWS, shows));
+            let opacity = slider_setting("Box opacity", hints::STATS_OPACITY, &self.sliders.stats_opacity, format!("{:.0}%", stats.opacity() * 100.0));
+            section = section.child(setting("Shows", hints::STATS_SHOWS, shows)).child(opacity);
         }
         section.into_any_element()
     }
@@ -1285,10 +1300,10 @@ fn radios(id: &'static str, items: &[(&str, &str)], selected: usize, on_pick: im
 
 /// A list of checkbox rows, one per item; each switches on and off by itself. `cursor` is the row
 /// under the arrow-key cursor.
-fn checkboxes(id: &'static str, labels: &[&str], on: &[bool], cursor: Option<usize>, on_toggle: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
+fn checkboxes(id: &'static str, items: &[(&str, &str)], on: &[bool], cursor: Option<usize>, on_toggle: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
     let pal = theme::palette();
     let on_toggle = std::rc::Rc::new(on_toggle);
-    div().w_full().flex().flex_col().children(labels.iter().enumerate().map(|(i, label)| {
+    div().w_full().flex().flex_col().children(items.iter().enumerate().map(|(i, (label, detail))| {
         let checked = on.get(i).copied().unwrap_or(false);
         let on_toggle = on_toggle.clone();
         let mark = div()
@@ -1303,20 +1318,25 @@ fn checkboxes(id: &'static str, labels: &[&str], on: &[bool], cursor: Option<usi
             .when(!checked, |d| d.bg(pal.raised).border_color(pal.line));
         div()
             .id((id, i))
-            .h(px(theme::spacing().chip))
+            .py(px(6.))
             .px_2()
             .mx(px(-8.))
             .rounded(px(6.))
             .flex()
             .items_center()
             .gap_3()
-            .text_sm()
             .cursor_pointer()
-            .text_color(if checked { pal.text } else { pal.secondary })
             .hover(|d| d.bg(pal.wash))
             .when(cursor == Some(i), |d| d.bg(pal.wash))
             .child(mark)
-            .child(label.to_string())
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().text_sm().text_color(if checked { pal.text } else { pal.secondary }).child(label.to_string()))
+                    .child(div().text_xs().text_color(pal.muted).child(detail.to_string())),
+            )
             .on_click(move |_, window, cx| on_toggle(&i, window, cx))
     }))
 }
