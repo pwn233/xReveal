@@ -171,6 +171,13 @@ pub enum Density {
 }
 
 impl StatsBox {
+    pub const OPACITY: (f32, f32) = (0.2, 1.0);
+
+    /// The opacity, kept within its range (a hand-edited file may say anything).
+    pub fn opacity(&self) -> f32 {
+        if self.opacity.is_finite() { self.opacity.clamp(Self::OPACITY.0, Self::OPACITY.1) } else { StatsBox::default().opacity }
+    }
+
     /// Switches item `index` (latency, fps, frames, format) on or off, except the last one on:
     /// the box always shows something.
     pub fn flip(self, index: usize) -> StatsBox {
@@ -187,7 +194,7 @@ impl StatsBox {
 }
 
 /// The performance box over the picture (docs/spec/v1.md §3.3). Hidden by default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct StatsBox {
     pub shown: bool,
@@ -199,11 +206,13 @@ pub struct StatsBox {
     pub frames: bool,
     /// The Video format and pixel format on screen.
     pub format: bool,
+    /// How solid the box is over the picture, `OPACITY`'s range.
+    pub opacity: f32,
 }
 
 impl Default for StatsBox {
     fn default() -> Self {
-        Self { shown: false, corner: Corner::TopLeft, latency: true, fps: true, frames: true, format: true }
+        Self { shown: false, corner: Corner::TopLeft, latency: true, fps: true, frames: true, format: true, opacity: 0.9 }
     }
 }
 
@@ -561,6 +570,7 @@ mod tests {
         assert_eq!(setup.look, Look::default(), "graphite dark by default");
         let only_fps = StatsBox { latency: false, frames: false, format: false, ..StatsBox::default() };
         assert_eq!(only_fps.flip(1), only_fps, "the last item stays on");
+        assert_eq!(StatsBox { opacity: 0.0, ..StatsBox::default() }.opacity(), 0.2, "never invisible");
         assert!(only_fps.flip(0).latency && only_fps.flip(0).fps, "others still switch on");
         assert_eq!(Look { opacity: 0.1, ..Look::default() }.opacity(), 0.6, "never fully see-through");
         assert!(WindowPlacement { x: -1900.0, y: 30.0, width: 1280.0, height: 720.0 }.usable(), "a monitor left of the primary");

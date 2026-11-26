@@ -643,7 +643,8 @@ impl Overlays {
                     .px_3()
                     .py_2()
                     .rounded(px(10.))
-                    .bg(pal.panel)
+                    // Its own opacity (Display › Performance box), not the drawer's.
+                    .bg(Hsla { a: stats.opacity(), ..pal.panel })
                     .border_1()
                     .border_color(pal.line)
                     .font_family(theme::mono_family())

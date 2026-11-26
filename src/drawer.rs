@@ -168,16 +168,16 @@ pub mod hints {
     pub const MONITOR: &str = "Which screen xReveal shows on. A window moves there; Fullscreen covers it.";
     pub const WINDOW_MODE: &str = "Fullscreen covers the whole screen with no border. F11 switches between them.";
     pub const TARGET_RATIO: &str = "The shape of the picture on your screen. Pick your monitor's shape, like 21:9 for ultrawide, to fill it.";
-    pub const FILL_MODE: &str = "How the console's 16:9 picture fits that shape: Fit adds black bars, Stretch widens everything, Crop zooms in, Smart stretch keeps the middle natural.";
+    pub const FILL_MODE: &str = "How the console's 16:9 picture fits that shape";
     pub const STRENGTH: &str = "0% looks just like Stretch. Higher keeps the centre more natural and stretches the edges more.";
     pub const CUSTOM_RATIO: &str = "Width ÷ height of your own shape, like 2.39 for a cinema ratio";
     pub const DRAWER_SIDE: &str = "Which side this panel opens from";
     pub const THEME: &str = "How xReveal's panels look. System follows your computer's light or dark mode.";
     pub const ACCENT: &str = "The colour that marks what's selected";
-    pub const OPACITY: &str = "How much of the game shows through this panel and the performance box";
+    pub const OPACITY: &str = "How much of the game shows through this panel";
+    pub const STATS_OPACITY: &str = "How much of the game shows through the box";
     pub const DENSITY: &str = "How tightly the settings are packed";
-    pub const STATS: &str = "Live timing over the picture. F3 shows or hides it too.";
-    pub const STATS_CORNER: &str = "It moves aside when this panel opens on the same side";
+    pub const STATS: &str = "Live timing over the picture. Click a corner to show it there, or the middle to hide it. F3 shows or hides it too.";
     pub const STATS_SHOWS: &str = "What the box lists";
     pub const RANGE: &str = "Match your console's RGB range. Blacks look grey? Choose Limited, or set your console to Full.";
     pub const SPACE: &str = "The picture's colour formula. Auto picks BT.709 for HD pictures.";
@@ -243,6 +243,7 @@ struct Sliders {
     av_sync: Entity<SliderState>,
     opacity: Entity<SliderState>,
     volume: Entity<SliderState>,
+    stats_opacity: Entity<SliderState>,
 }
 
 impl EventEmitter<DrawerEvent> for SettingsDrawer {}
@@ -263,6 +264,7 @@ impl SettingsDrawer {
             hue: slider(cx, -180.0, 180.0, 1.0, p.adjustments.hue),
             av_sync: slider(cx, -500.0, 500.0, 1.0, model.delay.av_sync_offset_ms as f32),
             volume: slider(cx, 0.0, 100.0, 1.0, model.audio.volume * 100.0),
+            stats_opacity: slider(cx, StatsBox::OPACITY.0 * 100.0, StatsBox::OPACITY.1 * 100.0, 1.0, model.stats.opacity() * 100.0),
             opacity: slider(cx, Look::OPACITY.0 * 100.0, Look::OPACITY.1 * 100.0, 1.0, model.look.opacity() * 100.0),
         };
         let card_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
@@ -291,6 +293,11 @@ impl SettingsDrawer {
             if let SliderEvent::Change(SliderValue::Single(value)) = event {
                 let delay = DelaySettings { av_sync_offset_ms: value.round() as i32, ..this.model.delay };
                 this.set_delay(delay, cx);
+            }
+        }));
+        subscriptions.push(cx.subscribe(&sliders.stats_opacity, |this: &mut Self, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(SliderValue::Single(value)) = event {
+                this.set_stats(StatsBox { opacity: value.round() / 100.0, ..this.model.stats }, cx);
             }
         }));
         subscriptions.push(cx.subscribe(&sliders.volume, |this: &mut Self, _, event: &SliderEvent, cx| {
@@ -410,6 +417,7 @@ impl SettingsDrawer {
             (&self.sliders.av_sync, model.delay.av_sync_offset_ms as f32),
             (&self.sliders.opacity, model.look.opacity() * 100.0),
             (&self.sliders.volume, model.audio.volume * 100.0),
+            (&self.sliders.stats_opacity, model.stats.opacity() * 100.0),
         ];
         for (state, value) in values {
             state.update(cx, |s, cx| s.set_value(value, window, cx));
@@ -634,9 +642,14 @@ impl SettingsDrawer {
             out.push(slider_setting("Custom ratio", hints::CUSTOM_RATIO, &self.sliders.custom_ratio, format!("{:.2}", p.target_ratio.0)));
         }
         let modes = [FillMode::Fit, FillMode::Stretch, FillMode::Crop, FillMode::SmartStretch];
-        let fill = chips(
+        let fill = radios(
             "fill",
-            &["Fit", "Stretch", "Crop", "Smart stretch"],
+            &[
+                ("Fit", "Black bars, nothing stretched"),
+                ("Stretch", "Fills the shape, everything widened"),
+                ("Crop", "Fills the shape, the edges cut off"),
+                ("Smart stretch", "Fills the shape, the middle stays natural"),
+            ],
             modes.iter().position(|m| *m == p.fill_mode).unwrap_or(0),
             cx.listener(move |this, i: &usize, _, cx| this.set_picture(PictureSettings { fill_mode: modes[*i], ..this.model.picture }, cx)),
         );
@@ -713,30 +726,84 @@ impl SettingsDrawer {
     /// The performance box: on or off, which corner, and what it lists (one section).
     fn stats_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let stats = self.model.stats;
-        let shown = chips(
-            "stats-shown",
-            &["Off", "On"],
-            stats.shown as usize,
-            cx.listener(|this, i: &usize, _, cx| this.set_stats(StatsBox { shown: *i == 1, ..this.model.stats }, cx)),
-        );
-        let mut section = div().flex().flex_col().gap(px(theme::spacing().gap)).child(setting("Performance box", hints::STATS, shown));
+        let placement = self.stats_placement(cx);
+        let mut section = div().flex().flex_col().gap(px(theme::spacing().gap)).child(setting("Performance box", hints::STATS, placement));
         if stats.shown {
-            let corner = chips(
-                "stats-corner",
-                &["Top left", "Top right", "Bottom left", "Bottom right"],
-                Corner::ALL.iter().position(|c| *c == stats.corner).unwrap_or(0),
-                cx.listener(|this, i: &usize, _, cx| this.set_stats(StatsBox { corner: Corner::ALL[*i], ..this.model.stats }, cx)),
-            );
-            let shows = toggles(
+            let shows = checkboxes(
                 "stats-shows",
-                &["Latency", "Frame rate", "Dropped frames", "Video format"],
+                &[
+                    ("Latency", "Capture to screen, and xReveal's share of it"),
+                    ("Frame rate", "Frames per second actually arriving"),
+                    ("Dropped frames", "Frames that came late or never arrived"),
+                    ("Video format", "Resolution, frame rate and pixel format on screen"),
+                ],
                 &[stats.latency, stats.fps, stats.frames, stats.format],
                 nav::switch_cursor("Shows"),
                 cx.listener(|this, i: &usize, _, cx| this.set_stats(this.model.stats.flip(*i), cx)),
             );
-            section = section.child(setting("Corner", hints::STATS_CORNER, corner)).child(setting("Shows", hints::STATS_SHOWS, shows));
+            let opacity = slider_setting("Box opacity", hints::STATS_OPACITY, &self.sliders.stats_opacity, format!("{:.0}%", stats.opacity() * 100.0));
+            section = section.child(setting("Shows", hints::STATS_SHOWS, shows)).child(opacity);
         }
         section.into_any_element()
+    }
+
+    /// Where the performance box goes, on a little screen: a tile in each corner, and an "off"
+    /// mark in the middle. The chosen tile holds a miniature of the box.
+    fn stats_placement(&self, cx: &mut Context<Self>) -> AnyElement {
+        let pal = theme::palette();
+        let stats = self.model.stats;
+        let tile = |corner: Corner| {
+            let chosen = stats.shown && stats.corner == corner;
+            let miniature = chosen.then(|| {
+                div().size_full().p(px(6.)).flex().flex_col().gap(px(3.)).children(
+                    [0.9, 0.7, 0.8].map(|w| div().h(px(3.)).w(relative(w)).rounded(px(2.)).bg(pal.accent)),
+                )
+            });
+            div()
+                .id(("stats-corner", Corner::ALL.iter().position(|c| *c == corner).unwrap_or(0)))
+                .absolute()
+                .when(corner.is_left(), |d| d.left(px(8.)))
+                .when(!corner.is_left(), |d| d.right(px(8.)))
+                .when(corner.is_top(), |d| d.top(px(8.)))
+                .when(!corner.is_top(), |d| d.bottom(px(8.)))
+                .w(px(76.))
+                .h(px(40.))
+                .rounded(px(6.))
+                .border_1()
+                .cursor_pointer()
+                .when(chosen, |d| d.bg(pal.accent_fill).border_color(pal.accent))
+                .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line).hover(|d| d.bg(pal.raised_hover).border_color(pal.accent_line)))
+                .children(miniature)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_stats(StatsBox { shown: true, corner, ..this.model.stats }, cx)))
+        };
+        let off = div()
+            .id("stats-off")
+            .absolute()
+            .top(relative(0.5))
+            .left(relative(0.5))
+            .mt(px(-18.))
+            .ml(px(-18.))
+            .size(px(36.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(if stats.shown { pal.muted } else { pal.danger })
+            .hover(|d| d.bg(pal.wash).text_color(if stats.shown { pal.secondary } else { pal.danger }))
+            .child(Icon::new(IconName::Ban).size_6())
+            .on_click(cx.listener(|this, _, _, cx| this.set_stats(StatsBox { shown: false, ..this.model.stats }, cx)));
+        div()
+            .relative()
+            .w_full()
+            .h(px(150.))
+            .rounded(px(10.))
+            .bg(pal.deep)
+            .border_1()
+            .border_color(if stats.shown { pal.line } else { pal.danger.opacity(0.5) })
+            .children(Corner::ALL.map(tile))
+            .child(off)
+            .into_any_element()
     }
 
     fn set_stats(&mut self, stats: StatsBox, cx: &mut Context<Self>) {
@@ -1186,6 +1253,90 @@ fn toggles(id: &'static str, labels: &[&str], on: &[bool], cursor: Option<usize>
             // The switch under the arrow-key cursor.
             .when(cursor == Some(i), |d| d.border_color(pal.text))
             .child(label.to_string())
+            .on_click(move |_, window, cx| on_toggle(&i, window, cx))
+    }))
+}
+
+/// One choice out of a few, as radio rows: a label and a short line saying what it does.
+fn radios(id: &'static str, items: &[(&str, &str)], selected: usize, on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
+    let pal = theme::palette();
+    let on_pick = std::rc::Rc::new(on_pick);
+    div().w_full().flex().flex_col().children(items.iter().enumerate().map(|(i, (label, detail))| {
+        let chosen = i == selected;
+        let on_pick = on_pick.clone();
+        let dot = div()
+            .flex_none()
+            .size(px(16.))
+            .rounded_full()
+            .border_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(chosen, |d| d.border_color(pal.accent).child(div().size(px(8.)).rounded_full().bg(pal.accent)))
+            .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line));
+        div()
+            .id((id, i))
+            .py(px(6.))
+            .px_2()
+            .mx(px(-8.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap_3()
+            .cursor_pointer()
+            .hover(|d| d.bg(pal.wash))
+            .child(dot)
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().text_sm().text_color(if chosen { pal.text } else { pal.secondary }).child(label.to_string()))
+                    .child(div().text_xs().text_color(pal.muted).child(detail.to_string())),
+            )
+            .on_click(move |_, window, cx| on_pick(&i, window, cx))
+    }))
+}
+
+/// A list of checkbox rows, one per item; each switches on and off by itself. `cursor` is the row
+/// under the arrow-key cursor.
+fn checkboxes(id: &'static str, items: &[(&str, &str)], on: &[bool], cursor: Option<usize>, on_toggle: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
+    let pal = theme::palette();
+    let on_toggle = std::rc::Rc::new(on_toggle);
+    div().w_full().flex().flex_col().children(items.iter().enumerate().map(|(i, (label, detail))| {
+        let checked = on.get(i).copied().unwrap_or(false);
+        let on_toggle = on_toggle.clone();
+        let mark = div()
+            .flex_none()
+            .size(px(16.))
+            .rounded(px(4.))
+            .border_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(checked, |d| d.bg(pal.accent).border_color(pal.accent).text_color(if pal.dark { pal.deep } else { gpui_kit::white() }).child(Icon::new(IconName::Check).size_3()))
+            .when(!checked, |d| d.bg(pal.raised).border_color(pal.line));
+        div()
+            .id((id, i))
+            .py(px(6.))
+            .px_2()
+            .mx(px(-8.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap_3()
+            .cursor_pointer()
+            .hover(|d| d.bg(pal.wash))
+            .when(cursor == Some(i), |d| d.bg(pal.wash))
+            .child(mark)
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().text_sm().text_color(if checked { pal.text } else { pal.secondary }).child(label.to_string()))
+                    .child(div().text_xs().text_color(pal.muted).child(detail.to_string())),
+            )
             .on_click(move |_, window, cx| on_toggle(&i, window, cx))
     }))
 }
