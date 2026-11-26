@@ -312,6 +312,43 @@ mod gpu_tests {
         bytes.as_chunks::<4>().0.iter().map(|p| [p[2] as f32 / 255.0, p[1] as f32 / 255.0, p[0] as f32 / 255.0]).collect()
     }
 
+    /// GPU time of one frame at the real sizes: a 1920×1080 NV12 frame drawn to a 3024×1964
+    /// Retina drawable (#56). Run by hand: `cargo test --release -- --ignored shader_gpu_time --nocapture`.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn shader_gpu_time() {
+        use crate::video::picture::{FrameInfo, PictureSettings, plan};
+        let device = device();
+        let pass = VideoPass::new(&device).expect("video pass");
+        let (w, h) = (1920usize, 1080usize);
+        let luma: Vec<u8> = (0..w * h).map(|i| (i % 251) as u8).collect();
+        let chroma: Vec<u8> = (0..w.div_ceil(2) * h.div_ceil(2) * 2).map(|i| (i % 241) as u8).collect();
+        let a = texture(&device, MTLPixelFormat::R8Unorm, (w, h), &luma, 1);
+        let b = texture(&device, MTLPixelFormat::RG8Unorm, (w.div_ceil(2), h.div_ceil(2)), &chroma, 2);
+        let (out_w, out_h) = (3024usize, 1964usize);
+        let desc = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(MTLPixelFormat::BGRA8Unorm, out_w, out_h, false) };
+        desc.setUsage(MTLTextureUsage::RenderTarget);
+        desc.setStorageMode(MTLStorageMode::Private);
+        let target = device.newTextureWithDescriptor(&desc).expect("target");
+        let info = FrameInfo { width: w as u32, height: h as u32, layout: Layout::Nv12, os_squeezed: false };
+        for (what, settings) in [
+            ("fit", PictureSettings::default()),
+            ("smart stretch to 21:9", PictureSettings { fill_mode: crate::video::picture::FillMode::SmartStretch, target_ratio: crate::video::picture::TargetRatio(64.0 / 27.0), ..Default::default() }),
+        ] {
+            let plan = plan(info, &settings, (out_w as f64, out_h as f64));
+            let mut times = Vec::new();
+            for _ in 0..120 {
+                let command_buffer = pass.queue.commandBuffer().expect("command buffer");
+                pass.encode(&command_buffer, &target, [&a, &b], &plan).expect("encode");
+                command_buffer.commit();
+                command_buffer.waitUntilCompleted();
+                times.push((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            eprintln!("{what}: GPU {:.2} ms median, {:.2} ms p90 per frame", times[times.len() / 2], times[times.len() * 9 / 10]);
+        }
+    }
+
     #[test]
     fn msl_matches_reference() {
         let device = device();

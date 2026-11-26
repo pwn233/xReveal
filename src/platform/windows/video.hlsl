@@ -16,6 +16,7 @@ cbuffer Params : register(b0) {
 
 Texture2D<float4> first : register(t0);  // NV12: luma (R8). YUY2: packed (Y0, Cb, Y1, Cr). 4:4:4: R8, 3 texels per pixel.
 Texture2D<float4> second : register(t1); // NV12: CbCr (R8G8). YUY2: unused.
+SamplerState bilinear : register(s0);    // Linear filtering, clamped at the edges.
 
 struct VertexOut {
     float4 position : SV_Position;
@@ -70,9 +71,39 @@ float2 fetch_chroma(int x, int y, int layout) {
     return second.Load(int3(x, y, 0)).rg;
 }
 
+// Catmull-Rom over 4×4 texels in 3×3 filtered fetches (#56): the middle two taps of each axis
+// have positive weights, so one bilinear fetch between them gives both, weighted. Exactly the
+// 16-tap result, give or take the hardware's filtering precision. Mirrors `catmull_rom_9` in
+// `video.metal`.
+float4 catmull_rom_9(Texture2D<float4> plane, float2 position, float2 size) {
+    float2 lp = position * size - 0.5;
+    float2 li = floor(lp);
+    float4 wx = weights(lp.x - li.x), wy = weights(lp.y - li.y);
+    float3 sx = float3(wx.x, wx.y + wx.z, wx.w), sy = float3(wy.x, wy.y + wy.z, wy.w);
+    // Texel centres (+0.5) of the outer taps, and the weighted point between the middle two.
+    float3 px = li.x + 0.5 + float3(-1.0, wx.z / sx.y, 2.0);
+    float3 py = li.y + 0.5 + float3(-1.0, wy.z / sy.y, 2.0);
+    float4 sum = 0.0;
+    [unroll] for (int j = 0; j < 3; j++) {
+        float4 row = 0.0;
+        [unroll] for (int k = 0; k < 3; k++) {
+            row += sx[k] * plane.SampleLevel(bilinear, float2(px[k], py[j]) / size, 0);
+        }
+        sum += sy[j] * row;
+    }
+    return sum;
+}
+
 float4 ps_main(VertexOut i) : SV_Target {
     int layout = int(misc.y + 0.5);
     float2 src = source_uv(i.uv);
+
+    // NV12: each plane is its own texture, so the hardware can filter.
+    if (layout == 0) {
+        float4 ycc = float4(catmull_rom_9(first, src, sizes.xy).r, catmull_rom_9(second, src, sizes.zw).rg, 1.0);
+        float3 rgb = saturate(float3(dot(colour[0], ycc), dot(colour[1], ycc), dot(colour[2], ycc)));
+        return float4(pow(rgb, misc.xxx), 1.0);
+    }
 
     // Luma: 4×4 Catmull-Rom taps, clamped at the edges.
     float2 lp = src * sizes.xy - 0.5;
