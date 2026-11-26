@@ -14,9 +14,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::{Duration, Instant};
 
-use crate::setup::{Corner, DrawerSide, StatsBox, WindowMode};
+use crate::setup::{Accent, Corner, Density, DrawerSide, Look, StatsBox, ThemeChoice, WindowMode};
 use crate::source::{self, SourceIdentity, SourceInfo, VideoFormat};
-use crate::theme::{mono_family, palette::*};
+use crate::theme::{self, mono_family};
 use crate::video::picture::{Adjustments, Choice, ColourRange, ColourSpace, FillMode, PictureSettings, TargetRatio};
 use crate::video::timing::DelaySettings;
 
@@ -83,6 +83,7 @@ pub struct DrawerModel {
     pub side: DrawerSide,
     pub window_mode: WindowMode,
     pub stats: StatsBox,
+    pub look: Look,
     /// The Source's frame interval in seconds, to say how much Buffering costs.
     pub frame_interval: f64,
 }
@@ -97,6 +98,7 @@ pub enum DrawerEvent {
     Side(DrawerSide),
     WindowMode(WindowMode),
     Stats(StatsBox),
+    Look(Look),
     ResetAll,
     Quit,
 }
@@ -107,10 +109,11 @@ pub enum Tab {
     Display,
     Colour,
     Audio,
+    Interface,
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::Source, Tab::Display, Tab::Colour, Tab::Audio];
+    const ALL: [Tab; 5] = [Tab::Source, Tab::Display, Tab::Colour, Tab::Audio, Tab::Interface];
 
     fn label(self) -> &'static str {
         match self {
@@ -118,6 +121,7 @@ impl Tab {
             Tab::Display => "Display",
             Tab::Colour => "Colour",
             Tab::Audio => "Audio",
+            Tab::Interface => "Interface",
         }
     }
 
@@ -127,6 +131,7 @@ impl Tab {
             Tab::Display => IconName::Monitor,
             Tab::Colour => IconName::Palette,
             Tab::Audio => IconName::Volume2,
+            Tab::Interface => IconName::SunMoon,
         }
     }
 }
@@ -142,6 +147,10 @@ pub mod hints {
     pub const STRENGTH: &str = "0% looks just like Stretch. Higher keeps the centre more natural and stretches the edges more.";
     pub const CUSTOM_RATIO: &str = "Width ÷ height of your own shape, like 2.39 for a cinema ratio";
     pub const DRAWER_SIDE: &str = "Which side this panel opens from";
+    pub const THEME: &str = "How xReveal's panels look. System follows your computer's light or dark mode.";
+    pub const ACCENT: &str = "The colour that marks what's selected";
+    pub const OPACITY: &str = "How much of the game shows through this panel and the performance box";
+    pub const DENSITY: &str = "How tightly the settings are packed";
     pub const STATS: &str = "Live timing over the picture. F3 shows or hides it too.";
     pub const STATS_CORNER: &str = "It moves aside when this panel opens on the same side";
     pub const STATS_SHOWS: &str = "What the box lists";
@@ -197,6 +206,7 @@ struct Sliders {
     gamma: Entity<SliderState>,
     hue: Entity<SliderState>,
     av_sync: Entity<SliderState>,
+    opacity: Entity<SliderState>,
 }
 
 impl EventEmitter<DrawerEvent> for SettingsDrawer {}
@@ -216,6 +226,7 @@ impl SettingsDrawer {
             gamma: slider(cx, 50.0, 200.0, 1.0, p.adjustments.gamma * 100.0),
             hue: slider(cx, -180.0, 180.0, 1.0, p.adjustments.hue),
             av_sync: slider(cx, -500.0, 500.0, 1.0, model.delay.av_sync_offset_ms as f32),
+            opacity: slider(cx, Look::OPACITY.0 * 100.0, Look::OPACITY.1 * 100.0, 1.0, model.look.opacity() * 100.0),
         };
         let card_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
         let format_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
@@ -241,6 +252,11 @@ impl SettingsDrawer {
             if let SliderEvent::Change(SliderValue::Single(value)) = event {
                 let delay = DelaySettings { av_sync_offset_ms: value.round() as i32, ..this.model.delay };
                 this.set_delay(delay, cx);
+            }
+        }));
+        subscriptions.push(cx.subscribe(&sliders.opacity, |this: &mut Self, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(SliderValue::Single(value)) = event {
+                this.set_look(Look { opacity: value.round() / 100.0, ..this.model.look }, cx);
             }
         }));
         subscriptions.push(cx.subscribe(&card_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
@@ -294,6 +310,7 @@ impl SettingsDrawer {
             (&self.sliders.gamma, p.adjustments.gamma * 100.0),
             (&self.sliders.hue, p.adjustments.hue),
             (&self.sliders.av_sync, model.delay.av_sync_offset_ms as f32),
+            (&self.sliders.opacity, model.look.opacity() * 100.0),
         ];
         for (state, value) in values {
             state.update(cx, |s, cx| s.set_value(value, window, cx));
@@ -341,6 +358,7 @@ impl SettingsDrawer {
     }
 
     fn rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        let pal = theme::palette();
         let tabs = Tab::ALL.into_iter().map(|tab| {
             let on = tab == self.tab;
             div()
@@ -355,9 +373,9 @@ impl SettingsDrawer {
                 .gap_1()
                 .cursor_pointer()
                 .text_xs()
-                .when(on, |d| d.bg(rgb(RAISED)).text_color(rgb(TEXT)))
-                .when(!on, |d| d.text_color(rgb(MUTED)).hover(|d| d.text_color(rgb(SECONDARY)).bg(rgba(0xededed0a))))
-                .child(Icon::new(tab.icon()).size_5().text_color(if on { rgb(ACCENT) } else { rgb(MUTED) }))
+                .when(on, |d| d.bg(pal.raised).text_color(pal.text))
+                .when(!on, |d| d.text_color(pal.muted).hover(|d| d.text_color(pal.secondary).bg(pal.wash)))
+                .child(Icon::new(tab.icon()).size_5().text_color(if on { pal.accent } else { pal.muted }))
                 .child(tab.label())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.tab = tab;
@@ -369,9 +387,9 @@ impl SettingsDrawer {
             .w(px(RAIL))
             .flex_none()
             .pt_3()
-            .bg(rgb(DEEP))
+            .bg(pal.deep)
             .border_r_1()
-            .border_color(rgba(LINE))
+            .border_color(pal.line)
             .flex()
             .flex_col()
             .gap_1()
@@ -381,15 +399,16 @@ impl SettingsDrawer {
 
     /// The live readout at the top of the Source tab: what is on screen right now.
     fn live(&self) -> AnyElement {
+        let pal = theme::palette();
         let Some((identity, format)) = &self.model.current else {
-            return div().text_sm().text_color(rgb(SECONDARY)).child("No capture card on screen").into_any_element();
+            return div().text_sm().text_color(pal.secondary).child("No capture card on screen").into_any_element();
         };
         div()
             .p_3()
             .rounded(px(10.))
-            .bg(rgb(RAISED))
+            .bg(pal.raised)
             .border_1()
-            .border_color(rgba(LINE))
+            .border_color(pal.line)
             .flex()
             .flex_col()
             .gap_1()
@@ -399,10 +418,10 @@ impl SettingsDrawer {
                     .items_center()
                     .gap_2()
                     .text_sm()
-                    .child(div().flex_none().size(px(8.)).rounded_full().bg(rgb(ACCENT)))
+                    .child(div().flex_none().size(px(8.)).rounded_full().bg(pal.accent))
                     .child(div().min_w_0().truncate().child(identity.name.clone())),
             )
-            .child(div().pl(px(16.)).text_xs().font_family(mono_family()).text_color(rgb(SECONDARY)).child(readout(*format)))
+            .child(div().pl(px(16.)).text_xs().font_family(mono_family()).text_color(pal.secondary).child(readout(*format)))
             .into_any_element()
     }
 
@@ -476,6 +495,41 @@ impl SettingsDrawer {
             let label = format!("{:.0}%", p.smart_stretch_strength * 100.0);
             out.push(slider_setting("Smart stretch strength", hints::STRENGTH, &self.sliders.strength, label));
         }
+        out.push(self.stats_settings(cx));
+        out
+    }
+
+    /// How xReveal itself looks: theme, accent, panel opacity, density, and the drawer's side.
+    fn interface_tab(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let pal = theme::palette();
+        let look = self.model.look;
+        let themes = [ThemeChoice::System, ThemeChoice::Dark, ThemeChoice::Light];
+        let theme_chips = chips(
+            "theme",
+            &["System", "Dark", "Light"],
+            themes.iter().position(|t| *t == look.theme).unwrap_or(1),
+            cx.listener(move |this, i: &usize, _, cx| this.set_look(Look { theme: themes[*i], ..this.model.look }, cx)),
+        );
+        let swatches = div().flex().flex_wrap().gap_3().children(Accent::ALL.into_iter().map(|accent| {
+            let chosen = accent == look.accent;
+            div()
+                .id(("accent", accent as usize))
+                .size(px(30.))
+                .rounded_full()
+                .p(px(3.))
+                .border_2()
+                .border_color(if chosen { theme::accent_colour(accent, pal.dark) } else { gpui_kit::transparent_black() })
+                .cursor_pointer()
+                .child(div().size_full().rounded_full().bg(theme::accent_colour(accent, pal.dark)))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_look(Look { accent, ..this.model.look }, cx)))
+        }));
+        let densities = [Density::Compact, Density::Default, Density::Spacious];
+        let density = chips(
+            "density",
+            &["Compact", "Default", "Spacious"],
+            densities.iter().position(|d| *d == look.density).unwrap_or(1),
+            cx.listener(move |this, i: &usize, _, cx| this.set_look(Look { density: densities[*i], ..this.model.look }, cx)),
+        );
         let sides = [DrawerSide::Left, DrawerSide::Right];
         let side = chips(
             "side",
@@ -489,9 +543,21 @@ impl SettingsDrawer {
                 }
             }),
         );
-        out.push(setting("Drawer side", hints::DRAWER_SIDE, side));
-        out.push(self.stats_settings(cx));
-        out
+        vec![
+            setting("Theme", hints::THEME, theme_chips),
+            setting("Accent", hints::ACCENT, swatches),
+            slider_setting("Panel opacity", hints::OPACITY, &self.sliders.opacity, format!("{:.0}%", look.opacity() * 100.0)),
+            setting("Density", hints::DENSITY, density),
+            setting("Drawer side", hints::DRAWER_SIDE, side),
+        ]
+    }
+
+    fn set_look(&mut self, look: Look, cx: &mut Context<Self>) {
+        if look != self.model.look {
+            self.model.look = look;
+            cx.emit(DrawerEvent::Look(look));
+            cx.notify();
+        }
     }
 
     /// The performance box: on or off, which corner, and what it lists (one section).
@@ -503,7 +569,7 @@ impl SettingsDrawer {
             stats.shown as usize,
             cx.listener(|this, i: &usize, _, cx| this.set_stats(StatsBox { shown: *i == 1, ..this.model.stats }, cx)),
         );
-        let mut section = div().flex().flex_col().gap_6().child(setting("Performance box", hints::STATS, shown));
+        let mut section = div().flex().flex_col().gap(px(theme::spacing().gap)).child(setting("Performance box", hints::STATS, shown));
         if stats.shown {
             let corner = chips(
                 "stats-corner",
@@ -541,6 +607,7 @@ impl SettingsDrawer {
     }
 
     fn colour_tab(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let pal = theme::palette();
         let p = self.model.picture;
         let ranges = [Choice::Auto, Choice::Manual(ColourRange::Full), Choice::Manual(ColourRange::Limited)];
         let range = chips(
@@ -570,9 +637,9 @@ impl SettingsDrawer {
             .items_center()
             .gap_2()
             .text_sm()
-            .text_color(rgb(SECONDARY))
+            .text_color(pal.secondary)
             .cursor_pointer()
-            .hover(|d| d.text_color(rgb(TEXT)))
+            .hover(|d| d.text_color(pal.text))
             .child(Icon::new(if self.more_open { IconName::ChevronDown } else { IconName::ChevronRight }).size_4())
             .child("More")
             .on_click(cx.listener(|this, _, _, cx| {
@@ -583,11 +650,11 @@ impl SettingsDrawer {
             div()
                 .flex()
                 .flex_col()
-                .gap_6()
+                .gap(px(theme::spacing().gap))
                 .child(slider_setting("Gamma", hints::GAMMA, &self.sliders.gamma, format!("{:.2}", a.gamma)))
                 .child(slider_setting("Hue", hints::HUE, &self.sliders.hue, format!("{:+.0}°", a.hue)))
         });
-        out.push(div().flex().flex_col().gap_6().child(more).children(extra).into_any_element());
+        out.push(div().flex().flex_col().gap(px(theme::spacing().gap)).child(more).children(extra).into_any_element());
         out
     }
 
@@ -608,6 +675,7 @@ impl SettingsDrawer {
     }
 
     fn reset_all(&self, cx: &mut Context<Self>) -> AnyElement {
+        let pal = theme::palette();
         let body: AnyElement = if self.confirm_reset {
             div()
                 .flex()
@@ -618,15 +686,15 @@ impl SettingsDrawer {
                 .child(
                     div()
                         .id("reset-yes")
-                        .h(px(30.))
+                        .h(px(theme::spacing().chip))
                         .px_3()
                         .rounded(px(8.))
                         .flex()
                         .items_center()
                         .text_sm()
                         .cursor_pointer()
-                        .bg(rgb(DANGER))
-                        .text_color(rgb(0xffffff))
+                        .bg(pal.danger)
+                        .text_color(pal.on_danger)
                         .child("Reset")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.confirm_reset = false;
@@ -640,7 +708,7 @@ impl SettingsDrawer {
                 .into_any_element()
         } else {
             let link = |id: &'static str, label: &'static str| {
-                div().id(id).text_sm().text_color(rgb(SECONDARY)).cursor_pointer().hover(|d| d.text_color(rgb(TEXT))).child(label)
+                div().id(id).text_sm().text_color(pal.secondary).cursor_pointer().hover(|d| d.text_color(pal.text)).child(label)
             };
             div()
                 .flex()
@@ -658,7 +726,7 @@ impl SettingsDrawer {
             .px_5()
             .py_4()
             .border_t_1()
-            .border_color(rgba(LINE))
+            .border_color(pal.line)
             .flex()
             .flex_col()
             .gap_1()
@@ -676,13 +744,13 @@ impl SettingsDrawer {
                 p.target_ratio == d.target_ratio
                     && p.fill_mode == d.fill_mode
                     && p.smart_stretch_strength == d.smart_stretch_strength
-                    && self.model.side == DrawerSide::default()
                     && self.model.window_mode == WindowMode::default()
                     && self.model.stats == StatsBox::default()
                     && !self.custom_ratio
             }
             Tab::Colour => p.colour_range == d.colour_range && p.colour_space == d.colour_space && p.adjustments == d.adjustments,
             Tab::Audio => self.model.delay.av_sync_offset_ms == 0,
+            Tab::Interface => self.model.look == Look::default() && self.model.side == DrawerSide::default(),
         }
     }
 
@@ -713,10 +781,6 @@ impl SettingsDrawer {
                 model.picture.fill_mode = defaults.fill_mode;
                 model.picture.smart_stretch_strength = defaults.smart_stretch_strength;
                 events.push(DrawerEvent::Picture(model.picture));
-                if model.side != DrawerSide::default() {
-                    model.side = DrawerSide::default();
-                    events.push(DrawerEvent::Side(model.side));
-                }
                 if model.stats != StatsBox::default() {
                     model.stats = StatsBox::default();
                     events.push(DrawerEvent::Stats(model.stats));
@@ -736,6 +800,14 @@ impl SettingsDrawer {
                 model.delay.av_sync_offset_ms = 0;
                 events.push(DrawerEvent::Delay(model.delay));
             }
+            Tab::Interface => {
+                model.look = Look::default();
+                events.push(DrawerEvent::Look(model.look));
+                if model.side != DrawerSide::default() {
+                    model.side = DrawerSide::default();
+                    events.push(DrawerEvent::Side(model.side));
+                }
+            }
         }
         self.set_model(model, window, cx);
         for event in events {
@@ -745,6 +817,7 @@ impl SettingsDrawer {
 
     /// The tab's title, with a Reset for just this tab.
     fn header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let pal = theme::palette();
         let idle = self.tab_is_default(self.tab);
         let reset = div()
             .id("reset-tab")
@@ -755,11 +828,11 @@ impl SettingsDrawer {
             .items_center()
             .gap(px(6.))
             .text_xs()
-            .when(idle, |d| d.text_color(rgba(0x85858b80)))
+            .when(idle, |d| d.text_color(pal.faint))
             .when(!idle, |d| {
-                d.text_color(rgb(SECONDARY))
+                d.text_color(pal.secondary)
                     .cursor_pointer()
-                    .hover(|d| d.bg(rgb(RAISED)).text_color(rgb(TEXT)))
+                    .hover(|d| d.bg(pal.raised).text_color(pal.text))
                     .on_click(cx.listener(|this, _, window, cx| this.reset_tab(window, cx)))
             })
             .child(Icon::new(IconName::RotateCcw).size_3p5())
@@ -780,24 +853,26 @@ impl SettingsDrawer {
 
 impl Render for SettingsDrawer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = theme::palette();
         let rows = match self.tab {
             Tab::Source => self.source_tab(cx),
             Tab::Display => self.display_tab(cx),
             Tab::Colour => self.colour_tab(cx),
             Tab::Audio => self.audio_tab(),
+            Tab::Interface => self.interface_tab(cx),
         };
         let header = self.header(cx);
         let reset_all = self.reset_all(cx);
         let rail = self.rail(cx);
         // Each setting is a section, divided from the next by a hairline.
         let sections = rows.into_iter().enumerate().map(|(i, row)| {
-            div().w_full().py_5().when(i > 0, |d| d.border_t_1().border_color(rgba(LINE))).child(row)
+            div().w_full().py(px(theme::spacing().section)).when(i > 0, |d| d.border_t_1().border_color(pal.line)).child(row)
         });
         div()
             .size_full()
             .flex()
-            .text_color(rgb(TEXT))
-            .bg(rgba(PANEL))
+            .text_color(pal.text)
+            .bg(pal.panel)
             .child(rail)
             .child(
                 div()
@@ -821,7 +896,8 @@ impl Render for SettingsDrawer {
 }
 
 fn hint(text: &'static str) -> Div {
-    div().w_full().text_xs().line_height(px(16.)).text_color(rgb(MUTED)).child(text)
+    let pal = theme::palette();
+    div().w_full().text_xs().line_height(px(16.)).text_color(pal.muted).child(text)
 }
 
 fn note(text: &'static str) -> AnyElement {
@@ -829,7 +905,8 @@ fn note(text: &'static str) -> AnyElement {
 }
 
 fn warn(text: String) -> Div {
-    div().text_xs().font_family(mono_family()).text_color(rgb(WARN)).child(text)
+    let pal = theme::palette();
+    div().text_xs().font_family(mono_family()).text_color(pal.warn).child(text)
 }
 
 /// Title, control, hint: one setting.
@@ -846,25 +923,27 @@ fn setting(title: &'static str, hint_text: &'static str, control: impl IntoEleme
 }
 
 fn slider_setting(title: &'static str, hint_text: &'static str, state: &Entity<SliderState>, value: String) -> AnyElement {
+    let pal = theme::palette();
     let control = div()
         .w_full()
         .flex()
         .items_center()
         .gap_3()
         .child(div().flex_1().min_w_0().child(Slider::new(state)))
-        .child(div().w(px(56.)).flex_none().text_xs().font_family(mono_family()).text_right().text_color(rgb(SECONDARY)).child(value));
+        .child(div().w(px(56.)).flex_none().text_xs().font_family(mono_family()).text_right().text_color(pal.secondary).child(value));
     setting(title, hint_text, control)
 }
 
 /// A group of choices that wraps onto a second row instead of overflowing.
 fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
+    let pal = theme::palette();
     let on_pick = std::rc::Rc::new(on_pick);
     div().w_full().flex().flex_wrap().gap(px(6.)).children(labels.iter().enumerate().map(|(i, label)| {
         let chosen = i == selected;
         let on_pick = on_pick.clone();
         div()
             .id((id, i))
-            .h(px(30.))
+            .h(px(theme::spacing().chip))
             .px_3()
             .rounded(px(8.))
             .flex()
@@ -872,8 +951,8 @@ fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&u
             .text_sm()
             .cursor_pointer()
             .border_1()
-            .when(chosen, |d| d.bg(rgba(ACCENT_FILL)).border_color(rgba(0x6aa9ff66)).text_color(rgb(ACCENT)))
-            .when(!chosen, |d| d.bg(rgb(RAISED)).border_color(rgba(LINE)).text_color(rgb(SECONDARY)).hover(|d| d.bg(rgb(RAISED_HOVER)).text_color(rgb(TEXT))))
+            .when(chosen, |d| d.bg(pal.accent_fill).border_color(pal.accent_line).text_color(pal.accent))
+            .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line).text_color(pal.secondary).hover(|d| d.bg(pal.raised_hover).text_color(pal.text)))
             .child(label.to_string())
             .on_click(move |_, window, cx| on_pick(&i, window, cx))
     }))
@@ -881,13 +960,14 @@ fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&u
 
 /// Like [`chips`], but each one switches on and off by itself.
 fn toggles(id: &'static str, labels: &[&str], on: &[bool], on_toggle: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
+    let pal = theme::palette();
     let on_toggle = std::rc::Rc::new(on_toggle);
     div().w_full().flex().flex_wrap().gap(px(6.)).children(labels.iter().enumerate().map(|(i, label)| {
         let chosen = on.get(i).copied().unwrap_or(false);
         let on_toggle = on_toggle.clone();
         div()
             .id((id, i))
-            .h(px(30.))
+            .h(px(theme::spacing().chip))
             .px_3()
             .rounded(px(8.))
             .flex()
@@ -896,17 +976,18 @@ fn toggles(id: &'static str, labels: &[&str], on: &[bool], on_toggle: impl Fn(&u
             .text_sm()
             .cursor_pointer()
             .border_1()
-            .when(chosen, |d| d.bg(rgba(ACCENT_FILL)).border_color(rgba(0x6aa9ff66)).text_color(rgb(ACCENT)).child(Icon::new(IconName::Check).size_3p5()))
-            .when(!chosen, |d| d.bg(rgb(RAISED)).border_color(rgba(LINE)).text_color(rgb(SECONDARY)).hover(|d| d.bg(rgb(RAISED_HOVER)).text_color(rgb(TEXT))))
+            .when(chosen, |d| d.bg(pal.accent_fill).border_color(pal.accent_line).text_color(pal.accent).child(Icon::new(IconName::Check).size_3p5()))
+            .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line).text_color(pal.secondary).hover(|d| d.bg(pal.raised_hover).text_color(pal.text)))
             .child(label.to_string())
             .on_click(move |_, window, cx| on_toggle(&i, window, cx))
     }))
 }
 
 fn quiet_button(id: &'static str, icon: IconName, label: &'static str) -> Stateful<Div> {
+    let pal = theme::palette();
     div()
         .id(id)
-        .h(px(30.))
+        .h(px(theme::spacing().chip))
         .px_3()
         .rounded(px(8.))
         .flex()
@@ -914,11 +995,11 @@ fn quiet_button(id: &'static str, icon: IconName, label: &'static str) -> Statef
         .gap_2()
         .text_sm()
         .cursor_pointer()
-        .bg(rgb(RAISED))
+        .bg(pal.raised)
         .border_1()
-        .border_color(rgba(LINE))
-        .text_color(rgb(SECONDARY))
-        .hover(|d| d.bg(rgb(RAISED_HOVER)).text_color(rgb(TEXT)))
+        .border_color(pal.line)
+        .text_color(pal.secondary)
+        .hover(|d| d.bg(pal.raised_hover).text_color(pal.text))
         .child(Icon::new(icon).size_4())
         .child(label)
 }
