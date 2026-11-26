@@ -114,3 +114,6 @@ dist
 
 # Rust
 /target
+
+# xreveal --report output
+xreveal-report.txt

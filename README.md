@@ -30,6 +30,14 @@ and run `xreveal.exe` from anywhere.
 
 xReveal never connects to the internet. Your settings stay in `setup.toml` on this computer.
 
+## Hardware report
+
+`xreveal --report` (or `xreveal.exe --report` in a Windows terminal) writes down what the hardware
+pass needs (docs/spec/v1.md §7): every capture device with its formats and IDs, a 5-second capture
+from each input device (what it delivers and how evenly frames arrive), whether it has a Device
+settings window, and the sound devices with the pairing. It prints the report and saves
+`xreveal-report.txt` in the current folder, ready to paste into an issue.
+
 ## Make a release
 
 Push a tag matching the version in `Cargo.toml`, e.g. `git tag v0.1.0 && git push origin v0.1.0`. CI
