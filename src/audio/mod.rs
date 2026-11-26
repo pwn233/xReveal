@@ -74,6 +74,11 @@ impl Sound {
         }
     }
 
+    /// The input's loudest samples (left, right) since the last call, or `None` when nothing plays.
+    pub fn take_peaks(&self) -> Option<(f32, f32)> {
+        self.pipeline.as_ref().map(AudioPipeline::take_peaks)
+    }
+
     /// Stops the sound (nothing on screen).
     pub fn stop(&mut self) {
         self.pipeline = None;
