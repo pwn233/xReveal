@@ -172,6 +172,11 @@ impl XReveal {
         };
         let follow = cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
             this.remember_placement(window, cx);
+            // On another screen the pixel density may differ (Retina and 1×).
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if let Some(video) = &this.video {
+                video.set_scale(window.scale_factor());
+            }
             // The overlay first, so the drawer (opened after it) stays on top.
             if this.overlay_window.is_some() {
                 this.close_overlay_window(cx);
