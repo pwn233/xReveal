@@ -143,3 +143,19 @@ pub fn window_handle(window: &gpui_kit::Window) -> Option<raw_window_handle::Raw
     }
 }
 
+
+/// Whether the scroll event being handled moves the way the fingers did, so the Drawer swipe
+/// (#141) can go by the fingers whatever the scrolling-direction setting.
+/// - **macOS:** GPUI's delta follows the "natural scrolling" setting, and the native event says
+///   whether that setting turned it around (`isDirectionInvertedFromDevice`). Read during the
+///   event (GPUI handles `scrollWheel:` synchronously), so `currentEvent` is that event.
+/// - **Windows:** assumed to follow the fingers. To be checked on a precision touchpad (#140).
+pub fn scroll_follows_fingers() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(mtm) = objc2::MainThreadMarker::new() else { return true };
+        objc2_app_kit::NSApplication::sharedApplication(mtm).currentEvent().is_none_or(|event| event.isDirectionInvertedFromDevice())
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}

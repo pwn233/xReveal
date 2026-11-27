@@ -103,6 +103,8 @@ pub struct DrawerModel {
     pub picture: PictureSettings,
     pub delay: DelaySettings,
     pub side: DrawerSide,
+    /// The Drawer swipe is on (#141).
+    pub swipe: bool,
     pub window_mode: WindowMode,
     /// Every screen (its identity and the name to show), and the one xReveal is on.
     pub monitors: Vec<(String, String)>,
@@ -125,6 +127,8 @@ pub enum DrawerEvent {
     Picture(PictureSettings),
     Delay(DelaySettings),
     Side(DrawerSide),
+    /// The Drawer swipe turned on or off (#141).
+    Swipe(bool),
     WindowMode(WindowMode),
     /// Show xReveal on this screen (by its identity).
     Monitor(String),
@@ -193,6 +197,11 @@ pub mod hints {
     pub const STRENGTH: &str = "0% looks just like Stretch. Higher keeps the centre more natural and stretches the edges more.";
     pub const CUSTOM_RATIO: &str = "Width ÷ height of your own shape, like 2.39 for a cinema ratio";
     pub const DRAWER_SIDE: &str = "Which side this panel opens from";
+    pub const SWIPE: &str = if cfg!(target_os = "macos") {
+        "Swipe two fingers sideways on the trackpad: away from this panel's side to open it, back to close it. Start in the middle of the trackpad; a swipe from its right edge opens Notification Center."
+    } else {
+        "Swipe two fingers sideways on the touchpad: away from this panel's side to open it, back to close it."
+    };
     pub const THEME: &str = "How xReveal's panels look. System follows your computer's light or dark mode.";
     pub const ACCENT: &str = "The colour that marks what's selected";
     pub const OPACITY: &str = "How much of the game shows through this panel";
@@ -696,12 +705,26 @@ impl SettingsDrawer {
                 }
             }),
         );
+        let swipe = chips(
+            "swipe",
+            &["On", "Off"],
+            if self.model.swipe { 0 } else { 1 },
+            cx.listener(|this, i: &usize, _, cx| {
+                let on = *i == 0;
+                if on != this.model.swipe {
+                    this.model.swipe = on;
+                    cx.emit(DrawerEvent::Swipe(on));
+                    cx.notify();
+                }
+            }),
+        );
         vec![
             setting("Theme", hints::THEME, theme_chips),
             setting("Accent", hints::ACCENT, swatches),
             slider_setting("Panel opacity", hints::OPACITY, &self.sliders.opacity, format!("{:.0}%", look.opacity() * 100.0)),
             setting("Density", hints::DENSITY, density),
             setting("Drawer side", hints::DRAWER_SIDE, side),
+            setting("Swipe to open settings", hints::SWIPE, swipe),
         ]
     }
 
@@ -1044,7 +1067,7 @@ impl SettingsDrawer {
                 let a = &self.model.audio;
                 self.model.delay.av_sync_offset_ms == 0 && a.volume == 1.0 && !a.muted && a.chosen_input.is_none() && a.output.is_none()
             }
-            Tab::Interface => self.model.look == Look::default() && self.model.side == DrawerSide::default(),
+            Tab::Interface => self.model.look == Look::default() && self.model.side == DrawerSide::default() && self.model.swipe,
         }
     }
 
@@ -1105,6 +1128,10 @@ impl SettingsDrawer {
                 if model.side != DrawerSide::default() {
                     model.side = DrawerSide::default();
                     events.push(DrawerEvent::Side(model.side));
+                }
+                if !model.swipe {
+                    model.swipe = true;
+                    events.push(DrawerEvent::Swipe(true));
                 }
             }
         }
@@ -1202,6 +1229,8 @@ impl Render for SettingsDrawer {
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
+                            // A sideways swipe is the Drawer swipe (#141), never a scroll of this list.
+                            .restrict_scroll_to_axis()
                             .track_scroll(&self.scroll)
                             .px_5()
                             .flex()
