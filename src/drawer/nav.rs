@@ -357,6 +357,19 @@ impl SettingsDrawer {
             }
             cx.notify();
         }) });
+        // Settings locked for want of access (#146): ←/→ do nothing, Enter asks for it.
+        let locked: &[(&str, Privacy)] = match self.tab {
+            Tab::Source if self.model.camera != Access::Granted => &[("Video format", Privacy::Camera), ("Buffering", Privacy::Camera), ("Device settings…", Privacy::Camera)],
+            Tab::Audio if self.model.microphone != Access::Granted => &[("Output", Privacy::Microphone), ("Volume", Privacy::Microphone), ("A/V sync offset", Privacy::Microphone)],
+            _ => &[],
+        };
+        for row in &mut rows {
+            match locked.iter().find(|(title, _)| *title == row.title) {
+                Some((_, Privacy::Camera)) => row.nav = Nav::Press(|_, _, cx| cx.emit(DrawerEvent::Allow(Privacy::Camera))),
+                Some((_, Privacy::Microphone)) => row.nav = Nav::Press(|_, _, cx| cx.emit(DrawerEvent::Allow(Privacy::Microphone))),
+                None => {}
+            }
+        }
         rows
     }
 

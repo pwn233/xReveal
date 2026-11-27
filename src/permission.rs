@@ -6,6 +6,7 @@ pub enum Access {
     #[default]
     Granted,
     /// Never asked: the Welcome screen explains, then asks.
+    #[cfg_attr(target_os = "windows", expect(dead_code, reason = "Windows never asks: access is on or blocked"))]
     NotAsked,
     Denied,
 }

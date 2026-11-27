@@ -13,6 +13,8 @@ use gpui_kit::*;
 use std::time::{Duration, Instant};
 
 mod chooser;
+mod lock;
+use lock::locked;
 mod meter;
 mod nav;
 
@@ -207,6 +209,9 @@ pub mod hints {
     pub const HUE: &str = "Turns every colour around the colour wheel";
     pub const AV_SYNC: &str = "Lines sound up with the picture. Positive delays the sound, negative delays the picture.";
     pub const AUDIO_INPUT: &str = "Where the sound comes from. Normally the input device's own audio.";
+    /// A locked setting's tip (#146).
+    pub const NEEDS_CAMERA: &str = "Allow Camera access to change this.";
+    pub const NEEDS_MICROPHONE: &str = "Allow Microphone access to change this.";
     pub const CARD_LOCKED: &str = "xReveal needs Camera access to show any input. macOS asks once; after that it's in System Settings › Privacy & Security › Camera.";
     pub const AUDIO_INPUT_LOCKED: &str =
         "xReveal needs Microphone access to play the input's sound. macOS asks once; after that it's in System Settings › Privacy & Security › Microphone.";
@@ -256,6 +261,9 @@ pub struct SettingsDrawer {
     choosers: [chooser::Chooser; 4],
     /// The selector whose list is open.
     open_chooser: Option<usize>,
+    /// The lock warning under the pointer, and where each one is, with the window's width (see [`lock`]).
+    hovered_lock: Option<&'static str>,
+    lock_bounds: lock::Spots,
     /// What the Selects list, in order: OS IDs of the cards, and the Video formats of the current one.
     card_ids: Vec<String>,
     formats: Vec<VideoFormat>,
@@ -356,6 +364,8 @@ impl SettingsDrawer {
             sliders,
             choosers: Default::default(),
             open_chooser: None,
+            hovered_lock: None,
+            lock_bounds: Default::default(),
             card_ids: Vec::new(),
             formats: Vec::new(),
             _subscriptions: subscriptions,
@@ -551,18 +561,22 @@ impl SettingsDrawer {
         let input = if self.model.camera == Access::Granted {
             setting("Input", hints::CARD, self.chooser(chooser::CARD, "Input", "No input", cx))
         } else {
-            let names = self.model.sources.iter().map(|s| s.identity.name.clone()).collect();
-            setting("Input", hints::CARD_LOCKED, locked_inputs(Privacy::Camera, self.model.camera, names, cx))
+            setting("Input", hints::CARD_LOCKED, locked_inputs(Privacy::Camera, self.model.camera, cx))
         };
+        // Without Camera access, nothing about the picture can be set (#146).
+        let why = (self.model.camera != Access::Granted).then_some(hints::NEEDS_CAMERA);
+        let format = self.chooser(chooser::FORMAT, "Video format", "No formats", cx);
+        let buffering = div().flex().flex_col().gap_2().child(locked("lock-buffering", why, buffering.into_any_element())).children(warning.map(warn));
         let mut rows = vec![
             self.live(),
             input,
-            setting("Video format", hints::VIDEO_FORMAT, self.chooser(chooser::FORMAT, "Video format", "No formats", cx)),
-            setting("Buffering", hints::BUFFERING, div().flex().flex_col().gap_2().child(buffering).children(warning.map(warn))),
+            setting_with("Video format", hints::VIDEO_FORMAT, locked("lock-format", why, format), self.lock_badge("badge-format", why, cx)),
+            setting_with("Buffering", hints::BUFFERING, buffering, self.lock_badge("badge-buffering", why, cx)),
         ];
         if self.model.device_settings {
             let open = quiet_button("device-settings", IconName::Settings, "Device settings…").on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::DeviceSettings)));
-            rows.push(setting("Device settings…", hints::DEVICE_SETTINGS, div().flex().child(open)));
+            let device = locked("lock-device-settings", why, div().flex().child(open).into_any_element());
+            rows.push(setting_with("Device settings…", hints::DEVICE_SETTINGS, device, self.lock_badge("badge-device-settings", why, cx)));
         }
         rows
     }
@@ -855,6 +869,8 @@ impl SettingsDrawer {
     }
 
     fn audio_tab(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        // Without Microphone access, nothing about the sound can be set (#146).
+        let why = (self.model.microphone != Access::Granted).then_some(hints::NEEDS_MICROPHONE);
         let delay = self.model.delay;
         let audio = &self.model.audio;
         let label = format!("{:+} ms", delay.av_sync_offset_ms);
@@ -875,15 +891,14 @@ impl SettingsDrawer {
                         .child(self.meter.render()),
                 )
             } else {
-                let names = audio.inputs.iter().map(|d| d.name.clone()).collect();
-                setting("Input", hints::AUDIO_INPUT_LOCKED, locked_inputs(Privacy::Microphone, self.model.microphone, names, cx))
+                setting("Input", hints::AUDIO_INPUT_LOCKED, locked_inputs(Privacy::Microphone, self.model.microphone, cx))
             })
             .children(audio.notice.clone().map(warn));
         let output = div()
             .flex()
             .flex_col()
             .gap_2()
-            .child(setting("Output", hints::AUDIO_OUTPUT, self.chooser(chooser::OUTPUT, "Output", "System output", cx)))
+            .child(setting_with("Output", hints::AUDIO_OUTPUT, locked("lock-output", why, self.chooser(chooser::OUTPUT, "Output", "System output", cx)), self.lock_badge("badge-output", why, cx)))
             .children(audio.latency_hint.clone().map(warn));
         let pal = theme::palette();
         let muted = audio.muted;
@@ -924,19 +939,15 @@ impl SettingsDrawer {
                     .when(muted, |d| d.opacity(0.4))
                     .child(format!("{:.0}%", audio.volume * 100.0)),
             );
-        let volume = setting("Volume", hints::VOLUME, control);
-        vec![
-            input.into_any_element(),
-            output.into_any_element(),
-            volume.into_any_element(),
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(slider_setting("A/V sync offset", hints::AV_SYNC, &self.sliders.av_sync, label))
-                .children(warning.map(warn))
-                .into_any_element(),
-        ]
+        let volume = setting_with("Volume", hints::VOLUME, locked("lock-volume", why, control.into_any_element()), self.lock_badge("badge-volume", why, cx));
+        let av_sync = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(setting_with("A/V sync offset", hints::AV_SYNC, locked("lock-av-sync", why, slider_control(&self.sliders.av_sync, label).into_any_element()), self.lock_badge("badge-av-sync", why, cx)))
+            .children(warning.map(warn))
+            .into_any_element();
+        vec![input.into_any_element(), output.into_any_element(), volume, av_sync]
     }
 
     fn reset_all(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1199,6 +1210,11 @@ fn warn(text: String) -> Div {
 
 /// Title, control, hint: one setting.
 fn setting(title: &'static str, hint_text: &'static str, control: impl IntoElement) -> AnyElement {
+    setting_with(title, hint_text, control, None)
+}
+
+/// A setting with `badge` after its title (a locked setting's warning, #146).
+fn setting_with(title: &'static str, hint_text: &'static str, control: impl IntoElement, badge: Option<AnyElement>) -> AnyElement {
     let pal = theme::palette();
     let focused = nav::focused(title);
     div()
@@ -1217,22 +1233,26 @@ fn setting(title: &'static str, hint_text: &'static str, control: impl IntoEleme
         .flex()
         .flex_col()
         .gap_2()
-        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+        .child(div().flex().items_center().gap(px(6.)).child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title)).children(badge))
         .child(control)
         .child(hint(hint_text))
         .into_any_element()
 }
 
 fn slider_setting(title: &'static str, hint_text: &'static str, state: &Entity<SliderState>, value: String) -> AnyElement {
+    setting(title, hint_text, slider_control(state, value))
+}
+
+/// A slider and its value, without the title and hint.
+fn slider_control(state: &Entity<SliderState>, value: String) -> Div {
     let pal = theme::palette();
-    let control = div()
+    div()
         .w_full()
         .flex()
         .items_center()
         .gap_3()
         .child(div().flex_1().min_w_0().child(Slider::new(state)))
-        .child(div().w(px(56.)).flex_none().text_xs().font_family(mono_family()).text_right().text_color(pal.secondary).child(value));
-    setting(title, hint_text, control)
+        .child(div().w(px(56.)).flex_none().text_xs().font_family(mono_family()).text_right().text_color(pal.secondary).child(value))
 }
 
 /// How long a control takes to ease into its new state.
@@ -1371,54 +1391,52 @@ fn checkboxes(id: &'static str, items: &[(&str, &str)], on: &[bool], cursor: Opt
     }))
 }
 
-/// Inputs xReveal may not use yet, for want of Camera or Microphone access (#113): each on its own
-/// row, locked, with its own button. One grant unlocks them all (macOS asks per app, not per
-/// device). Before macOS has asked, the button asks; once it has, it won't ask again, so the button
-/// opens the privacy settings.
-fn locked_inputs(privacy: Privacy, access: Access, names: Vec<String>, cx: &mut Context<SettingsDrawer>) -> AnyElement {
+/// The Input setting while xReveal may not use the inputs yet, for want of Camera or Microphone
+/// access: one box with one button (#113, #146), not one per input. Access is per app, so one
+/// grant unlocks every input. Before macOS has asked, the button asks; once it has, it won't ask
+/// again, so the button opens the privacy settings.
+fn locked_inputs(privacy: Privacy, access: Access, cx: &mut Context<SettingsDrawer>) -> AnyElement {
     let pal = theme::palette();
-    let label = if access == Access::NotAsked { "Allow access" } else { "Open System Settings" };
-    let what = match privacy {
-        Privacy::Camera => "Inputs show here",
-        Privacy::Microphone => "Sound inputs show here",
+    let (icon, title) = match (privacy, access) {
+        (Privacy::Camera, Access::Denied) => (IconName::Camera, "Camera access is off"),
+        (Privacy::Camera, _) => (IconName::Camera, "Camera access needed"),
+        (Privacy::Microphone, Access::Denied) => (IconName::Mic, "Microphone access is off"),
+        (Privacy::Microphone, _) => (IconName::Mic, "Microphone access needed"),
     };
-    let names = if names.is_empty() { vec![format!("{what} once xReveal has access")] } else { names };
-    let rows = names.into_iter().enumerate().map(|(i, name)| {
-        let id = match privacy {
-            Privacy::Camera => ("allow-camera", i),
-            Privacy::Microphone => ("allow-microphone", i),
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .rounded(px(8.))
-            .bg(pal.raised)
-            .border_1()
-            .border_color(pal.line)
-            .child(Icon::new(IconName::Lock).size_4().text_color(pal.muted))
-            .child(div().flex_1().min_w_0().text_sm().text_color(pal.secondary).child(name))
-            .child(
-                div()
-                    .id(id)
-                    .flex_none()
-                    .px_2()
-                    .py(px(2.))
-                    .rounded(px(6.))
-                    .text_xs()
-                    .cursor_pointer()
-                    .bg(pal.accent_fill)
-                    .border_1()
-                    .border_color(pal.accent_line)
-                    .text_color(pal.accent)
-                    .hover(|d| d.text_color(pal.text))
-                    .child(label)
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(DrawerEvent::Allow(privacy)))),
-            )
-    });
-    div().flex().flex_col().gap_1().children(rows).into_any_element()
+    let label = if access == Access::Denied { "Open System Settings" } else { "Allow access" };
+    let id = match privacy {
+        Privacy::Camera => "allow-camera",
+        Privacy::Microphone => "allow-microphone",
+    };
+    div()
+        .p_3()
+        .rounded(px(10.))
+        .bg(pal.raised)
+        .border_1()
+        .border_color(pal.line)
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(div().flex().items_center().gap_3().child(Icon::new(icon).size_5().text_color(pal.secondary)).child(div().flex_1().text_sm().text_color(pal.text).child(title)))
+        .child(
+            div()
+                .id(id)
+                .w_full()
+                .flex()
+                .justify_center()
+                .py(px(6.))
+                .rounded(px(6.))
+                .text_sm()
+                .cursor_pointer()
+                .bg(pal.accent_fill)
+                .border_1()
+                .border_color(pal.accent_line)
+                .text_color(pal.accent)
+                .hover(|d| d.text_color(pal.text))
+                .child(label)
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(DrawerEvent::Allow(privacy)))),
+        )
+        .into_any_element()
 }
 
 fn quiet_button(id: &'static str, icon: IconName, label: &'static str) -> Stateful<Div> {

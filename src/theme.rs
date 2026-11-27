@@ -237,7 +237,7 @@ pub fn appearance_is_dark(appearance: WindowAppearance) -> bool {
     matches!(appearance, WindowAppearance::Dark | WindowAppearance::VibrantDark)
 }
 
-gpui_kit::assets::icon_assets!(pub ExtraIcons, [Cable, Monitor, Palette, Volume2, SunMoon, MonitorOff, Unplug, Lock, ChevronDown, ChevronRight, ChevronLeft, RotateCcw, X, Check, Settings, Ban, VolumeX]);
+gpui_kit::assets::icon_assets!(pub ExtraIcons, [Cable, Monitor, Palette, Volume2, SunMoon, MonitorOff, Unplug, Lock, ChevronDown, ChevronRight, ChevronLeft, RotateCcw, X, Check, Settings, Ban, VolumeX, TriangleAlert, Camera, Mic]);
 
 /// GPUI Kit's component icons plus the few extra lucide icons xReveal uses.
 pub struct AppAssets;
@@ -250,6 +250,8 @@ impl AssetSource for AppAssets {
             "xreveal/notch/line-right.svg" => Some(include_bytes!("../assets/notch/line-right.svg")),
             "xreveal/notch/fill-left.svg" => Some(include_bytes!("../assets/notch/fill-left.svg")),
             "xreveal/notch/line-left.svg" => Some(include_bytes!("../assets/notch/line-left.svg")),
+            // The arrow under a locked setting's tip (drawer/lock.rs).
+            "xreveal/tooltip/arrow-down.svg" => Some(include_bytes!("../assets/tooltip/arrow-down.svg")),
             _ => None,
         };
         if let Some(bytes) = notch {
