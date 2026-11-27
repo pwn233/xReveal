@@ -109,6 +109,25 @@ fn set_borderless_now(view: &NSView, borderless: bool, display: Option<u64>) {
     window.makeFirstResponder(Some(view));
 }
 
+/// Enters or leaves macOS's own fullscreen for the window holding `view` (#56). A moment later from
+/// the main queue, like [`move_window`]. A borderless window gets its frame back first, because
+/// macOS's fullscreen needs a titled window; leaving goes back to that frame, and the app makes it
+/// borderless again.
+pub fn toggle_fullscreen(view: &NSView) {
+    let view = view as *const NSView as usize;
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        // SAFETY: as in `move_window`.
+        let view = unsafe { &*(view as *const NSView) };
+        let Some(window) = view.window() else { return };
+        let mask = window.styleMask();
+        if !mask.contains(NSWindowStyleMask::FullScreen) && !mask.contains(NSWindowStyleMask::Titled) {
+            window.setStyleMask(WINDOWED);
+        }
+        window.setCollectionBehavior(window.collectionBehavior() | objc2_app_kit::NSWindowCollectionBehavior::FullScreenPrimary);
+        window.toggleFullScreen(None);
+    });
+}
+
 /// Turns the window holding `overlay` into a layer over the one holding `owner`: a child window
 /// (it moves with it and stays just above it, not over other apps) that lets the mouse through.
 pub fn make_overlay(overlay: &NSView, owner: &NSView) {
