@@ -17,6 +17,7 @@ use windows::core::{Interface, PCSTR, Result, s};
 use windows::Win32::Media::MediaFoundation::MF_E_INVALIDMEDIATYPE;
 
 use super::media::{Frame, PixelFormat};
+use crate::video::flat;
 use crate::video::mjpeg::MjpegDecoder;
 use super::surface::Surface;
 use crate::video::picture::{self, FrameInfo, Layout, Plan, ShaderParams};
@@ -354,6 +355,8 @@ impl Renderer {
         let f = frame.format;
         let (device, planes, mjpeg) = (&self.device, &mut self.planes, &mut self.mjpeg);
         let context = &self.context;
+        // A few luma samples, to notice a picture that stays one flat colour (#108).
+        let observe = |samples: Vec<u8>| lock(&self.shared.flat).observe(&samples, std::time::Instant::now());
         frame.with_pixels(|bytes, pitch| -> Result<(u32, u32)> {
             if f.pixel_format == PixelFormat::Mjpeg {
                 let decoded = mjpeg.decode(bytes).map_err(|e| windows::core::Error::new(MF_E_INVALIDMEDIATYPE, e))?;
@@ -361,6 +364,7 @@ impl Renderer {
                 let planes = ensure_planes(device, planes, Layout::Ycbcr444, w, h)?;
                 let row = w as usize * 3;
                 write_rows(context, &planes.textures[0], decoded.ycbcr, row, row, h as usize)?;
+                observe(flat::luma_grid(w as usize, h as usize, |x, y| decoded.ycbcr[y * row + x * 3]));
                 return Ok((w, h));
             }
             let planes = ensure_planes(device, planes, layout(f.pixel_format), f.width, f.height)?;
@@ -369,8 +373,12 @@ impl Renderer {
                 PixelFormat::Nv12 => {
                     write_rows(context, &planes.textures[0], &bytes[..pitch * h], pitch, w, h)?;
                     write_rows(context, &planes.textures[1], &bytes[pitch * h..], pitch, w, h.div_ceil(2))?;
+                    observe(flat::luma_grid(w, h, |x, y| bytes[y * pitch + x]));
                 }
-                PixelFormat::Yuy2 => write_rows(context, &planes.textures[0], bytes, pitch, w * 2, h)?,
+                PixelFormat::Yuy2 => {
+                    write_rows(context, &planes.textures[0], bytes, pitch, w * 2, h)?;
+                    observe(flat::luma_grid(w, h, |x, y| bytes[y * pitch + x * 2]));
+                }
                 PixelFormat::Mjpeg => unreachable!("handled above"),
             }
             Ok((f.width, f.height))

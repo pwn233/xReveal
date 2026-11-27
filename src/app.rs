@@ -111,6 +111,8 @@ pub struct XReveal {
     pending_launch: bool,
     /// A broken `setup.toml` was set aside: said once, over the Welcome screen.
     notice: Option<String>,
+    /// The picture has been one flat colour for a while: a hint over it, never a screen (#108).
+    blank_hint: Option<String>,
     /// The wanted card was unplugged: open it again as soon as it is back.
     unplugged: bool,
     /// When to try a busy card again.
@@ -190,6 +192,7 @@ impl XReveal {
             screen: Screen::Starting,
             pending_launch: !camera_ready && remembered_input,
             notice,
+            blank_hint: None,
             unplugged: false,
             next_retry: None,
             taken_over: None,
@@ -352,6 +355,19 @@ impl XReveal {
                 video.set_surface_visible(matches!(screen, Screen::Picture | Screen::Starting));
             }
             self.screen = screen;
+            cx.notify();
+        }
+        // A live picture that has stayed one flat colour: some cards send that with no signal.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let blank_hint = self
+            .video
+            .as_ref()
+            .filter(|video| self.screen == Screen::Picture && video.flat_for() >= crate::video::flat::HINT_AFTER)
+            .and_then(|video| video.current().map(|(identity, _)| blank_hint(&identity.name)));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let blank_hint = None;
+        if blank_hint != self.blank_hint {
+            self.blank_hint = blank_hint;
             cx.notify();
         }
         let _ = window;
@@ -670,6 +686,7 @@ impl XReveal {
             // A one-line status only for what has no screen of its own (e.g. a failed switch).
             status: (!self.drawer_open && self.screen.shows_picture() && self.status.starts_with("Couldn't")).then(|| self.status.clone()),
             tip: self.tip.is_some(),
+            blank_hint: self.blank_hint.clone().filter(|_| self.tip.is_none()),
             stats: stats.shown.then(|| (stats, stats_rows(self.stats(), &self.status, crate::video::FIRST_PRESENT.get().copied(), stats))),
             slide: self.slide,
             drawer_open: self.drawer_open,
@@ -686,6 +703,7 @@ struct Overlays {
     notice: Option<String>,
     status: Option<String>,
     tip: bool,
+    blank_hint: Option<String>,
     stats: Option<(StatsBox, Vec<(&'static str, String)>)>,
     slide: drawer::Slide,
     drawer_open: bool,
@@ -706,6 +724,9 @@ impl Overlays {
         }
         if let Some(status) = self.status.clone() {
             out.push(panel(div()).child(status).into_any_element());
+        }
+        if let Some(hint) = self.blank_hint.clone() {
+            out.push(div().absolute().top_3().w_full().flex().justify_center().child(panel(div()).child(hint)).into_any_element());
         }
         if self.tip {
             out.push(
@@ -1168,6 +1189,12 @@ pub fn screen_labels(screens: &[NamedScreen]) -> Vec<String> {
     let sized: Vec<String> =
         screens.iter().map(|(name, (w, h))| if repeated(&names, name) { format!("{name} · {w} × {h}") } else { name.clone() }).collect();
     sized.iter().enumerate().map(|(i, label)| if repeated(&sized, label) { format!("{label} ({})", i + 1) } else { label.clone() }).collect()
+}
+
+/// The hint over a picture from `card` that has stayed one flat colour (#108): a question, because
+/// a dark game scene looks the same as a card sending black with no signal.
+pub fn blank_hint(card: &str) -> String {
+    format!("Only a blank picture from {card}? Check the console is on, its HDMI cable and any HDMI switch.")
 }
 
 /// The placement to remember for a window with outer frame `frame` and content area `content`:

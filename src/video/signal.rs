@@ -1,5 +1,6 @@
 //! Live signal states (docs/spec/v1.md §2.8): what xReveal can know for certain about the Source.
-//! It never judges the picture's content: a flat or black frame is a frame.
+//! It never judges the picture's content: a flat or black frame is a frame. (A picture that stays
+//! flat only earns a hint over it: see [`super::flat`].)
 
 use std::time::Duration;
 
