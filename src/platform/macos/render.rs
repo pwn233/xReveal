@@ -2,7 +2,7 @@
 //! copy (`CVMetalTextureCache`), draws them in one shader pass planned by `video::picture`, and
 //! presents on arrival (docs/spec/v1.md §3.3, §3.4).
 
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use block2::RcBlock;
@@ -10,8 +10,9 @@ use block2::RcBlock;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::{CFRetained, CGSize};
+use objc2_io_surface::IOSurfaceRef;
 use objc2_core_video::{
-    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer, CVPixelBufferGetBaseAddress,
+    CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetIOSurface,
     CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane,
     CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidthOfPlane, CVPixelBufferIsPlanar,
     CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVReturnSuccess,
@@ -20,7 +21,7 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLLibrary, MTLLoadAction,
     MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
-    MTLRenderPipelineState, MTLStoreAction, MTLTexture, MTLViewport,
+    MTLRenderPipelineState, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage, MTLViewport,
 };
 use objc2_metal::MTLDrawable;
 use objc2_quartz_core::{CACurrentMediaTime, CAMetalDrawable};
@@ -45,7 +46,7 @@ type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 
 /// Runs until the slot is closed.
 pub fn run(target: RenderTarget, slot: &FrameSlot<PixelBuffer>, shared: Arc<VideoShared>) {
-    let renderer = match Renderer::new(target, shared.clone()) {
+    let mut renderer = match Renderer::new(target, shared.clone()) {
         Ok(renderer) => renderer,
         Err(error) => {
             eprintln!("video: {error}");
@@ -134,45 +135,44 @@ impl VideoPass {
 struct Renderer {
     target: RenderTarget,
     pass: VideoPass,
-    texture_cache: CFRetained<CVMetalTextureCache>,
+    /// Each capture buffer's planes as Metal textures, made the first time the buffer comes round
+    /// (see [`Renderer::textures`]), by IOSurface ID. The surface is kept, so its ID stays its own.
+    surfaces: Vec<(u32, CFRetained<IOSurfaceRef>, Vec<Texture>)>,
     shared: Arc<VideoShared>,
 }
+
+/// More buffers than any capture pool cycles through: past this the cache starts over (a new
+/// Source or Video format brings a new pool).
+const MAX_SURFACES: usize = 16;
 
 /// Everything a submitted frame still needs until the GPU has finished with it.
 struct InFlight {
     command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    /// The capture buffer stays retained while the GPU reads it, so the capture pool can't reuse it.
     _frame: PixelBuffer,
-    _planes: Vec<CFRetained<CVMetalTexture>>,
 }
 
 impl Renderer {
     fn new(target: RenderTarget, shared: Arc<VideoShared>) -> Result<Self, String> {
         let pass = VideoPass::new(&target.device)?;
-        let mut cache: *mut CVMetalTextureCache = ptr::null_mut();
-        let status = unsafe { CVMetalTextureCache::create(None, None, &target.device, None, NonNull::from(&mut cache)) };
-        let texture_cache = NonNull::new(cache)
-            .filter(|_| status == kCVReturnSuccess)
-            .map(|cache| unsafe { CFRetained::from_raw(cache) })
-            .ok_or(format!("CVMetalTextureCache failed ({status})"))?;
-        Ok(Self { target, pass, texture_cache, shared })
+        Ok(Self { target, pass, surfaces: Vec::new(), shared })
     }
 
     /// Draws one frame and presents it. `Ok(None)` when there is nothing to draw into yet.
-    fn draw(&self, frame: PixelBuffer) -> Result<Option<InFlight>, String> {
+    fn draw(&mut self, frame: PixelBuffer) -> Result<Option<InFlight>, String> {
         let image = &*frame.image;
-        let (info, planes) = match CVPixelBufferGetPixelFormatType(image) {
+        let (info, textures) = match CVPixelBufferGetPixelFormatType(image) {
             format @ (NV12_VIDEO_RANGE | NV12_FULL_RANGE) => {
-                let luma = self.plane(&frame, 0, MTLPixelFormat::R8Unorm, 1)?;
-                let chroma = self.plane(&frame, 1, MTLPixelFormat::RG8Unorm, 1)?;
+                let textures = self.textures(image, &[(0, MTLPixelFormat::R8Unorm, 1), (1, MTLPixelFormat::RG8Unorm, 1)])?;
                 let size = (CVPixelBufferGetWidthOfPlane(image, 0) as u32, CVPixelBufferGetHeightOfPlane(image, 0) as u32);
                 let info = FrameInfo { width: size.0, height: size.1, layout: Layout::Nv12, os_squeezed: format == NV12_VIDEO_RANGE };
-                (info, vec![luma, chroma])
+                (info, textures)
             }
             YUY2 if !CVPixelBufferIsPlanar(image) => {
                 let width = objc2_core_video::CVPixelBufferGetWidth(image) as u32;
                 let height = objc2_core_video::CVPixelBufferGetHeight(image) as u32;
-                let packed = self.plane(&frame, 0, MTLPixelFormat::RGBA8Unorm, 2)?;
-                (FrameInfo { width, height, layout: Layout::Yuy2, os_squeezed: false }, vec![packed])
+                let textures = self.textures(image, &[(0, MTLPixelFormat::RGBA8Unorm, 2)])?;
+                (FrameInfo { width, height, layout: Layout::Yuy2, os_squeezed: false }, textures)
             }
             other => return Err(format!("pixel format {} isn't drawn yet", fourcc(other))),
         };
@@ -181,8 +181,6 @@ impl Renderer {
         if let Some(samples) = luma_samples(image, (info.width as usize, info.height as usize), step) {
             lock(&self.shared.flat).observe(&samples, std::time::Instant::now());
         }
-        let textures: Vec<Texture> =
-            planes.iter().map(|p| CVMetalTextureGetTexture(p).ok_or("no plane texture")).collect::<Result<_, _>>()?;
 
         let layer = &self.target.layer;
         let bounds = layer.bounds();
@@ -213,36 +211,41 @@ impl Renderer {
         command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
         command_buffer.commit();
 
-        Ok(Some(InFlight { command_buffer, _frame: frame, _planes: planes }))
+        Ok(Some(InFlight { command_buffer, _frame: frame }))
     }
 
-    /// Wraps one plane of the frame as a Metal texture without copying. `texel_pixels` is how many
-    /// image pixels one texel holds across (2 for packed YUY2 viewed as RGBA).
-    fn plane(&self, frame: &PixelBuffer, index: usize, format: MTLPixelFormat, texel_pixels: usize) -> Result<CFRetained<CVMetalTexture>, String> {
-        let image = &*frame.image;
-        let (width, height) = if CVPixelBufferIsPlanar(image) {
-            (CVPixelBufferGetWidthOfPlane(image, index), CVPixelBufferGetHeightOfPlane(image, index))
-        } else {
-            (objc2_core_video::CVPixelBufferGetWidth(image), objc2_core_video::CVPixelBufferGetHeight(image))
-        };
-        let mut texture: *mut CVMetalTexture = ptr::null_mut();
-        let status = unsafe {
-            CVMetalTextureCache::create_texture_from_image(
-                None,
-                &self.texture_cache,
-                image,
-                None,
-                format,
-                width.div_ceil(texel_pixels),
-                height,
-                index,
-                NonNull::from(&mut texture),
-            )
-        };
-        NonNull::new(texture)
-            .filter(|_| status == kCVReturnSuccess)
-            .map(|texture| unsafe { CFRetained::from_raw(texture) })
-            .ok_or(format!("plane {index} texture failed ({status})"))
+    /// The frame's planes as Metal textures, without copying: `planes` lists each plane's index,
+    /// texel format and how many image pixels one texel holds across (2 for packed YUY2 viewed as
+    /// RGBA). The capture card cycles through a small pool of buffers, so each buffer's textures
+    /// are made the first time it comes round and reused after that. Wrapping the planes anew every
+    /// frame (`CVMetalTextureCache`) was half of the video thread's CPU time (#118).
+    fn textures(&mut self, image: &CVPixelBuffer, planes: &[(usize, MTLPixelFormat, usize)]) -> Result<Vec<Texture>, String> {
+        let surface = CVPixelBufferGetIOSurface(Some(image)).ok_or("the frame isn't backed by an IOSurface")?;
+        // By ID, not by object: frames come from macOS's camera service, and the same buffer can
+        // arrive as a new IOSurfaceRef each time.
+        let id = surface.id();
+        if let Some((_, _, textures)) = self.surfaces.iter().find(|(known, _, _)| *known == id) {
+            return Ok(textures.clone());
+        }
+        let textures = planes
+            .iter()
+            .map(|&(index, format, texel_pixels)| {
+                let (width, height) = if CVPixelBufferIsPlanar(image) {
+                    (CVPixelBufferGetWidthOfPlane(image, index), CVPixelBufferGetHeightOfPlane(image, index))
+                } else {
+                    (objc2_core_video::CVPixelBufferGetWidth(image), objc2_core_video::CVPixelBufferGetHeight(image))
+                };
+                let desc = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(format, width.div_ceil(texel_pixels), height, false) };
+                desc.setUsage(MTLTextureUsage::ShaderRead);
+                desc.setStorageMode(MTLStorageMode::Shared);
+                self.target.device.newTextureWithDescriptor_iosurface_plane(&desc, &surface, index).ok_or(format!("plane {index} texture failed"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if self.surfaces.len() >= MAX_SURFACES {
+            self.surfaces.clear();
+        }
+        self.surfaces.push((id, surface, textures.clone()));
+        Ok(textures)
     }
 }
 
