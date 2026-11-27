@@ -71,11 +71,14 @@ fn with_alpha(colour: Hsla, a: f32) -> Hsla {
 /// An accent's colour: lighter on dark panels, deeper on light ones, so text in it stays readable.
 pub fn accent_colour(accent: Accent, dark: bool) -> Hsla {
     hex(match (accent, dark) {
+        // From the app icon (#130): its lavender, a step deeper so it reads as an accent.
+        (Accent::Violet, true) => 0xa98bff,
         (Accent::Blue, true) => 0x6aa9ff,
         (Accent::Teal, true) => 0x4fd1c5,
         (Accent::Green, true) => 0x7bd88f,
         (Accent::Amber, true) => 0xf0b35a,
         (Accent::Pink, true) => 0xf28cb1,
+        (Accent::Violet, false) => 0x5e3fbf,
         (Accent::Blue, false) => 0x1f63c4,
         (Accent::Teal, false) => 0x0b736b,
         (Accent::Green, false) => 0x23773b,

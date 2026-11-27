@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- xReveal's app icon (#130): the purple XL square. The tile is inset like macOS app icons. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a3585"/>
+      <stop offset="1" stop-color="#2a1d4d"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  <g fill="#d4c6ff">
+    <polygon points="246,356 336,356 512,668 422,668"/>
+    <polygon points="422,356 512,356 336,668 246,668"/>
+    <rect x="572" y="356" width="88" height="312"/>
+    <rect x="572" y="584" width="210" height="84"/>
+  </g>
+</svg>
