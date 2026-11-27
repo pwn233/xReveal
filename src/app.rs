@@ -912,26 +912,29 @@ impl XReveal {
 /// list or a dialog that keeps a scroll to itself can't hide a swipe), and hands trackpad scrolls
 /// to [`XReveal::on_swipe`]. Only listens; never stops an event.
 fn swipe_listener(app: WeakEntity<XReveal>) -> impl IntoElement {
-    swipe_canvas(move |phase, fingers, window, cx| {
+    swipe_canvas("main", move |phase, fingers, window, cx| {
         let _ = app.update(cx, |app, cx| app.on_swipe(phase, fingers, window, cx));
     })
 }
 
 /// The same in the drawer's own window (Windows), handing the swipe to the main window's view.
 fn drawer_swipe_listener(host: WeakEntity<DrawerWindow>) -> impl IntoElement {
-    swipe_canvas(move |phase, fingers, _, cx| {
+    swipe_canvas("drawer", move |phase, fingers, _, cx| {
         let _ = host.update(cx, |host, cx| host.with_main(cx, move |main, window, cx| main.on_swipe(phase, fingers, window, cx)));
     })
 }
 
 /// An empty element that, each frame, listens for scrolls in its window in the capture phase and
 /// passes precise (trackpad) ones on as finger movement.
-fn swipe_canvas(on_scroll: impl Fn(TouchPhase, (f32, f32), &mut Window, &mut App) + Clone + 'static) -> impl IntoElement {
+fn swipe_canvas(which: &'static str, on_scroll: impl Fn(TouchPhase, (f32, f32), &mut Window, &mut App) + Clone + 'static) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |_, _, window, _| {
             let on_scroll = on_scroll.clone();
             window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                if phase == DispatchPhase::Capture {
+                    log_scroll(which, event);
+                }
                 // Precise scrolling only: a mouse wheel's line steps are never a swipe.
                 let (DispatchPhase::Capture, ScrollDelta::Pixels(delta)) = (phase, event.delta) else { return };
                 let sign = if crate::platform::scroll_follows_fingers() { 1. } else { -1. };
@@ -941,6 +944,35 @@ fn swipe_canvas(on_scroll: impl Fn(TouchPhase, (f32, f32), &mut Window, &mut App
     )
     .absolute()
     .size_0()
+}
+
+/// With `XREVEAL_LOG_SCROLL` set, every scroll a window hears goes to `scroll.log` next to
+/// `setup.toml`: which window, the phase, the delta (pixels or lines), where, and whether the
+/// delta follows the fingers. For checking the Drawer swipe on a device (#140, #160).
+fn log_scroll(which: &str, event: &ScrollEvent) {
+    use std::io::Write;
+    static LOG: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let log = LOG.get_or_init(|| {
+        std::env::var_os("XREVEAL_LOG_SCROLL")?;
+        let path = crate::setup::default_path()?.with_file_name("scroll.log");
+        std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(std::sync::Mutex::new)
+    });
+    let Some(file) = log else { return };
+    let delta = match event.delta {
+        ScrollDelta::Pixels(d) => format!("pixels {:.1},{:.1}", d.x.as_f32(), d.y.as_f32()),
+        ScrollDelta::Lines(d) => format!("lines {:.2},{:.2}", d.x, d.y),
+    };
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
+    if let Ok(mut file) = file.lock() {
+        let _ = writeln!(
+            file,
+            "{at:.3} {which} {:?} {delta} at {:.0},{:.0} follows-fingers={}",
+            event.touch_phase,
+            event.position.x.as_f32(),
+            event.position.y.as_f32(),
+            crate::platform::scroll_follows_fingers()
+        );
+    }
 }
 
 /// A copy of what the display-only overlays show: the overlay window draws from it, never from
