@@ -347,9 +347,11 @@ pub mod reference {
     /// One screen pixel at viewport UV `uv`.
     pub fn shade(planes: &Planes, p: &ShaderParams, uv: [f32; 2]) -> [f32; 3] {
         let src = source_uv(p, uv);
-        let luma = bicubic(src, [p.sizes[0], p.sizes[1]], |x, y| fetch_luma(planes, p, x, y));
-        let cb = bicubic(src, [p.sizes[2], p.sizes[3]], |x, y| fetch_chroma(planes, p, x, y)[0]);
-        let cr = bicubic(src, [p.sizes[2], p.sizes[3]], |x, y| fetch_chroma(planes, p, x, y)[1]);
+        // NV12's planes are filtered in hardware, in 5 fetches that leave out the corner taps.
+        let corners = planes.layout != Layout::Nv12;
+        let luma = bicubic(src, [p.sizes[0], p.sizes[1]], corners, |x, y| fetch_luma(planes, p, x, y));
+        let cb = bicubic(src, [p.sizes[2], p.sizes[3]], corners, |x, y| fetch_chroma(planes, p, x, y)[0]);
+        let cr = bicubic(src, [p.sizes[2], p.sizes[3]], corners, |x, y| fetch_chroma(planes, p, x, y)[1]);
         let ycc = [luma, cb, cr, 1.0];
         let rgb = p.colour.map(|row| (row[0] * ycc[0] + row[1] * ycc[1] + row[2] * ycc[2] + row[3] * ycc[3]).clamp(0.0, 1.0));
         rgb.map(|c| c.powf(p.misc[0]))
@@ -369,23 +371,28 @@ pub mod reference {
     }
 
     /// Catmull-Rom bicubic over 4×4 texels, clamped at the edges (same taps as the shaders).
-    fn bicubic(uv: [f32; 2], size: [f32; 2], fetch: impl Fn(i32, i32) -> f32) -> f32 {
+    /// Without `corners`, the four corner taps (both outside the middle two on each axis) are left
+    /// out and the rest renormalised, as the shaders' 5-fetch NV12 path does (#118).
+    fn bicubic(uv: [f32; 2], size: [f32; 2], corners: bool, fetch: impl Fn(i32, i32) -> f32) -> f32 {
         let px = uv[0] * size[0] - 0.5;
         let py = uv[1] * size[1] - 0.5;
         let (ix, iy) = (px.floor(), py.floor());
         let (wx, wy) = (weights(px - ix), weights(py - iy));
         let (max_x, max_y) = (size[0] as i32 - 1, size[1] as i32 - 1);
-        let mut sum = 0.0;
-        for j in 0..4 {
-            let y = (iy as i32 + j - 1).clamp(0, max_y);
-            let mut row = 0.0;
-            for i in 0..4 {
-                let x = (ix as i32 + i - 1).clamp(0, max_x);
-                row += wx[i as usize] * fetch(x, y);
+        let outer = |i: usize| i == 0 || i == 3;
+        let (mut sum, mut total) = (0.0, 0.0);
+        for (j, wy) in wy.into_iter().enumerate() {
+            let y = (iy as i32 + j as i32 - 1).clamp(0, max_y);
+            for (i, wx) in wx.into_iter().enumerate() {
+                if !corners && outer(i) && outer(j) {
+                    continue;
+                }
+                let x = (ix as i32 + i as i32 - 1).clamp(0, max_x);
+                sum += wx * wy * fetch(x, y);
+                total += wx * wy;
             }
-            sum += wy[j as usize] * row;
         }
-        sum
+        sum / total
     }
 
     pub fn weights(t: f32) -> [f32; 4] {

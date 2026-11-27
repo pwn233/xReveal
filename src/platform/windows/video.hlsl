@@ -71,11 +71,11 @@ float2 fetch_chroma(int x, int y, int layout) {
     return second.Load(int3(x, y, 0)).rg;
 }
 
-// Catmull-Rom over 4×4 texels in 3×3 filtered fetches (#56): the middle two taps of each axis
-// have positive weights, so one bilinear fetch between them gives both, weighted. Exactly the
-// 16-tap result, give or take the hardware's filtering precision. Mirrors `catmull_rom_9` in
-// `video.metal`.
-float4 catmull_rom_9(Texture2D<float4> plane, float2 position, float2 size) {
+// Catmull-Rom in 5 filtered fetches (#56, #118). The middle two taps of each axis have positive
+// weights, so one bilinear fetch between them gives both, weighted: 4×4 taps become 3×3 fetches.
+// The four corner fetches carry the smallest weights (products of the negative outer lobes), so
+// they're left out and the other five are renormalised. Mirrors `catmull_rom_5` in `video.metal`.
+float4 catmull_rom_5(Texture2D<float4> plane, float2 position, float2 size) {
     float2 lp = position * size - 0.5;
     float2 li = floor(lp);
     float4 wx = weights(lp.x - li.x), wy = weights(lp.y - li.y);
@@ -83,15 +83,11 @@ float4 catmull_rom_9(Texture2D<float4> plane, float2 position, float2 size) {
     // Texel centres (+0.5) of the outer taps, and the weighted point between the middle two.
     float3 px = li.x + 0.5 + float3(-1.0, wx.z / sx.y, 2.0);
     float3 py = li.y + 0.5 + float3(-1.0, wy.z / sy.y, 2.0);
-    float4 sum = 0.0;
-    [unroll] for (int j = 0; j < 3; j++) {
-        float4 row = 0.0;
-        [unroll] for (int k = 0; k < 3; k++) {
-            row += sx[k] * plane.SampleLevel(bilinear, float2(px[k], py[j]) / size, 0);
-        }
-        sum += sy[j] * row;
-    }
-    return sum;
+    // The middle column (top, centre, bottom) and the middle row's two ends.
+    float4 sum = sx.y * (sy.x * plane.SampleLevel(bilinear, float2(px.y, py.x) / size, 0) + sy.y * plane.SampleLevel(bilinear, float2(px.y, py.y) / size, 0)
+                         + sy.z * plane.SampleLevel(bilinear, float2(px.y, py.z) / size, 0))
+               + sy.y * (sx.x * plane.SampleLevel(bilinear, float2(px.x, py.y) / size, 0) + sx.z * plane.SampleLevel(bilinear, float2(px.z, py.y) / size, 0));
+    return sum / (sx.y + sy.y - sx.y * sy.y);
 }
 
 float4 ps_main(VertexOut i) : SV_Target {
@@ -100,7 +96,7 @@ float4 ps_main(VertexOut i) : SV_Target {
 
     // NV12: each plane is its own texture, so the hardware can filter.
     if (layout == 0) {
-        float4 ycc = float4(catmull_rom_9(first, src, sizes.xy).r, catmull_rom_9(second, src, sizes.zw).rg, 1.0);
+        float4 ycc = float4(catmull_rom_5(first, src, sizes.xy).r, catmull_rom_5(second, src, sizes.zw).rg, 1.0);
         float3 rgb = saturate(float3(dot(colour[0], ycc), dot(colour[1], ycc), dot(colour[2], ycc)));
         return float4(pow(rgb, misc.xxx), 1.0);
     }
