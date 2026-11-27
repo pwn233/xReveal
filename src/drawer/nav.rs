@@ -151,7 +151,7 @@ impl SettingsDrawer {
                 if self.model.device_settings {
                     rows.push(row("Device settings…", 4, Nav::Press(|_, _, cx| cx.emit(DrawerEvent::DeviceSettings))));
                 }
-                if self.model.video_effects.is_some() {
+                if self.model.video_effects {
                     let section = if self.model.device_settings { 5 } else { 4 };
                     rows.push(row("Camera effects", section, Nav::Press(|_, _, cx| cx.emit(DrawerEvent::VideoEffects))));
                 }
