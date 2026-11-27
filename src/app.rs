@@ -68,6 +68,8 @@ const EDGE: f32 = 48.0;
 const NOTCH_BODY: f32 = 24.0;
 const NOTCH_FILLET: f32 = 10.0;
 const NOTCH_HEIGHT: f32 = 96.0 + 2.0 * NOTCH_FILLET;
+/// The widest a bar at the top centre gets before its text wraps.
+const BAR_WIDTH: f32 = 480.0;
 /// How long the one-time colour tip stays up.
 const TIP_FOR: Duration = Duration::from_secs(12);
 
@@ -348,6 +350,8 @@ impl XReveal {
             });
             self.restart_sound(window, cx);
         }
+        // A stream restarted after a dropout or a device returning can meet the echo guard too.
+        self.guard_echo(window, cx);
         if screen != self.screen {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(video) = &self.video {
@@ -379,7 +383,20 @@ impl XReveal {
         if let Some((identity, _)) = self.video.as_ref().and_then(|v| v.current().cloned()) {
             self.sound.start_for(Some(&identity), &self.store.setup);
         }
+        self.guard_echo(window, cx);
         self.refresh_drawer(window, cx);
+    }
+
+    /// The echo guard muted the sound, or unmuted it on leaving an echoing route (#112,
+    /// docs/spec/v1.md §2.7): remember the mute, so the Audio tab shows it and the person can undo
+    /// it, and show why.
+    fn guard_echo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(muted) = self.sound.take_mute_change() {
+            self.store.update(|s| s.audio.muted = muted);
+            self.sound.set_mix(&self.store.setup);
+            self.refresh_drawer(window, cx);
+            cx.notify();
+        }
     }
 
     /// What the screens' buttons do.
@@ -442,6 +459,7 @@ impl XReveal {
             Some((identity, _)) => self.sound.start_for(Some(&identity), &self.store.setup),
             None => self.sound.stop(),
         }
+        self.guard_echo(window, cx);
         self.refresh_drawer(window, cx);
     }
 
@@ -687,6 +705,7 @@ impl XReveal {
             status: (!self.drawer_open && self.screen.shows_picture() && self.status.starts_with("Couldn't")).then(|| self.status.clone()),
             tip: self.tip.is_some(),
             blank_hint: self.blank_hint.clone().filter(|_| self.tip.is_none()),
+            echo: self.screen.shows_picture() && self.sound.echo_muted(&self.store.setup),
             stats: stats.shown.then(|| (stats, stats_rows(self.stats(), &self.status, crate::video::FIRST_PRESENT.get().copied(), stats))),
             slide: self.slide,
             drawer_open: self.drawer_open,
@@ -704,6 +723,8 @@ struct Overlays {
     status: Option<String>,
     tip: bool,
     blank_hint: Option<String>,
+    /// The echo guard muted the sound (#112).
+    echo: bool,
     stats: Option<(StatsBox, Vec<(&'static str, String)>)>,
     slide: drawer::Slide,
     drawer_open: bool,
@@ -725,8 +746,16 @@ impl Overlays {
         if let Some(status) = self.status.clone() {
             out.push(panel(div()).child(status).into_any_element());
         }
+        // The bars at the top centre, one under another when more than one shows.
+        let mut bars: Vec<AnyElement> = Vec::new();
+        if self.echo {
+            bars.push(panel(div().max_w(px(BAR_WIDTH))).child(crate::audio::echo::MUTED_NOTICE).into_any_element());
+        }
         if let Some(hint) = self.blank_hint.clone() {
-            out.push(div().absolute().top_3().w_full().flex().justify_center().child(panel(div()).child(hint)).into_any_element());
+            bars.push(panel(div().max_w(px(BAR_WIDTH))).child(hint).into_any_element());
+        }
+        if !bars.is_empty() {
+            out.push(div().absolute().top_3().w_full().flex().flex_col().items_center().gap_2().children(bars).into_any_element());
         }
         if self.tip {
             out.push(
@@ -893,8 +922,11 @@ impl XReveal {
                 self.sound.set_mix(&self.store.setup);
             }
             DrawerEvent::Mute(muted) => {
+                self.sound.mute_chosen(muted);
                 self.store.update(|s| s.audio.muted = muted);
                 self.sound.set_mix(&self.store.setup);
+                // The echo guard's notice goes once the mute is the person's.
+                self.refresh_drawer(window, cx);
             }
             DrawerEvent::Side(side) => {
                 self.store.update(|s| s.drawer_side = side);

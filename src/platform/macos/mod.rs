@@ -5,6 +5,7 @@ pub mod access;
 mod capture;
 mod render;
 pub mod screens;
+pub mod sound_devices;
 mod surface;
 
 use std::sync::Arc;

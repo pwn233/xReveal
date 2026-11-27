@@ -25,6 +25,8 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-av-foundation = { version = "0.3", features = ["block2", "dispatch2", "objc2-core-media", "objc2-core-video"] }
 objc2-core-foundation = "0.3"
+# The echo guard (#112): which audio devices are the Mac's own mic and speakers.
+objc2-core-audio = "0.3"
 objc2-core-media = { version = "0.3", features = ["objc2-core-video"] }
 objc2-core-video = { version = "0.3", features = ["objc2-metal"] }
 objc2-foundation = "0.3"
@@ -48,6 +50,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
     "Win32_Media_DirectShow",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
@@ -61,6 +64,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
 # `#[implement]` (COM callbacks such as the Source Reader callback) refers to `windows_core` by name.
