@@ -30,8 +30,11 @@ pub const COUNT: usize = 6;
 pub struct Chooser {
     labels: Vec<String>,
     chosen: Option<usize>,
-    /// The closed selector's width, so the open list matches it.
-    width: Rc<Cell<Pixels>>,
+    /// Where the closed selector is (window coordinates), so the open list sits right under it
+    /// at its width.
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The window's height, to open the list upwards when there's no room below.
+    window_height: Rc<Cell<Pixels>>,
 }
 
 impl Chooser {
@@ -56,7 +59,8 @@ impl SettingsDrawer {
         let chooser = &self.choosers[which];
         let open = self.open_chooser == Some(which);
         let shown = chosen.and_then(|i| labels.get(i));
-        let width = chooser.width.clone();
+        let bounds = chooser.bounds.clone();
+        let window_height = chooser.window_height.clone();
         let trigger = div()
             .id(("chooser", which))
             .relative()
@@ -81,8 +85,18 @@ impl SettingsDrawer {
                     .child(shown.cloned().unwrap_or_else(|| placeholder.to_owned())),
             )
             .child(Icon::new(IconName::ChevronDown).size_4().mt(px(1.5)).text_color(pal.muted))
-            // Remember the width the list should take.
-            .child(canvas(move |bounds, _, _| width.set(bounds.size.width), |_, _, _, _| {}).absolute().inset_0())
+            // Remember where it is, for the list.
+            .child(
+                canvas(
+                    move |b, window, _| {
+                        bounds.set(b);
+                        window_height.set(window.viewport_size().height);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_chooser = if this.open_chooser == Some(which) { None } else { Some(which) };
                 cx.notify();
@@ -110,8 +124,7 @@ impl SettingsDrawer {
         let list = div()
             .id(("chooser-list", which))
             .occlude()
-            .mt_1()
-            .w(chooser.width.get())
+            .w(chooser.bounds.get().size.width)
             .max_h(rems(18.))
             .overflow_y_scroll()
             .p_1()
@@ -132,7 +145,7 @@ impl SettingsDrawer {
             .flex()
             .flex_col()
             .child(trigger)
-            .child(deferred(anchored().snap_to_window_with_margin(px(8.)).child(list)).with_priority(1))
+            .child(deferred(place_list(chooser, labels.len(), list)).with_priority(1))
             .into_any_element()
     }
 
@@ -148,3 +161,19 @@ impl SettingsDrawer {
         cx.notify();
     }
 }
+
+/// Where an open list goes: right under its selector, or right above it when the window has no
+/// room below. Placed from the selector's measured bounds: a deferred element has no place in the
+/// flow, so left to itself the list was drawn over the selector.
+fn place_list(chooser: &Chooser, rows: usize, list: impl IntoElement) -> Anchored {
+    let selector = chooser.bounds.get();
+    // The list's height before it's laid out: rows of about 31 px, at most 18 rem.
+    let height = px((rows as f32 * 31. + 12.).min(18. * 16.));
+    let room_below = chooser.window_height.get() - selector.bottom() - px(GAP + 8.);
+    let above = height > room_below && selector.top() - height - px(GAP + 8.) > px(0.);
+    let at = if above { (Anchor::BottomLeft, point(selector.left(), selector.top() - px(GAP))) } else { (Anchor::TopLeft, point(selector.left(), selector.bottom() + px(GAP))) };
+    anchored().anchor(at.0).position(at.1).snap_to_window_with_margin(px(8.)).child(list)
+}
+
+/// Between a selector and its open list.
+const GAP: f32 = 4.;
