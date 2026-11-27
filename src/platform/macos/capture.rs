@@ -1,22 +1,30 @@
-//! AVFoundation capture (docs/spec/v1.md §3.1): lists every video capture device with its live
-//! formats, and runs one at a chosen format.
+//! Capture (docs/spec/v1.md §3.1): AVFoundation lists every video capture device with its live
+//! formats and sets the chosen one; CoreMediaIO streams the frames.
+//!
+//! Frames don't come through an `AVCaptureSession`: a session loads macOS's camera Video Effects
+//! into the app (Portrait, Reactions with their 3D scenes, gesture and face detection), ~190 MB
+//! and some CPU per frame that an app can't turn off (#118). Reading the device's CoreMediaIO
+//! stream directly gets the same frames, already decoded, without any of it.
 
-use std::sync::{Arc, OnceLock};
+use std::ffi::c_void;
+use std::ptr::{self, NonNull};
+use std::sync::Arc;
 
-use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_av_foundation::{
-    AVError, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceFormat,
-    AVCaptureDeviceInput, AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
-    AVCaptureDeviceTypeExternal, AVCaptureOutput, AVCaptureSession, AVCaptureVideoDataOutput,
-    AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeAudio, AVMediaTypeVideo,
+    AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceFormat, AVCaptureDevicePosition,
+    AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeExternal, AVMediaTypeAudio, AVMediaTypeVideo,
 };
-use objc2_core_foundation::CFRetained;
-use objc2_core_media::{CMClock, CMSampleBuffer, CMSyncConvertTime, CMVideoFormatDescriptionGetDimensions};
+use objc2_core_foundation::{CFRetained, CFString};
+use objc2_core_media::{CMClock, CMSampleBuffer, CMSimpleQueue, CMSyncConvertTime, CMVideoFormatDescriptionGetDimensions};
+use objc2_core_media_io::{
+    CMIODeviceStartStream, CMIODeviceStopStream, CMIOObjectGetPropertyData, CMIOObjectGetPropertyDataSize, CMIOObjectID,
+    CMIOObjectPropertyAddress, CMIOStreamCopyBufferQueue, CMIOStreamID, kCMIODevicePropertyDeviceUID,
+    kCMIODevicePropertyScopeInput, kCMIODevicePropertyStreams, kCMIOHardwarePropertyDevices, kCMIOObjectPropertyElementMain,
+    kCMIOObjectPropertyScopeGlobal, kCMIOObjectSystemObject, kCMIOStreamPropertyClock,
+};
 use objc2_core_video::CVPixelBuffer;
-use objc2_foundation::{NSArray, NSDictionary, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{NSArray, NSObjectProtocol, NSString};
 use objc2_quartz_core::CACurrentMediaTime;
 
 use crate::source::{self, NativeFormat, PixelKind, SourceIdentity, SourceInfo};
@@ -40,12 +48,12 @@ impl Timed for PixelBuffer {
     }
 }
 
-/// The session's clock, to convert sample times to host time.
-struct SessionClock(CFRetained<CMClock>);
+/// The stream's clock, to convert sample times to host time.
+struct StreamClock(CFRetained<CMClock>);
 
 // SAFETY: CMClock is a thread-safe CoreFoundation object; it is only read (converted against).
-unsafe impl Send for SessionClock {}
-unsafe impl Sync for SessionClock {}
+unsafe impl Send for StreamClock {}
+unsafe impl Sync for StreamClock {}
 
 /// Every video capture device macOS lists (docs/spec/v1.md §1: all are offered), cards first.
 pub fn list_sources() -> Vec<SourceInfo> {
@@ -112,12 +120,8 @@ fn pixel_kind(subtype: u32) -> PixelKind {
 }
 
 pub struct Capture {
-    session: Retained<AVCaptureSession>,
     device: Retained<AVCaptureDevice>,
-    // Kept alive for as long as the session runs: the output holds its delegate weakly.
-    _output: Retained<AVCaptureVideoDataOutput>,
-    _sink: Retained<VideoSink>,
-    _queue: DispatchRetained<DispatchQueue>,
+    stream: Stream,
     pub description: String,
 }
 
@@ -135,51 +139,24 @@ impl Capture {
                 let duration = frame_rate_range(&format, native.fps)?;
                 (w as u32 == native.width && h as u32 == native.height && same_kind).then(|| (format.clone(), duration))
             });
-
-            let session = AVCaptureSession::new();
-            session.beginConfiguration();
-
-            let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device).map_err(|e| {
-                let code = e.code();
-                if code == AVError::DeviceInUseByAnotherApplication.0 || code == AVError::DeviceAlreadyUsedByAnotherSession.0 {
-                    busy()
-                } else {
-                    OpenError::Failed(format!("Couldn't open {name}: {}", e.localizedDescription()))
-                }
-            })?;
-            if !session.canAddInput(&input) {
-                return Err(if device.isInUseByAnotherApplication() { busy() } else { OpenError::Failed(format!("{name} can't be used right now.")) });
-            }
-            session.addInput(&input);
-
-            let output = AVCaptureVideoDataOutput::new();
-            output.setAlwaysDiscardsLateVideoFrames(true);
-            // Empty settings = the device's native format, with no conversion (`nil` would add one).
-            output.setVideoSettings(Some(&NSDictionary::new()));
-            let sink = VideoSink::new(slot);
-            let queue = DispatchQueue::new("xreveal.capture", None);
-            output.setSampleBufferDelegate_queue(Some(ProtocolObject::from_ref(&*sink)), Some(&queue));
-            session.addOutput(&output);
-            session.commitConfiguration();
-
-            // The session preset silently overrides `activeFormat` unless the device stays locked
-            // across `startRunning` (Reference card finding, #3).
-            let locked = device.lockForConfiguration().is_ok();
-            if locked && let Some((format, duration)) = &chosen {
+            // The format is set on the device, which is shared: the stream runs at it. With no
+            // `AVCaptureSession` there is no session preset to override it (#3).
+            if let Some((format, duration)) = &chosen
+                && device.lockForConfiguration().is_ok()
+            {
                 device.setActiveFormat(format);
                 device.setActiveVideoMinFrameDuration(*duration);
                 device.setActiveVideoMaxFrameDuration(*duration);
-            }
-            // Sample times are on the session's clock; keep it to convert them to host time.
-            if session.respondsToSelector(sel!(synchronizationClock))
-                && let Some(clock) = session.synchronizationClock()
-            {
-                let _ = sink.ivars().clock.set(SessionClock(CFRetained::from(&*clock)));
-            }
-            session.startRunning();
-            if locked {
                 device.unlockForConfiguration();
             }
+
+            let stream = Stream::start(os_id, slot).map_err(|status| {
+                if device.isInUseByAnotherApplication() {
+                    busy()
+                } else {
+                    OpenError::Failed(format!("Couldn't open {name} (CoreMediaIO error {status})."))
+                }
+            })?;
 
             let active = device.activeFormat();
             let (w, h) = dimensions(&active);
@@ -193,12 +170,12 @@ impl Capture {
                 fourcc(active.formatDescription().media_sub_type())
             );
 
-            Ok(Self { session, device, _output: output, _sink: sink, _queue: queue, description })
+            Ok(Self { device, stream, description })
         }
     }
 
     pub fn stop(&self) {
-        unsafe { self.session.stopRunning() };
+        self.stream.stop();
     }
 
     /// The format the card is running at now: another app can change it, because macOS shares
@@ -211,6 +188,152 @@ impl Capture {
             (w as u32, h as u32, fps)
         }
     }
+}
+
+/// A device's CoreMediaIO video stream, running: macOS hands each frame to a queue and calls
+/// [`queue_altered`], which passes it to the frame slot.
+struct Stream {
+    device: CMIOObjectID,
+    stream: CMIOStreamID,
+    _queue: CFRetained<CMSimpleQueue>,
+    /// What [`queue_altered`] reads; freed only after the stream has stopped calling it.
+    sink: *mut Sink,
+}
+
+struct Sink {
+    queue: *const CMSimpleQueue,
+    slot: Arc<FrameSlot<PixelBuffer>>,
+    clock: Option<StreamClock>,
+}
+
+impl Stream {
+    /// Starts the first input stream of the CoreMediaIO device whose UID is `os_id` (the same UID
+    /// AVFoundation calls `uniqueID`). The error is CoreMediaIO's status.
+    unsafe fn start(os_id: &str, slot: Arc<FrameSlot<PixelBuffer>>) -> Result<Self, i32> {
+        unsafe {
+            let devices = object_ids(kCMIOObjectSystemObject, address(kCMIOHardwarePropertyDevices, kCMIOObjectPropertyScopeGlobal));
+            let device = devices.into_iter().find(|&d| uid(d).as_deref() == Some(os_id)).ok_or(-1)?;
+            let stream = *object_ids(device, address(kCMIODevicePropertyStreams, kCMIODevicePropertyScopeInput)).first().ok_or(-2)?;
+            let clock = clock(stream).map(StreamClock);
+            let sink = Box::into_raw(Box::new(Sink { queue: ptr::null(), slot, clock }));
+            let mut queue: *mut CMSimpleQueue = ptr::null_mut();
+            let status = CMIOStreamCopyBufferQueue(stream, Some(queue_altered), sink.cast(), &mut queue);
+            let Some(queue) = NonNull::new(queue).filter(|_| status == 0) else {
+                drop(Box::from_raw(sink));
+                return Err(status);
+            };
+            // SAFETY: "Copy": the queue comes retained.
+            let queue = CFRetained::from_raw(queue);
+            (*sink).queue = &*queue;
+            let status = CMIODeviceStartStream(device, stream);
+            let this = Self { device, stream, _queue: queue, sink };
+            if status != 0 {
+                return Err(status);
+            }
+            Ok(this)
+        }
+    }
+
+    fn stop(&self) {
+        unsafe { CMIODeviceStopStream(self.device, self.stream) };
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        unsafe {
+            CMIODeviceStopStream(self.device, self.stream);
+            // Take the callback back from the stream before freeing what it reads.
+            let mut queue: *mut CMSimpleQueue = ptr::null_mut();
+            if CMIOStreamCopyBufferQueue(self.stream, None, ptr::null_mut(), &mut queue) == 0
+                && let Some(queue) = NonNull::new(queue)
+            {
+                drop(CFRetained::from_raw(queue));
+            }
+            drop(Box::from_raw(self.sink));
+        }
+    }
+}
+
+// SAFETY: the stream is driven by IDs and a CoreFoundation queue, both usable from any thread;
+// `sink` is only read by CoreMediaIO's callback until `Drop` takes it back.
+unsafe impl Send for Stream {}
+
+/// Runs on CoreMediaIO's thread whenever a frame is queued: only hands the frames over.
+unsafe extern "C-unwind" fn queue_altered(_stream: CMIOStreamID, _token: *mut c_void, sink: *mut c_void) {
+    // SAFETY: `sink` is the `Sink` given to `CMIOStreamCopyBufferQueue`, alive until the
+    // callback is taken back.
+    let sink = unsafe { &*(sink as *const Sink) };
+    let Some(queue) = (unsafe { sink.queue.as_ref() }) else { return };
+    while let Some(sample) = NonNull::new(unsafe { queue.dequeue() } as *mut CMSampleBuffer) {
+        // SAFETY: a dequeued sample buffer belongs to the caller, retained.
+        let sample = unsafe { CFRetained::from_raw(sample) };
+        let arrival = CACurrentMediaTime();
+        if let Some(image) = unsafe { sample.image_buffer() } {
+            let capture = capture_time(sink.clock.as_ref(), &sample, arrival);
+            sink.slot.put(PixelBuffer { image, stamps: Stamps { capture, arrival } });
+        }
+    }
+}
+
+/// The sample's capture time in host seconds; the arrival time when it can't be trusted.
+fn capture_time(clock: Option<&StreamClock>, sample: &CMSampleBuffer, arrival: f64) -> f64 {
+    let pts = unsafe { sample.presentation_time_stamp() };
+    let seconds = match clock {
+        Some(StreamClock(clock)) => unsafe {
+            let host = CMClock::host_time_clock();
+            CMSyncConvertTime(pts, clock, &host).seconds()
+        },
+        None => unsafe { pts.seconds() },
+    };
+    // A capture time in the future, or seconds in the past, means a clock we don't understand.
+    if seconds.is_finite() && seconds <= arrival && arrival - seconds < 2.0 { seconds } else { arrival }
+}
+
+fn address(selector: u32, scope: u32) -> CMIOObjectPropertyAddress {
+    CMIOObjectPropertyAddress { mSelector: selector, mScope: scope, mElement: kCMIOObjectPropertyElementMain }
+}
+
+/// A property that is a list of CoreMediaIO object IDs (devices, streams).
+unsafe fn object_ids(object: CMIOObjectID, address: CMIOObjectPropertyAddress) -> Vec<CMIOObjectID> {
+    unsafe {
+        let mut size = 0u32;
+        if CMIOObjectGetPropertyDataSize(object, &address, 0, ptr::null(), &mut size) != 0 {
+            return Vec::new();
+        }
+        let mut ids = vec![0 as CMIOObjectID; size as usize / size_of::<CMIOObjectID>()];
+        let mut used = 0u32;
+        if CMIOObjectGetPropertyData(object, &address, 0, ptr::null(), size, &mut used, ids.as_mut_ptr().cast()) != 0 {
+            return Vec::new();
+        }
+        ids.truncate(used as usize / size_of::<CMIOObjectID>());
+        ids
+    }
+}
+
+/// A CoreFoundation-object property, which comes retained ("Copy").
+unsafe fn cf_property(object: CMIOObjectID, selector: u32) -> Option<NonNull<c_void>> {
+    unsafe {
+        let address = address(selector, kCMIOObjectPropertyScopeGlobal);
+        let mut value: *mut c_void = ptr::null_mut();
+        let mut used = 0u32;
+        let status = CMIOObjectGetPropertyData(object, &address, 0, ptr::null(), size_of::<*mut c_void>() as u32, &mut used, (&raw mut value).cast());
+        if status == 0 { NonNull::new(value) } else { None }
+    }
+}
+
+/// A device's UID.
+unsafe fn uid(device: CMIOObjectID) -> Option<String> {
+    let value = unsafe { cf_property(device, kCMIODevicePropertyDeviceUID) }?;
+    // SAFETY: the UID property is a CFString, retained.
+    Some(unsafe { CFRetained::from_raw(value.cast::<CFString>()) }.to_string())
+}
+
+/// A stream's clock, if it has one.
+unsafe fn clock(stream: CMIOStreamID) -> Option<CFRetained<CMClock>> {
+    let value = unsafe { cf_property(stream, kCMIOStreamPropertyClock) }?;
+    // SAFETY: the clock property is a CMClock, retained.
+    Some(unsafe { CFRetained::from_raw(value.cast::<CMClock>()) })
 }
 
 /// Whether the device with OS ID `os_id` is plugged in.
@@ -237,52 +360,4 @@ unsafe fn dimensions(format: &AVCaptureDeviceFormat) -> (i32, i32) {
 
 pub fn fourcc(code: u32) -> String {
     code.to_be_bytes().iter().map(|&b| if b.is_ascii_graphic() { b as char } else { '?' }).collect()
-}
-
-struct SinkIvars {
-    slot: Arc<FrameSlot<PixelBuffer>>,
-    clock: OnceLock<SessionClock>,
-}
-
-define_class!(
-    // SAFETY: NSObject has no subclassing requirements; VideoSink doesn't implement Drop.
-    #[unsafe(super(NSObject))]
-    #[name = "XRevealVideoSink"]
-    #[ivars = SinkIvars]
-    struct VideoSink;
-
-    unsafe impl NSObjectProtocol for VideoSink {}
-
-    unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for VideoSink {
-        // Runs on the capture queue for every frame: only hand the frame over.
-        #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
-        fn capture_output(&self, _output: &AVCaptureOutput, sample_buffer: &CMSampleBuffer, _connection: &AVCaptureConnection) {
-            let arrival = CACurrentMediaTime();
-            if let Some(image) = unsafe { sample_buffer.image_buffer() } {
-                let capture = self.capture_time(sample_buffer, arrival);
-                self.ivars().slot.put(PixelBuffer { image, stamps: Stamps { capture, arrival } });
-            }
-        }
-    }
-);
-
-impl VideoSink {
-    fn new(slot: Arc<FrameSlot<PixelBuffer>>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(SinkIvars { slot, clock: OnceLock::new() });
-        unsafe { msg_send![super(this), init] }
-    }
-
-    /// The sample's capture time in host seconds; the arrival time when it can't be trusted.
-    fn capture_time(&self, sample_buffer: &CMSampleBuffer, arrival: f64) -> f64 {
-        let pts = unsafe { sample_buffer.presentation_time_stamp() };
-        let seconds = match self.ivars().clock.get() {
-            Some(SessionClock(clock)) => unsafe {
-                let host = CMClock::host_time_clock();
-                CMSyncConvertTime(pts, clock, &host).seconds()
-            },
-            None => unsafe { pts.seconds() },
-        };
-        // A capture time in the future, or seconds in the past, means a clock we don't understand.
-        if seconds.is_finite() && seconds <= arrival && arrival - seconds < 2.0 { seconds } else { arrival }
-    }
 }

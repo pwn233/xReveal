@@ -24,10 +24,5 @@
 	<string>xReveal shows the live picture from your capture card.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>xReveal plays the live sound from your capture card.</string>
-	<!-- Camera reactions (balloons, confetti) aren't set off by hand gestures by default: a hand in
-	     a game scene could trigger them over the console's picture. macOS still runs its gesture
-	     detection; only the reactions are off (#118). -->
-	<key>NSCameraReactionEffectGesturesEnabledDefault</key>
-	<false/>
 </dict>
 </plist>

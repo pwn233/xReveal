@@ -529,7 +529,6 @@ impl XReveal {
             frame_interval: 1.0 / 60.0,
             camera: self.access_seen.0,
             microphone: self.access_seen.1,
-            video_effects: crate::platform::HAS_VIDEO_EFFECTS,
             ..Default::default()
         };
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1054,7 +1053,6 @@ impl XReveal {
                 }
             }
             DrawerEvent::Quit => cx.quit(),
-            DrawerEvent::VideoEffects => crate::platform::show_video_effects(),
             DrawerEvent::Allow(privacy) => {
                 permission::allow(privacy);
                 self.watch_access(window, cx);
