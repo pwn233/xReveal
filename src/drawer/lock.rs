@@ -21,9 +21,11 @@ use crate::theme;
 /// Where each lock warning is, and the window's width, as last drawn.
 pub(super) type Spots = Rc<RefCell<HashMap<&'static str, (Bounds<Pixels>, Pixels)>>>;
 
-/// How long the pointer rests before the tip starts to show, and how long it takes to fade in.
+/// How long the pointer rests before the tip starts to show, how long it takes to fade in, and
+/// how long it takes to fade out once the pointer leaves.
 const PAUSE: f32 = 0.3;
 const FADE: f32 = 0.15;
+pub(super) const FADE_OUT: Duration = Duration::from_millis(120);
 /// The tip's widest; it's centred on the icon within this.
 const TIP_WIDTH: f32 = 240.;
 /// How close the tip may come to the window's edge.
@@ -49,8 +51,9 @@ impl SettingsDrawer {
         let why = why?;
         let pal = theme::palette();
         let bounds = self.lock_bounds.clone();
-        let hovered = self.hovered_lock == Some(key);
-        let tip = hovered.then(|| self.lock_bounds.borrow().get(key).copied()).flatten().map(|(b, window)| tip(key, why, b, window));
+        let closing = self.fading_lock == Some(key) && self.hovered_lock != Some(key);
+        let shown = self.hovered_lock == Some(key) || closing;
+        let tip = shown.then(|| self.lock_bounds.borrow().get(key).copied()).flatten().map(|(b, window)| tip(key, why, b, window, closing));
         Some(
             div()
                 .id(key)
@@ -62,6 +65,20 @@ impl SettingsDrawer {
                 .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                     let now = if *hovering { Some(key) } else { this.hovered_lock.filter(|k| *k != key) };
                     if now != this.hovered_lock {
+                        // Leaving: fade the tip out rather than drop it.
+                        if !*hovering {
+                            this.fading_lock = Some(key);
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(FADE_OUT).await;
+                                let _ = this.update(cx, |this, cx| {
+                                    if this.fading_lock == Some(key) {
+                                        this.fading_lock = None;
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                        }
                         this.hovered_lock = now;
                         cx.notify();
                     }
@@ -72,9 +89,8 @@ impl SettingsDrawer {
     }
 }
 
-/// The tip above the icon at `icon` (window coordinates): a small panel centred on it where the
-/// window (`window` wide) leaves room, with its arrow always pointing at the icon.
-fn tip(key: &'static str, why: &'static str, icon: Bounds<Pixels>, window: Pixels) -> AnyElement {
+/// The tip above the icon at `icon` (window coordinates): a small panel saying `why`.
+fn tip(key: &'static str, why: &'static str, icon: Bounds<Pixels>, window: Pixels, closing: bool) -> AnyElement {
     let pal = theme::palette();
     let panel = div()
         .max_w(px(TIP_WIDTH))
@@ -90,27 +106,41 @@ fn tip(key: &'static str, why: &'static str, icon: Bounds<Pixels>, window: Pixel
         .text_color(pal.text)
         .text_center()
         .child(why);
-    // Centred on the icon, then kept inside the window; the arrow follows the icon.
-    let centre = icon.origin.x + icon.size.width / 2.;
-    let left = (centre - px(TIP_WIDTH / 2.)).clamp(px(MARGIN), (window - px(TIP_WIDTH + MARGIN)).max(px(MARGIN)));
+    bubble(key, panel.into_any_element(), TIP_WIDTH, icon, window, closing)
+}
+
+/// `panel` floating above the element at `anchor` (window coordinates): centred on it where the
+/// window (`window` wide) leaves room, within `width`, with an arrow that always points at it, and
+/// fading in after a short pause, and out (`closing`) once the pointer has left. Shared by the lock
+/// tips and the update button (#145).
+pub(super) fn bubble(key: &str, panel: AnyElement, width: f32, anchor: Bounds<Pixels>, window: Pixels, closing: bool) -> AnyElement {
+    let pal = theme::palette();
+    // Centred on the anchor, then kept inside the window; the arrow follows the anchor.
+    let centre = anchor.origin.x + anchor.size.width / 2.;
+    let left = (centre - px(width / 2.)).clamp(px(MARGIN), (window - px(width + MARGIN)).max(px(MARGIN)));
     let arrow = svg().path("xreveal/tooltip/arrow-down.svg").w(px(16.)).h(px(8.)).mt(px(-1.)).ml(centre - left - px(8.)).text_color(pal.raised);
     let total = PAUSE + FADE;
-    let bubble = div()
-        .w(px(TIP_WIDTH))
-        .flex()
-        .flex_col()
-        .child(div().flex().justify_center().child(panel))
-        .child(arrow)
-        .with_animation(
-            ElementId::Name(format!("lock-tip-{key}").into()),
-            Animation::new(Duration::from_secs_f32(total)).with_easing(move |t| {
-                // Nothing during the pause, then ease out over the fade.
-                let x = ((t * total - PAUSE) / FADE).clamp(0.0, 1.0);
-                1.0 - (1.0 - x).powi(3)
-            }),
-            |el, shown| el.opacity(shown).mt(px((1.0 - shown) * 4.0)),
-        );
-    deferred(anchored().anchor(Anchor::BottomLeft).position(point(left, icon.origin.y - px(2.))).child(bubble))
+    let bubble = div().w(px(width)).flex().flex_col().child(div().flex().justify_center().child(panel)).child(arrow);
+    let bubble = if closing {
+        bubble
+            .with_animation(ElementId::Name(format!("tip-out-{key}").into()), Animation::new(FADE_OUT).with_easing(ease_in_out), |el, gone| {
+                el.opacity(1.0 - gone).mt(px(gone * 4.0))
+            })
+            .into_any_element()
+    } else {
+        bubble
+            .with_animation(
+                ElementId::Name(format!("tip-{key}").into()),
+                Animation::new(Duration::from_secs_f32(total)).with_easing(move |t| {
+                    // Nothing during the pause, then ease out over the fade.
+                    let x = ((t * total - PAUSE) / FADE).clamp(0.0, 1.0);
+                    1.0 - (1.0 - x).powi(3)
+                }),
+                |el, shown| el.opacity(shown).mt(px((1.0 - shown) * 4.0)),
+            )
+            .into_any_element()
+    };
+    deferred(anchored().anchor(Anchor::BottomLeft).position(point(left, anchor.origin.y - px(2.))).child(bubble))
         .with_priority(2)
-    .into_any_element()
+        .into_any_element()
 }

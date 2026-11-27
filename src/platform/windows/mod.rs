@@ -3,6 +3,7 @@
 
 pub mod container;
 mod device_settings;
+pub mod http;
 pub mod media;
 mod render;
 pub mod screens;

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 mod chooser;
 mod lock;
+mod update_button;
 use lock::locked;
 mod meter;
 mod nav;
@@ -105,6 +106,12 @@ pub struct DrawerModel {
     pub side: DrawerSide,
     /// The Drawer swipe is on (#141).
     pub swipe: bool,
+    /// **Check for updates** is on (#145).
+    pub check_updates: bool,
+    /// A newer release to offer, and its notes (#145).
+    pub update: Option<(String, Vec<String>)>,
+    /// How the last check this run went (#145).
+    pub update_check: crate::update::Check,
     pub window_mode: WindowMode,
     /// Every screen (its identity and the name to show), and the one xReveal is on.
     pub monitors: Vec<(String, String)>,
@@ -129,6 +136,10 @@ pub enum DrawerEvent {
     Side(DrawerSide),
     /// The Drawer swipe turned on or off (#141).
     Swipe(bool),
+    /// **Check for updates** turned on or off (#145).
+    CheckUpdates(bool),
+    /// The update button asked to check now (#145).
+    CheckNow,
     WindowMode(WindowMode),
     /// Show xReveal on this screen (by its identity).
     Monitor(String),
@@ -197,6 +208,7 @@ pub mod hints {
     pub const STRENGTH: &str = "0% looks just like Stretch. Higher keeps the centre more natural and stretches the edges more.";
     pub const CUSTOM_RATIO: &str = "Width ÷ height of your own shape, like 2.39 for a cinema ratio";
     pub const DRAWER_SIDE: &str = "Which side this panel opens from";
+    pub const CHECK_UPDATES: &str = "Once a day, xReveal asks GitHub whether there's a newer version. Nothing else is sent.";
     pub const SWIPE: &str = if cfg!(target_os = "macos") {
         "Swipe two fingers sideways on the trackpad: away from this panel's side to open it, back to close it. Start in the middle of the trackpad; a swipe from its right edge opens Notification Center."
     } else {
@@ -270,8 +282,18 @@ pub struct SettingsDrawer {
     choosers: [chooser::Chooser; chooser::COUNT],
     /// The selector whose list is open.
     open_chooser: Option<usize>,
+    /// The pointer is over the update button, or over its tip (#145); whether the tip shows, and
+    /// the pending close that lets the pointer cross from the button to the tip.
+    update_hover: (bool, bool),
+    update_tip_open: bool,
+    update_tip_closing: bool,
+    update_tip_close: Option<Task<()>>,
+    /// Where the update tip's notes are scrolled to, for their fades.
+    update_notes_scroll: ScrollHandle,
     /// The lock warning under the pointer, and where each one is, with the window's width (see [`lock`]).
     hovered_lock: Option<&'static str>,
+    /// A lock warning the pointer just left: its tip is fading out.
+    fading_lock: Option<&'static str>,
     lock_bounds: lock::Spots,
     /// What the Selects list, in order: OS IDs of the cards, and the Video formats of the current one.
     card_ids: Vec<String>,
@@ -373,7 +395,13 @@ impl SettingsDrawer {
             sliders,
             choosers: Default::default(),
             open_chooser: None,
+            update_hover: (false, false),
+            update_tip_open: false,
+            update_tip_closing: false,
+            update_tip_close: None,
+            update_notes_scroll: ScrollHandle::new(),
             hovered_lock: None,
+            fading_lock: None,
             lock_bounds: Default::default(),
             card_ids: Vec::new(),
             formats: Vec::new(),
@@ -718,6 +746,19 @@ impl SettingsDrawer {
                 }
             }),
         );
+        let check_updates = chips(
+            "check-updates",
+            &["On", "Off"],
+            if self.model.check_updates { 0 } else { 1 },
+            cx.listener(|this, i: &usize, _, cx| {
+                let on = *i == 0;
+                if on != this.model.check_updates {
+                    this.model.check_updates = on;
+                    cx.emit(DrawerEvent::CheckUpdates(on));
+                    cx.notify();
+                }
+            }),
+        );
         vec![
             setting("Theme", hints::THEME, theme_chips),
             setting("Accent", hints::ACCENT, swatches),
@@ -725,6 +766,7 @@ impl SettingsDrawer {
             setting("Density", hints::DENSITY, density),
             setting("Drawer side", hints::DRAWER_SIDE, side),
             setting("Swipe to open settings", hints::SWIPE, swipe),
+            setting("Check for updates", hints::CHECK_UPDATES, check_updates),
         ]
     }
 
@@ -1039,11 +1081,18 @@ impl SettingsDrawer {
                     )
                     .child(
                         div()
-                            .id("repository")
-                            .group("repository")
-                            .cursor_pointer()
-                            .child(svg().path("xreveal/github-mark.svg").size(px(14.)).text_color(pal.muted).group_hover("repository", |s| s.text_color(pal.text)))
-                            .on_click(|_, _, cx| cx.open_url(crate::whats_new::REPOSITORY)),
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("repository")
+                                    .group("repository")
+                                    .cursor_pointer()
+                                    .child(svg().path("xreveal/github-mark.svg").size(px(14.)).text_color(pal.muted).group_hover("repository", |s| s.text_color(pal.text)))
+                                    .on_click(|_, _, cx| cx.open_url(crate::whats_new::REPOSITORY)),
+                            )
+                            .child(self.update_button(cx)),
                     ),
             )
             .into_any_element()
@@ -1067,7 +1116,7 @@ impl SettingsDrawer {
                 let a = &self.model.audio;
                 self.model.delay.av_sync_offset_ms == 0 && a.volume == 1.0 && !a.muted && a.chosen_input.is_none() && a.output.is_none()
             }
-            Tab::Interface => self.model.look == Look::default() && self.model.side == DrawerSide::default() && self.model.swipe,
+            Tab::Interface => self.model.look == Look::default() && self.model.side == DrawerSide::default() && self.model.swipe && self.model.check_updates,
         }
     }
 
@@ -1132,6 +1181,10 @@ impl SettingsDrawer {
                 if !model.swipe {
                     model.swipe = true;
                     events.push(DrawerEvent::Swipe(true));
+                }
+                if !model.check_updates {
+                    model.check_updates = true;
+                    events.push(DrawerEvent::CheckUpdates(true));
                 }
             }
         }

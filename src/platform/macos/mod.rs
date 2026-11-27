@@ -3,6 +3,7 @@
 
 pub mod access;
 mod capture;
+pub mod http;
 mod render;
 pub mod screens;
 pub mod sound_devices;
