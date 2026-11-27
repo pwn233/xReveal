@@ -36,10 +36,14 @@ pub fn attach_below(gpui_view: NonNull<c_void>) -> Result<RenderTarget, String> 
     layer.setFramebufferOnly(true);
     // Hand each frame to the window server as soon as it is drawn: the window server already
     // composites in step with the display, so the layer's own vsync only added a second wait
-    // (~45 ms → ~8 ms arrival → screen, issue #54). Three drawables so drawing never waits for one
-    // to come back. The picture doesn't tear: the window is composited (docs/spec/v1.md §3.3).
+    // (~45 ms → ~8 ms arrival → screen, issue #54). The picture doesn't tear: the window is
+    // composited (docs/spec/v1.md §3.3).
     layer.setDisplaySyncEnabled(false);
-    layer.setMaximumDrawableCount(3);
+    // Two drawables, not three: with a third, a finished frame queued behind the one before it and
+    // reached the screen a refresh later. xReveal's share went from ~14 ms to ~5 ms with two, with
+    // fewer late frames and one 17 MB drawable less (#56, #118). At 50–60 fps on a 120 Hz screen
+    // the earlier drawable is back long before the next frame needs one.
+    layer.setMaximumDrawableCount(2);
     layer.setOpaque(true);
     if let Some(window) = gpui_view.window() {
         layer.setContentsScale(window.backingScaleFactor());
