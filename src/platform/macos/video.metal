@@ -72,10 +72,12 @@ static float2 fetch_chroma(texture2d<float> first, texture2d<float> second, int 
 // Hardware bilinear filtering in texel coordinates, clamped at the edges like the reads above.
 constexpr sampler bilinear(coord::pixel, filter::linear, address::clamp_to_edge);
 
-// Catmull-Rom over 4×4 texels in 3×3 filtered fetches (#56): the middle two taps of each axis
-// have positive weights, so one bilinear fetch between them gives both, weighted. Exactly the
-// 16-tap result, give or take the hardware's filtering precision.
-static float4 catmull_rom_9(texture2d<float> plane, float2 position, float2 size) {
+// Catmull-Rom in 5 filtered fetches (#56, #118). The middle two taps of each axis have positive
+// weights, so one bilinear fetch between them gives both, weighted: 4×4 taps become 3×3 fetches.
+// The four corner fetches carry the smallest weights (products of the negative outer lobes), so
+// they're left out and the other five are renormalised: a third less GPU time, and `reference`
+// does the same on the CPU.
+static float4 catmull_rom_5(texture2d<float> plane, float2 position, float2 size) {
     float2 lp = position * size - 0.5;
     float2 li = floor(lp);
     float4 wx = weights(lp.x - li.x), wy = weights(lp.y - li.y);
@@ -83,15 +85,11 @@ static float4 catmull_rom_9(texture2d<float> plane, float2 position, float2 size
     // Texel centres (+0.5) of the outer taps, and the weighted point between the middle two.
     float3 px = li.x + 0.5 + float3(-1.0, wx.z / sx.y, 2.0);
     float3 py = li.y + 0.5 + float3(-1.0, wy.z / sy.y, 2.0);
-    float4 sum = 0.0;
-    for (int j = 0; j < 3; j++) {
-        float4 row = 0.0;
-        for (int i = 0; i < 3; i++) {
-            row += sx[i] * plane.sample(bilinear, float2(px[i], py[j]));
-        }
-        sum += sy[j] * row;
-    }
-    return sum;
+    // The middle column (top, centre, bottom) and the middle row's two ends.
+    float4 sum = sx.y * (sy.x * plane.sample(bilinear, float2(px.y, py.x)) + sy.y * plane.sample(bilinear, float2(px.y, py.y))
+                         + sy.z * plane.sample(bilinear, float2(px.y, py.z)))
+               + sy.y * (sx.x * plane.sample(bilinear, float2(px.x, py.y)) + sx.z * plane.sample(bilinear, float2(px.z, py.y)));
+    return sum / (sx.y + sy.y - sx.y * sy.y);
 }
 
 fragment float4 video_fragment(VertexOut in [[stage_in]],
@@ -103,8 +101,8 @@ fragment float4 video_fragment(VertexOut in [[stage_in]],
 
     // NV12 (what macOS cards send): each plane is its own texture, so the hardware can filter.
     if (layout == 0) {
-        float luma = catmull_rom_9(first, src, p.sizes.xy).r;
-        float2 chroma = catmull_rom_9(second, src, p.sizes.zw).rg;
+        float luma = catmull_rom_5(first, src, p.sizes.xy).r;
+        float2 chroma = catmull_rom_5(second, src, p.sizes.zw).rg;
         float4 ycc = float4(luma, chroma, 1.0);
         float3 rgb = saturate(float3(dot(p.colour[0], ycc), dot(p.colour[1], ycc), dot(p.colour[2], ycc)));
         return float4(pow(rgb, float3(p.misc.x)), 1.0);

@@ -71,7 +71,7 @@ pub struct VideoPass {
     // Culling off: Direct3D culls counter-clockwise triangles by default, and the fullscreen
     // triangle's winding is counter-clockwise (Metal doesn't cull, so the shaders share it).
     rasterizer: ID3D11RasterizerState,
-    /// Linear filtering, clamped at the edges: the NV12 path's 9-fetch Catmull-Rom (#56).
+    /// Linear filtering, clamped at the edges: the NV12 path's 5-fetch Catmull-Rom (#56, #118).
     bilinear: ID3D11SamplerState,
 }
 
