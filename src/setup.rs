@@ -106,7 +106,7 @@ pub enum WindowMode {
     /// A normal window with a title bar: close, minimise, maximise, resize.
     #[default]
     Windowed,
-    /// The window's size with no title bar or border, centred on the monitor (Windows only for now).
+    /// The window's size with no title bar or border, centred on the monitor.
     Borderless,
     /// Borderless, covering the whole monitor.
     Fullscreen,
@@ -114,11 +114,7 @@ pub enum WindowMode {
 
 impl WindowMode {
     /// The modes the Window setting offers, in order.
-    pub const OFFERED: &'static [WindowMode] = if cfg!(target_os = "windows") {
-        &[WindowMode::Windowed, WindowMode::Borderless, WindowMode::Fullscreen]
-    } else {
-        &[WindowMode::Windowed, WindowMode::Fullscreen]
-    };
+    pub const OFFERED: &'static [WindowMode] = &[WindowMode::Windowed, WindowMode::Borderless, WindowMode::Fullscreen];
 
     pub fn label(self) -> &'static str {
         match self {

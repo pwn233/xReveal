@@ -1,9 +1,10 @@
-//! Screens on macOS: their names, and moving the window onto one (GPUI has no call for either).
+//! Screens on macOS: their names, moving the window onto one, and Borderless (GPUI has no call for
+//! any of them).
 
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSScreen, NSView};
-use objc2_foundation::{NSNumber, NSPoint, NSRect, NSString};
+use objc2_app_kit::{NSScreen, NSView, NSWindowStyleMask};
+use objc2_foundation::{NSNumber, NSPoint, NSRect, NSSize, NSString};
 
 /// A screen's display ID (GPUI's `DisplayId` on macOS is the same `CGDirectDisplayID`).
 fn display_id(screen: &NSScreen) -> Option<u64> {
@@ -47,6 +48,65 @@ fn move_now(view: &NSView, display: u64) {
     frame.size.height = frame.size.height.min(area.size.height);
     let origin = NSPoint::new(area.origin.x + (area.size.width - frame.size.width) / 2.0, area.origin.y + (area.size.height - frame.size.height) / 2.0);
     window.setFrame_display(NSRect::new(origin, frame.size), true);
+}
+
+/// The frame GPUI gives xReveal's window (`main.rs`): a title bar with close, minimise and zoom,
+/// and resizable edges.
+const WINDOWED: NSWindowStyleMask = NSWindowStyleMask::Titled
+    .union(NSWindowStyleMask::Closable)
+    .union(NSWindowStyleMask::Miniaturizable)
+    .union(NSWindowStyleMask::Resizable);
+
+/// Borderless (docs/spec/v1.md §2.2): takes the title bar and border away from the window holding
+/// `view`, keeping its content's size, and centres it on screen `display` (else the one it's on),
+/// shrunk to fit; or gives them back around the same content. A moment later from the main queue,
+/// like [`move_window`].
+pub fn set_borderless(view: &NSView, borderless: bool, display: Option<u64>) {
+    let view = view as *const NSView as usize;
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        // SAFETY: as in `move_window`.
+        let view = unsafe { &*(view as *const NSView) };
+        set_borderless_now(view, borderless, display);
+    });
+}
+
+fn set_borderless_now(view: &NSView, borderless: bool, display: Option<u64>) {
+    let Some(window) = view.window() else { return };
+    let mask = window.styleMask();
+    // Native fullscreen (the green button) is left alone; a window that has its frame keeps it. An
+    // already borderless one is only centred again (Monitor).
+    if mask.contains(NSWindowStyleMask::FullScreen) || (!borderless && mask.contains(NSWindowStyleMask::Titled)) {
+        return;
+    }
+    let content = window.contentRectForFrameRect(window.frame());
+    let on = display.and_then(|d| screens().into_iter().find(|s| display_id(s) == Some(d))).or_else(|| window.screen());
+    let frame = if borderless {
+        window.setStyleMask(NSWindowStyleMask::Borderless);
+        // Centred on what the menu bar and Dock leave of the screen, which would cover the picture.
+        match on.map(|s| s.visibleFrame()) {
+            Some(area) => {
+                let size = NSSize::new(content.size.width.min(area.size.width), content.size.height.min(area.size.height));
+                NSRect::new(NSPoint::new(area.origin.x + (area.size.width - size.width) / 2.0, area.origin.y + (area.size.height - size.height) / 2.0), size)
+            }
+            None => content,
+        }
+    } else {
+        window.setStyleMask(WINDOWED);
+        // The title bar goes above the same content; kept below the menu bar so it can be dragged.
+        let mut frame = window.frameRectForContentRect(content);
+        if let Some(area) = on.map(|s| s.visibleFrame()) {
+            let over = (frame.origin.y + frame.size.height) - (area.origin.y + area.size.height);
+            if over > 0.0 {
+                frame.origin.y -= over;
+            }
+        }
+        frame
+    };
+    window.setFrame_display(frame, true);
+    // A style mask change makes AppKit take the keys and first responder away from the window (as
+    // GPUI's own fullscreen notes): give them back, or Tab, the arrows, F11 and Esc stop working.
+    window.makeKeyAndOrderFront(None);
+    window.makeFirstResponder(Some(view));
 }
 
 /// Turns the window holding `overlay` into a layer over the one holding `owner`: a child window

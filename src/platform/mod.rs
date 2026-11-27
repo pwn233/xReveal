@@ -48,15 +48,21 @@ pub fn move_window(window: raw_window_handle::RawWindowHandle, display: u64) {
     let _ = (window, display);
 }
 
-/// Borderless (docs/spec/v1.md §2.2, Windows only for now): takes the title bar and border away
+/// Borderless (docs/spec/v1.md §2.2): takes the title bar and border away
 /// from `window`, keeping its content's size, and centres it on screen `display` (else the one it's
 /// on); or gives them back. GPUI has no call for it. Call it outside a GPUI update.
 pub fn set_borderless(window: raw_window_handle::RawWindowHandle, borderless: bool, display: Option<u64>) {
+    #[cfg(target_os = "macos")]
+    if let raw_window_handle::RawWindowHandle::AppKit(appkit) = window {
+        // SAFETY: GPUI's raw window handle on macOS is a valid NSView for the window's lifetime.
+        let view: &objc2_app_kit::NSView = unsafe { appkit.ns_view.cast().as_ref() };
+        macos::screens::set_borderless(view, borderless, display);
+    }
     #[cfg(target_os = "windows")]
     if let raw_window_handle::RawWindowHandle::Win32(win32) = window {
         windows::screens::set_borderless(::windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _), borderless, display);
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (window, borderless, display);
 }
 
