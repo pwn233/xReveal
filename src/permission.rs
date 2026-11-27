@@ -6,7 +6,6 @@ pub enum Access {
     #[default]
     Granted,
     /// Never asked: the Welcome screen explains, then asks.
-    #[cfg_attr(target_os = "windows", expect(dead_code, reason = "Windows never asks: access is on or blocked"))]
     NotAsked,
     Denied,
 }
@@ -24,7 +23,7 @@ pub use crate::platform::macos::access::{access, open_settings, request};
 /// won't ask again, so it opens the privacy settings instead.
 pub fn allow(privacy: Privacy) {
     match access(privacy) {
-        Access::NotAsked => request(),
+        Access::NotAsked => request(privacy),
         Access::Denied => open_settings(privacy),
         Access::Granted => {}
     }
@@ -36,7 +35,7 @@ pub fn access(_privacy: Privacy) -> Access {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn request() {}
+pub fn request(_privacy: Privacy) {}
 
 /// Opens Windows' privacy settings for the camera or microphone.
 #[cfg(not(target_os = "macos"))]

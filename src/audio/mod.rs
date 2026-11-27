@@ -59,6 +59,13 @@ impl Sound {
         self.pipeline = None;
         self.card = card.cloned();
         self.seen_underruns = 0;
+        // Without Microphone access, opening an input would make macOS ask, on the calling (main)
+        // thread, which hangs the app until the prompt is answered. After "Continue without sound"
+        // (#143) nothing plays; the sound starts once access is given (the app restarts it then).
+        if crate::permission::access(crate::permission::Privacy::Microphone) != crate::permission::Access::Granted {
+            self.notice = None;
+            return;
+        }
         let inputs = pipeline::inputs();
         self.paired = card.and_then(|c| pipeline::paired_input(c, &inputs));
         let chosen = setup.audio.input.clone().filter(|id| inputs.iter().any(|d| &d.id == id));

@@ -8,7 +8,7 @@ use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::permission::Privacy;
+use crate::permission::{Access, Privacy};
 use crate::theme::Palette;
 use crate::video::signal::Signal;
 
@@ -19,8 +19,9 @@ pub enum Screen {
     Picture,
     /// A capture just opened; black until its first frame.
     Starting,
-    /// macOS: camera access not given yet (`denied` once the person said no).
-    Permission { denied: bool },
+    /// macOS: the first screen's Camera and Microphone cards (#143), until Camera is allowed and
+    /// Microphone is allowed or skipped.
+    Permission { camera: Access, microphone: Access },
     /// Windows: the privacy switch blocks camera access for desktop apps.
     Blocked,
     /// No input on screen: none chosen yet, or the remembered one isn't plugged in. Settings
@@ -40,8 +41,11 @@ pub type SettingsHandler = Rc<dyn Fn(Privacy, &mut Window, &mut App)>;
 #[derive(Clone)]
 pub struct Actions {
     pub pick_another: Handler,
-    pub allow: Handler,
+    /// A card's button: ask for that access, or open its settings once turned off.
+    pub allow: SettingsHandler,
     pub open_settings: SettingsHandler,
+    /// **Continue without sound** (#143).
+    pub skip_sound: Handler,
 }
 
 impl Screen {
@@ -92,16 +96,8 @@ impl Screen {
     fn words(&self) -> Option<(IconName, String, String)> {
         Some(match self {
             Screen::Picture | Screen::Starting => return None,
-            Screen::Permission { denied: false } => (
-                IconName::CameraOff,
-                "Allow camera and microphone".into(),
-                "xReveal needs Camera access for the picture and Microphone access for the sound. macOS will ask twice.".into(),
-            ),
-            Screen::Permission { denied: true } => (
-                IconName::CameraOff,
-                "Camera access is off".into(),
-                "xReveal can't show the picture without it. Turn on xReveal under Privacy & Security › Camera, then come back here.".into(),
-            ),
+            // Its own layout (see `access_cards`).
+            Screen::Permission { .. } => return None,
             Screen::Blocked => (
                 IconName::CameraOff,
                 "Windows is blocking camera access for desktop apps".into(),
@@ -125,6 +121,9 @@ impl Screen {
 
     /// The centred message, or `None` for the picture. `pal` is a dark palette: these sit on black.
     pub fn render(&self, pal: Palette, actions: &Actions) -> Option<AnyElement> {
+        if let Screen::Permission { camera, microphone } = *self {
+            return Some(access_cards(camera, microphone, pal, actions));
+        }
         let (icon, title, hint) = self.words()?;
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div()
@@ -142,14 +141,9 @@ impl Screen {
                 .child(label)
         };
         let below: Option<AnyElement> = match self {
-            Screen::Permission { denied: false } => {
-                let allow = actions.allow.clone();
-                Some(button("allow-access", "Allow access", true).on_click(move |_, w, cx| allow(w, cx)).into_any_element())
-            }
-            Screen::Permission { denied: true } | Screen::Blocked => {
+            Screen::Blocked => {
                 let open = actions.open_settings.clone();
-                let label = if matches!(self, Screen::Blocked) { "Open Windows settings" } else { "Open System Settings" };
-                Some(button("open-settings", label, false).on_click(move |_, w, cx| open(Privacy::Camera, w, cx)).into_any_element())
+                Some(button("open-settings", "Open Windows settings", false).on_click(move |_, w, cx| open(Privacy::Camera, w, cx)).into_any_element())
             }
             Screen::NoCard { .. } | Screen::Unplugged { .. } | Screen::Busy { .. } => {
                 let pick = actions.pick_another.clone();
@@ -182,6 +176,92 @@ impl Screen {
                 .into_any_element(),
         )
     }
+}
+
+/// The first screen on macOS (#143, docs/spec/v1.md §2.1): a card each for Camera (needed for the
+/// picture) and Microphone (optional), side by side, each with its status and its own button, and
+/// **Continue without sound** once Camera is allowed.
+fn access_cards(camera: Access, microphone: Access, pal: Palette, actions: &Actions) -> AnyElement {
+    let card = |privacy: Privacy, access: Access| {
+        let (icon, name, tag, why) = match privacy {
+            Privacy::Camera => (IconName::Camera, "Camera", "Needed", "For the picture from your capture card."),
+            Privacy::Microphone => (IconName::Mic, "Microphone", "Optional", "For the card's sound. You can play without it."),
+        };
+        let allow = actions.allow.clone();
+        let primary = privacy == Privacy::Camera && access == Access::NotAsked;
+        let granted = access == Access::Granted;
+        // The button says where it stands: Allowed once given (and does nothing then).
+        let label = match access {
+            Access::Granted => "Allowed",
+            Access::Denied => "Open System Settings",
+            Access::NotAsked => "Allow access",
+        };
+        div()
+            .w(px(220.))
+            .p_4()
+            .rounded(px(12.))
+            .bg(pal.raised)
+            .border_1()
+            .border_color(if access == Access::Granted { pal.accent_line } else { pal.line })
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().flex().items_center().justify_between().child(Icon::new(icon).size_6().text_color(pal.text)).child(div().text_xs().text_color(pal.muted).child(tag)))
+            .child(div().text_base().font_weight(FontWeight::MEDIUM).text_color(pal.text).child(name))
+            .child(div().text_sm().line_height(px(19.)).text_color(pal.secondary).child(why))
+            .child(
+                div()
+                    .id(match privacy {
+                        Privacy::Camera => "allow-camera",
+                        Privacy::Microphone => "allow-microphone",
+                    })
+                    .mt_1()
+                    .h(px(30.))
+                    .rounded(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .text_sm()
+                    .when(granted, |d| d.bg(pal.accent_fill).border_1().border_color(pal.accent_line).text_color(pal.accent).child(Icon::new(IconName::Check).size_4()))
+                    .when(primary, |d| d.cursor_pointer().bg(pal.accent).text_color(pal.deep).hover(|d| d.opacity(0.9)))
+                    .when(!primary && !granted, |d| d.cursor_pointer().bg(pal.raised).border_1().border_color(pal.line).text_color(pal.text).hover(|d| d.bg(pal.raised_hover)))
+                    .child(label)
+                    .when(!granted, |d| d.on_click(move |_, w, cx| allow(privacy, w, cx))),
+            )
+    };
+    let skip = actions.skip_sound.clone();
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p_8()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_4()
+                .text_center()
+                .child(div().text_lg().font_weight(FontWeight::MEDIUM).text_color(pal.text).child("Let xReveal use your capture card"))
+                .child(div().text_sm().text_color(pal.secondary).child("macOS asks once for each. You can change them later in System Settings."))
+                .child(div().flex().flex_wrap().justify_center().gap_3().child(card(Privacy::Camera, camera)).child(card(Privacy::Microphone, microphone)))
+                .when(camera == Access::Granted && microphone != Access::Granted, |d| {
+                    d.child(
+                        div()
+                            .id("skip-sound")
+                            .text_sm()
+                            .text_color(pal.secondary)
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(pal.text))
+                            .child("Continue without sound")
+                            .on_click(move |_, w, cx| skip(w, cx)),
+                    )
+                }),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]

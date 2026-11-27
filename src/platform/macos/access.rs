@@ -1,5 +1,5 @@
-//! Camera and Microphone permission on macOS (docs/spec/v1.md §2.1): read the status, ask for both
-//! (macOS shows its two prompts one after the other), and open the matching privacy page.
+//! Camera and Microphone permission on macOS (docs/spec/v1.md §2.1): read the status, ask for one
+//! (#143: each has its own button), and open the matching privacy page.
 
 use block2::RcBlock;
 use objc2::runtime::Bool;
@@ -25,15 +25,12 @@ pub fn access(privacy: Privacy) -> Access {
     }
 }
 
-/// Asks for Camera, then Microphone once the first prompt is answered. Returns at once; the
-/// answers show up in [`access`].
-pub fn request() {
-    let (Some(video), Some(audio)) = (media(Privacy::Camera), media(Privacy::Microphone)) else { return };
-    let then_microphone = RcBlock::new(move |_granted: Bool| {
-        let done = RcBlock::new(|_granted: Bool| {});
-        unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(audio, &done) };
-    });
-    unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(video, &then_microphone) };
+/// Asks for `privacy` (macOS shows its prompt once, ever). Returns at once; the answer shows up
+/// in [`access`].
+pub fn request(privacy: Privacy) {
+    let Some(media) = media(privacy) else { return };
+    let done = RcBlock::new(|_granted: Bool| {});
+    unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &done) };
 }
 
 /// Opens System Settings › Privacy & Security on the Camera or Microphone page.
