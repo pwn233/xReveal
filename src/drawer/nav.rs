@@ -7,6 +7,7 @@ use gpui_kit::component::slider::SliderState;
 use gpui_kit::*;
 
 use super::{DrawerEvent, SettingsDrawer, Tab, TargetRatio, preset_label};
+use crate::permission::{Access, Privacy};
 use crate::setup::{Accent, Corner, Density, DrawerSide, Look, StatsBox, ThemeChoice, WindowMode};
 use crate::source;
 use crate::video::picture::{Choice, ColourRange, ColourSpace, FillMode, PictureSettings};
@@ -118,19 +119,24 @@ impl SettingsDrawer {
                 let format = current.and_then(|(_, f)| self.formats.iter().position(|c| c == f)).unwrap_or(0);
                 // "None" first, then the inputs.
                 let card = current.and_then(|(i, _)| self.card_ids.iter().position(|c| c == &i.os_id)).map_or(0, |i| i + 1);
-                rows.push(row("Input", 1, Nav::Choice { len: self.card_ids.len() + 1, at: card, pick: |this, i, _, cx| {
-                    if i == 0 {
-                        if this.model.current.is_some() {
-                            cx.emit(DrawerEvent::NoInput);
+                if self.model.camera != Access::Granted {
+                    // Locked without Camera access (#113): Enter asks for it.
+                    rows.push(row("Input", 1, Nav::Press(|_, _, cx| cx.emit(DrawerEvent::Allow(Privacy::Camera)))));
+                } else {
+                    rows.push(row("Input", 1, Nav::Choice { len: self.card_ids.len() + 1, at: card, pick: |this, i, _, cx| {
+                        if i == 0 {
+                            if this.model.current.is_some() {
+                                cx.emit(DrawerEvent::NoInput);
+                            }
+                        } else if let Some(os_id) = this.card_ids.get(i - 1).cloned()
+                            && this.model.current.as_ref().map(|(c, _)| &c.os_id) != Some(&os_id)
+                            && let Some(info) = this.model.sources.iter().find(|s| s.identity.os_id == os_id)
+                            && let Some(format) = source::default_choice(&info.formats)
+                        {
+                            cx.emit(DrawerEvent::Source(os_id, format));
                         }
-                    } else if let Some(os_id) = this.card_ids.get(i - 1).cloned()
-                        && this.model.current.as_ref().map(|(c, _)| &c.os_id) != Some(&os_id)
-                        && let Some(info) = this.model.sources.iter().find(|s| s.identity.os_id == os_id)
-                        && let Some(format) = source::default_choice(&info.formats)
-                    {
-                        cx.emit(DrawerEvent::Source(os_id, format));
-                    }
-                } }));
+                    } }));
+                }
                 rows.push(row("Video format", 2, Nav::Choice { len: self.formats.len(), at: format, pick: |this, i, _, cx| {
                     if let Some(format) = this.formats.get(i).copied()
                         && let Some((identity, current)) = this.model.current.clone()
@@ -268,14 +274,19 @@ impl SettingsDrawer {
             Tab::Audio => {
                 let audio = &self.model.audio;
                 let input = audio.input.as_ref().and_then(|id| audio.inputs.iter().position(|d| &d.id == id)).unwrap_or(0);
-                rows.push(row("Input", 0, Nav::Choice { len: audio.inputs.len(), at: input, pick: |this, i, _, cx| {
-                    let Some(device) = this.model.audio.inputs.get(i) else { return };
-                    let chosen = (this.model.audio.paired.as_ref() != Some(&device.id)).then(|| device.id.clone());
-                    this.model.audio.input = Some(device.id.clone());
-                    this.model.audio.chosen_input = chosen.clone();
-                    cx.emit(DrawerEvent::AudioInput(chosen));
-                    cx.notify();
-                } }));
+                if self.model.microphone != Access::Granted {
+                    // Locked without Microphone access (#113): Enter asks for it.
+                    rows.push(row("Input", 0, Nav::Press(|_, _, cx| cx.emit(DrawerEvent::Allow(Privacy::Microphone)))));
+                } else {
+                    rows.push(row("Input", 0, Nav::Choice { len: audio.inputs.len(), at: input, pick: |this, i, _, cx| {
+                        let Some(device) = this.model.audio.inputs.get(i) else { return };
+                        let chosen = (this.model.audio.paired.as_ref() != Some(&device.id)).then(|| device.id.clone());
+                        this.model.audio.input = Some(device.id.clone());
+                        this.model.audio.chosen_input = chosen.clone();
+                        cx.emit(DrawerEvent::AudioInput(chosen));
+                        cx.notify();
+                    } }));
+                }
                 let output = match &audio.output {
                     None => 0,
                     Some(id) => audio.outputs.iter().position(|d| &d.id == id).map_or(0, |i| i + 1),

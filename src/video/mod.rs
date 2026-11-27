@@ -34,7 +34,42 @@ pub static LAUNCH: OnceLock<Instant> = OnceLock::new();
 /// (docs/spec/v1.md §4) and the CI smoke launch (`XREVEAL_SMOKE_TEST=1`) both read it.
 pub static FIRST_PRESENT: OnceLock<Duration> = OnceLock::new();
 
+/// Launch → Camera access granted, when xReveal had to wait for it (#113): the wait is the
+/// person's, not xReveal's, so the performance box counts from the grant instead.
+pub static ACCESS_GRANTED: OnceLock<Duration> = OnceLock::new();
+
 /// Records the first present; later calls do nothing.
 pub fn mark_first_present() {
     let _ = FIRST_PRESENT.set(LAUNCH.get().map_or(Duration::ZERO, Instant::elapsed));
+}
+
+/// Camera access came during this run, before any picture: time the picture from now.
+pub fn mark_access_granted() {
+    if FIRST_PRESENT.get().is_none() {
+        let _ = ACCESS_GRANTED.set(LAUNCH.get().map_or(Duration::ZERO, Instant::elapsed));
+    }
+}
+
+/// How long the first picture took, and from what: launch, or the Camera access granted after it.
+pub fn time_to_picture(first: Option<Duration>, granted: Option<Duration>) -> Option<(&'static str, Duration)> {
+    let first = first?;
+    Some(match granted {
+        Some(granted) => ("access → picture", first.saturating_sub(granted)),
+        None => ("launch → picture", first),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::time_to_picture;
+    use std::time::Duration;
+
+    #[test]
+    fn a_wait_for_camera_access_isnt_counted_as_launch_time() {
+        let ms = Duration::from_millis;
+        assert_eq!(time_to_picture(None, None), None, "no picture yet");
+        assert_eq!(time_to_picture(Some(ms(430)), None), Some(("launch → picture", ms(430))));
+        // Seen on the MacBook: 483 s "launch → picture" after waiting on the access prompt.
+        assert_eq!(time_to_picture(Some(ms(483_671)), Some(ms(483_200))), Some(("access → picture", ms(471))));
+    }
 }
