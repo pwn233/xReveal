@@ -277,9 +277,11 @@ impl XReveal {
         self.watch_access(window, cx);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let screen = 'screen: {
+            // The first screen stays until Camera is allowed and Microphone is allowed or skipped (#143).
             let camera = permission::access(Privacy::Camera);
-            if camera != Access::Granted {
-                break 'screen Screen::Permission { denied: camera == Access::Denied };
+            let microphone = permission::access(Privacy::Microphone);
+            if camera != Access::Granted || (microphone != Access::Granted && !self.store.setup.sound_skipped) {
+                break 'screen Screen::Permission { camera, microphone };
             }
             let Some(video) = &mut self.video else { return };
             // The device's own settings window (Windows): its stream may be closed while it's open.
@@ -439,15 +441,22 @@ impl XReveal {
     fn screen_actions(&self, cx: &mut Context<Self>) -> Actions {
         let this = cx.entity().downgrade();
         let b = this.clone();
+        let c = this.clone();
         Actions {
             pick_another: std::rc::Rc::new(move |window, cx| {
                 let _ = this.update(cx, |this, cx| this.pick_another_card(window, cx));
             }),
-            allow: std::rc::Rc::new(move |window, cx| {
-                permission::request();
+            allow: std::rc::Rc::new(move |privacy, window, cx| {
+                permission::allow(privacy);
                 let _ = b.update(cx, |this, cx| this.watch_signal(window, cx));
             }),
             open_settings: std::rc::Rc::new(|privacy, _, _| permission::open_settings(privacy)),
+            skip_sound: std::rc::Rc::new(move |window, cx| {
+                let _ = c.update(cx, |this, cx| {
+                    this.store.update(|s| s.sound_skipped = true);
+                    this.watch_signal(window, cx);
+                });
+            }),
         }
     }
 
