@@ -109,7 +109,7 @@ fn picture(this: &mut Drawer, cx: &mut Cx, change: impl FnOnce(&mut PictureSetti
 }
 
 impl SettingsDrawer {
-    /// The rows of the tab on show, top to bottom, ending with Reset all.
+    /// The rows of the tab on show, top to bottom.
     pub(super) fn nav_rows(&self) -> Vec<Row> {
         let mut rows = vec![Row { title: self.tab.label(), section: None, nav: Nav::Tabs }];
         let p = self.model.picture;
@@ -364,15 +364,6 @@ impl SettingsDrawer {
                 } }));
             }
         }
-        rows.push(Row { title: "Reset all settings", section: None, nav: Nav::Press(|this, _, cx| {
-            if this.confirm_reset {
-                this.confirm_reset = false;
-                cx.emit(DrawerEvent::ResetAll);
-            } else {
-                this.confirm_reset = true;
-            }
-            cx.notify();
-        }) });
         // Settings locked for want of access (#146): ←/→ do nothing, Enter asks for it.
         let locked: &[(&str, Privacy)] = match self.tab {
             Tab::Source if self.model.camera != Access::Granted => &[("Video format", Privacy::Camera), ("Buffering", Privacy::Camera), ("Device settings…", Privacy::Camera)],

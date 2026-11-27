@@ -1315,32 +1315,8 @@ impl XReveal {
                 permission::allow(privacy);
                 self.watch_access(window, cx);
             }
-            DrawerEvent::ResetAll => self.reset_all_settings(window, cx),
         }
         cx.notify();
-    }
-
-    /// Reset all settings (docs/spec/v1.md §2.3): forget everything and start as on first run.
-    fn reset_all_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mode = self.store.setup.window_mode;
-        if let Err(error) = self.store.reset_all() {
-            self.status = format!("Couldn't reset settings: {error}");
-        }
-        // Back to a normal window, the default.
-        if mode != self.store.setup.window_mode {
-            self.store.update(|s| s.window_mode = mode);
-            self.set_window_mode(WindowMode::default(), window, cx);
-        }
-        // Everything forgotten: back to the Welcome screen (docs/spec/v1.md §2.3).
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        if let Some(video) = &mut self.video {
-            video.forget();
-        }
-        self.sound.stop();
-        self.unplugged = false;
-        self.set_drawer_open(false, window, cx);
-        self.refresh_drawer(window, cx);
-        self.watch_signal(window, cx);
     }
 
     /// Switches to another Source or Video format: the picture restarts briefly, with a notice

@@ -469,14 +469,6 @@ pub fn save(path: &Path, setup: &Setup) -> io::Result<()> {
     std::fs::rename(&temporary, path)
 }
 
-/// Reset all settings: forget the Remembered setup and every Source. The next launch is a first run.
-pub fn reset(path: &Path) -> io::Result<()> {
-    match std::fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
-    }
-}
-
 /// The Remembered setup in memory, saved in the background as it changes.
 pub struct Store {
     path: Option<PathBuf>,
@@ -522,20 +514,6 @@ impl Store {
             autosave.flush();
         }
         self.autosave = self.path.clone().map(|p| Autosave::new(p, Duration::from_secs(1)));
-    }
-
-    /// Reset all settings (docs/spec/v1.md §2.3): forgets everything; the next launch is a first run.
-    pub fn reset_all(&mut self) -> io::Result<()> {
-        if let Some(autosave) = &mut self.autosave {
-            autosave.flush();
-        }
-        if let Some(path) = &self.path {
-            reset(path)?;
-        }
-        self.setup = Setup::default();
-        self.first_run = true;
-        self.autosave = self.path.clone().map(|p| Autosave::new(p, Duration::from_secs(1)));
-        Ok(())
     }
 }
 
@@ -789,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn store_saves_changes_and_resets() {
+    fn store_saves_changes() {
         let dir = TempDir::new("store");
         let mut store = Store::open_at(Some(dir.file()));
         assert!(store.first_run);
@@ -798,18 +776,6 @@ mod tests {
         let reopened = Store::open_at(Some(dir.file()));
         assert!(!reopened.first_run);
         assert_eq!(reopened.setup.monitor.as_deref(), Some("ultrawide"));
-        store.reset_all().unwrap();
-        assert!(store.first_run);
-        assert!(Store::open_at(Some(dir.file())).first_run);
-    }
-
-    #[test]
-    fn reset_forgets_everything() {
-        let dir = TempDir::new("reset");
-        save(&dir.file(), &sample()).unwrap();
-        reset(&dir.file()).unwrap();
-        assert_eq!(load(&dir.file()), Loaded::FirstRun);
-        reset(&dir.file()).unwrap();
     }
 
     #[test]
