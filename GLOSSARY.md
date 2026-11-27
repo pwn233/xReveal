@@ -99,6 +99,14 @@ A delay, in milliseconds, applied to the sound or the picture so they line up. P
 The single saved set of choices (Source, Video format, Target ratio, Fill mode and Smart stretch strength, Picture adjustments, Audio route, A/V sync offset and the monitor to go fullscreen on) that xReveal applies automatically on launch. There is one, not several named ones.
 _Avoid_: profile, preset, scene
 
+**What's new**
+The notes for the version just installed, shown once on the first launch after xReveal is updated. They come with the app, so showing them needs no network.
+_Avoid_: changelog popup, release notes (alone)
+
+**Update available**
+A newer xReveal release that xReveal has found by asking GitHub, at most once a day and only while **Check for updates** is on. The drawer then offers its notes and an **Update** button, which opens that release's download page.
+_Avoid_: auto-update, new version (alone)
+
 ## Relationships
 
 - A **Source** delivers frames in one **Video format** at a time.
