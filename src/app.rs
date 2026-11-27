@@ -764,79 +764,89 @@ struct Overlays {
 }
 
 impl Overlays {
-    /// The performance box, the colour tip, the one-line status, the one-time notice and the edge
-    /// handle.
-    fn render(&self, window: &mut Window) -> Vec<AnyElement> {
+    /// The performance box, the bars at the top centre (the one-time notice, the echo and blank
+    /// picture hints, the colour tip, and `extra` from the main window), the one-line status and the
+    /// edge handle.
+    fn render(&self, window: &mut Window, extra: Vec<AnyElement>) -> Vec<AnyElement> {
         let pal = theme::palette();
         let panel = |child: Div| child.px_2().py_1().rounded(px(8.)).bg(pal.panel).border_1().border_color(pal.line).text_color(pal.text).text_sm();
+        let bar = |text: SharedString| panel(div().max_w(px(BAR_WIDTH))).child(text).into_any_element();
         let side = self.side;
         let mut out = Vec::new();
-        if let Some(n) = self.notice.clone() {
-            out.push(div().absolute().top_3().w_full().flex().justify_center().child(panel(div()).child(n)).into_any_element());
-        }
         if let Some(status) = self.status.clone() {
             out.push(panel(div()).child(status).into_any_element());
         }
         // The bars at the top centre, one under another when more than one shows.
         let mut bars: Vec<AnyElement> = Vec::new();
+        bars.extend(self.notice.clone().map(|n| bar(n.into())));
         if self.echo {
-            bars.push(panel(div().max_w(px(BAR_WIDTH))).child(crate::audio::echo::MUTED_NOTICE).into_any_element());
+            bars.push(bar(crate::audio::echo::MUTED_NOTICE.into()));
         }
-        if let Some(hint) = self.blank_hint.clone() {
-            bars.push(panel(div().max_w(px(BAR_WIDTH))).child(hint).into_any_element());
-        }
-        if !bars.is_empty() {
-            out.push(div().absolute().top_3().w_full().flex().flex_col().items_center().gap_2().children(bars).into_any_element());
-        }
+        bars.extend(self.blank_hint.clone().map(|hint| bar(hint.into())));
         if self.tip {
-            out.push(
-                div()
-                    .absolute()
-                    .top_3()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .child(panel(div()).child("Blacks look grey? Open settings (Tab) › Colour and set Range to Limited, or set your console's RGB range to Full."))
-                    .into_any_element(),
-            );
+            bars.push(bar("Blacks look grey? Open settings (Tab) › Colour and set Range to Limited, or set your console's RGB range to Full.".into()));
         }
+        bars.extend(extra);
+        let bar_column = |bars: Vec<AnyElement>| div().flex().flex_col().items_center().gap_2().children(bars);
+        let mut bars = Some(bars).filter(|b| !b.is_empty());
         if let Some((stats, rows)) = self.stats.clone() {
             if self.slide.moving() {
                 window.request_animation_frame();
             }
             let shown = 1.0 + self.slide.offset().as_f32() / drawer::width();
             let (side_inset, vertical_inset) = stats_inset(stats.corner, side, shown, !self.drawer_open);
-            let rows = rows.into_iter().map(|(label, value)| {
-                div()
-                    .flex()
-                    .justify_between()
-                    .gap_4()
-                    .child(div().text_color(pal.muted).child(label))
-                    .child(div().text_color(pal.text).child(value))
-            });
             let corner = stats.corner;
-            out.push(
-                div()
-                    .absolute()
-                    .when(corner.is_left(), |d| d.left(px(side_inset)))
-                    .when(!corner.is_left(), |d| d.right(px(side_inset)))
-                    .when(corner.is_top(), |d| d.top(px(vertical_inset)))
-                    .when(!corner.is_top(), |d| d.bottom(px(vertical_inset)))
-                    .px_3()
-                    .py_2()
-                    .rounded(px(10.))
-                    // Its own opacity (Display › Performance box), not the drawer's.
-                    .bg(Hsla { a: stats.opacity(), ..pal.panel })
-                    .border_1()
-                    .border_color(pal.line)
-                    .font_family(theme::mono_family())
-                    .text_xs()
-                    .line_height(px(18.))
-                    .flex()
-                    .flex_col()
-                    .children(rows)
-                    .into_any_element(),
-            );
+            let stats_box = || div()
+                .flex_none()
+                .px_3()
+                .py_2()
+                .rounded(px(10.))
+                // Its own opacity (Display › Performance box), not the drawer's.
+                .bg(Hsla { a: stats.opacity(), ..pal.panel })
+                .border_1()
+                .border_color(pal.line)
+                .font_family(theme::mono_family())
+                .text_xs()
+                .line_height(px(18.))
+                .flex()
+                .flex_col()
+                .children(rows.iter().map(|(label, value)| {
+                    div()
+                        .flex()
+                        .justify_between()
+                        .gap_4()
+                        .child(div().text_color(pal.muted).child(*label))
+                        .child(div().text_color(pal.text).child(value.clone()))
+                }));
+            if corner.is_top() {
+                // In a top corner the box and the bars share the top row, with an invisible copy of
+                // the box on the other side: the bars stay centred in the window and never run
+                // under the box (#114).
+                let area = div().flex_1().min_w_0().flex().justify_center().children(bars.take().map(bar_column));
+                // The box keeps its own inset (it slides aside with the drawer on its side).
+                let slid = px(side_inset - STATS_MARGIN);
+                let row = div().absolute().top(px(vertical_inset)).left(px(STATS_MARGIN)).right(px(STATS_MARGIN)).flex().items_start().gap_3();
+                let twin = stats_box().invisible();
+                let row = if corner.is_left() {
+                    row.child(stats_box().ml(slid)).child(area).child(twin)
+                } else {
+                    row.child(twin).child(area).child(stats_box().mr(slid))
+                };
+                out.push(row.into_any_element());
+            } else {
+                out.push(
+                    stats_box()
+                        .absolute()
+                        .when(corner.is_left(), |d| d.left(px(side_inset)))
+                        .when(!corner.is_left(), |d| d.right(px(side_inset)))
+                        .bottom(px(vertical_inset))
+                        .into_any_element(),
+                );
+            }
+        }
+        if let Some(bars) = bars {
+            let edge = px(STATS_MARGIN);
+            out.push(div().absolute().top(edge).left(edge).right(edge).flex().justify_center().child(bar_column(bars)).into_any_element());
         }
         // The edge handle. A click on it lands on the window's own mouse handler (which opens the
         // drawer), also when it's drawn in the click-through overlay window.
@@ -1234,8 +1244,11 @@ pub fn stats_rows(summary: Option<Summary>, description: &str, to_picture: Optio
 
 /// How far from the window's side the performance box sits: clear of the drawer when it is open
 /// on that side (following its slide), and of the status line below it at the bottom left.
+/// How far the performance box and the top bars keep from the window's edges.
+const STATS_MARGIN: f32 = 12.0;
+
 pub fn stats_inset(corner: crate::setup::Corner, drawer_side: DrawerSide, drawer_shown: f32, status_shown: bool) -> (f32, f32) {
-    const MARGIN: f32 = 12.0;
+    const MARGIN: f32 = STATS_MARGIN;
     let same_side = corner.is_left() == (drawer_side == DrawerSide::Left);
     let side = MARGIN + if same_side { drawer::width() * drawer_shown } else { 0.0 };
     let vertical = MARGIN + if status_shown && corner == crate::setup::Corner::BottomLeft { 40.0 } else { 0.0 };
@@ -1343,24 +1356,30 @@ impl Render for XReveal {
                     .on_click(|_, _, _| permission::open_settings(Privacy::Microphone)),
             )
         });
-        let top_notices = microphone.map(|m| div().absolute().top_3().w_full().flex().flex_col().items_center().gap_2().child(m));
         let taken_over = self.taken_over.map(|format| {
             let card = self.status.split(" · ").next().unwrap_or("The input").to_owned();
-            div().absolute().top_3().w_full().flex().justify_center().child(
-                panel(div().flex().items_center().gap_3())
-                    .child(format!("Another app changed {card} to {}", drawer::readout(format)))
-                    .child(
-                        div()
-                            .id("restore-format")
-                            .text_color(pal.accent)
-                            .cursor_pointer()
-                            .hover(|d| d.text_color(pal.text))
-                            .child("Restore")
-                            .on_click(cx.listener(|this, _, window, cx| this.restore_format(window, cx))),
-                    ),
-            )
+            panel(div().flex().items_center().gap_3())
+                .child(format!("Another app changed {card} to {}", drawer::readout(format)))
+                .child(
+                    div()
+                        .id("restore-format")
+                        .text_color(pal.accent)
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(pal.text))
+                        .child("Restore")
+                        .on_click(cx.listener(|this, _, window, cx| this.restore_format(window, cx))),
+                )
         });
-        let passive = if self.overlays_in_own_window { Vec::new() } else { self.overlays().render(window) };
+        // The notices with buttons live in this window (they're macOS's: microphone access, another
+        // app's format), and join the overlays' bars at the top centre.
+        let notices: Vec<AnyElement> = microphone.into_iter().chain(taken_over).map(IntoElement::into_any_element).collect();
+        let passive = if self.overlays_in_own_window {
+            let edge = px(STATS_MARGIN);
+            let column = (!notices.is_empty()).then(|| div().absolute().top(edge).left(edge).right(edge).flex().flex_col().items_center().gap_2().children(notices).into_any_element());
+            column.into_iter().collect()
+        } else {
+            self.overlays().render(window, notices)
+        };
 
         div()
             .size_full()
@@ -1403,8 +1422,6 @@ impl Render for XReveal {
             .items_end()
             .p_3()
             .children(screen)
-            .children(top_notices)
-            .children(taken_over)
             .children(drawer)
             // After the drawer, so the notch can cover the drawer's border where they meet.
             .children(passive)
@@ -1433,7 +1450,7 @@ impl OverlayWindow {
 
 impl Render for OverlayWindow {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().relative().flex().items_end().p_3().children(self.overlays.render(window))
+        div().size_full().relative().flex().items_end().p_3().children(self.overlays.render(window, Vec::new()))
     }
 }
 
