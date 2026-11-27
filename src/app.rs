@@ -278,7 +278,7 @@ impl XReveal {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let screen = 'screen: {
             let camera = permission::access(Privacy::Camera);
-            if camera != Access::Granted {
+            if camera != Access::Granted || crate::proto_access::base_page_needed() {
                 break 'screen Screen::Permission { denied: camera == Access::Denied };
             }
             let Some(video) = &mut self.video else { return };
@@ -1349,7 +1349,12 @@ impl Render for XReveal {
         let screen_palette = theme::palette_for(&crate::setup::Look { theme: crate::setup::ThemeChoice::Dark, ..self.store.setup.look }, true);
         let backdrop = self.screen.backdrop();
         let actions = self.screen_actions(cx);
-        let screen = self.screen.render(screen_palette, &actions);
+        let screen = if crate::proto_access::active() && matches!(self.screen, Screen::Permission { .. }) {
+            Some(crate::proto_access::base_page(screen_palette))
+        } else {
+            self.screen.render(screen_palette, &actions)
+        };
+        let proto_bar = crate::proto_access::active().then(crate::proto_access::bar);
         // macOS microphone access turned off (with a link, so not in the click-through overlays).
         let microphone_off = self.screen.shows_picture() && permission::access(Privacy::Microphone) == Access::Denied;
         let microphone = microphone_off.then(|| {
@@ -1432,6 +1437,7 @@ impl Render for XReveal {
             .children(drawer)
             // After the drawer, so the notch can cover the drawer's border where they meet.
             .children(passive)
+            .children(proto_bar)
     }
 }
 

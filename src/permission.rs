@@ -17,11 +17,25 @@ pub enum Privacy {
 }
 
 #[cfg(target_os = "macos")]
-pub use crate::platform::macos::access::{access, open_settings, request};
+pub use crate::platform::macos::access::{open_settings, request};
+
+/// PROTOTYPE (#134): faked while the access-boxes prototype runs.
+#[cfg(target_os = "macos")]
+pub fn access(privacy: Privacy) -> Access {
+    crate::proto_access::access(privacy).unwrap_or_else(|| crate::platform::macos::access::access(privacy))
+}
 
 /// What an **Allow access** button does (#113): asks, when macOS hasn't asked yet; once it has, it
 /// won't ask again, so it opens the privacy settings instead.
 pub fn allow(privacy: Privacy) {
+    if crate::proto_access::active() {
+        if access(privacy) == Access::Denied {
+            open_settings(privacy);
+        } else {
+            crate::proto_access::grant(privacy);
+        }
+        return;
+    }
     match access(privacy) {
         Access::NotAsked => request(),
         Access::Denied => open_settings(privacy),

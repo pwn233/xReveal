@@ -1445,6 +1445,9 @@ fn checkboxes(id: &'static str, items: &[(&str, &str)], on: &[bool], cursor: Opt
 /// device). Before macOS has asked, the button asks; once it has, it won't ask again, so the button
 /// opens the privacy settings.
 fn locked_inputs(privacy: Privacy, access: Access, names: Vec<String>, cx: &mut Context<SettingsDrawer>) -> AnyElement {
+    if let Some(state) = crate::proto_access::state() {
+        return proto_locked(state.variant, privacy, access, names, cx);
+    }
     let pal = theme::palette();
     let label = if access == Access::NotAsked { "Allow access" } else { "Open System Settings" };
     let what = match privacy {
@@ -1576,5 +1579,87 @@ mod tests {
     fn formats_read_like_an_on_screen_menu() {
         assert_eq!(readout(VideoFormat { width: 1280, height: 720, fps: 60.0 }), "1280 × 720 · 60");
         assert_eq!(readout(VideoFormat { width: 1920, height: 1080, fps: 59.94 }), "1920 × 1080 · 60");
+    }
+}
+
+/// PROTOTYPE (#134), throwaway: one button per kind of access per tab, in the variant's style.
+fn proto_locked(variant: usize, privacy: Privacy, access: Access, names: Vec<String>, cx: &mut Context<SettingsDrawer>) -> AnyElement {
+    let pal = theme::palette();
+    let (what, icon) = match privacy {
+        Privacy::Camera => ("Camera", IconName::Camera),
+        Privacy::Microphone => ("Microphone", IconName::Mic),
+    };
+    let label = if access == Access::Denied { "Open System Settings" } else { "Allow access" };
+    let why = match (privacy, access) {
+        (Privacy::Camera, Access::Denied) => "Camera access is off for xReveal, so no input can show.",
+        (Privacy::Camera, _) => "xReveal needs Camera access to show any input.",
+        (Privacy::Microphone, Access::Denied) => "Microphone access is off, so xReveal plays no sound.",
+        (Privacy::Microphone, _) => "Allow the Microphone to hear the input's sound.",
+    };
+    let allow = |id: &'static str, primary: bool| {
+        div()
+            .id(id)
+            .px_3()
+            .py_1()
+            .rounded(px(6.))
+            .text_sm()
+            .cursor_pointer()
+            .when(primary, |d| d.bg(pal.accent).text_color(pal.deep))
+            .when(!primary, |d| d.bg(pal.accent_fill).border_1().border_color(pal.accent_line).text_color(pal.accent))
+            .child(label)
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(DrawerEvent::Allow(privacy))))
+    };
+    let names_list = |pal: crate::theme::Palette| {
+        div().flex().flex_col().gap_1().children(names.iter().map(|n| {
+            div().flex().items_center().gap_2().text_sm().text_color(pal.muted).child(Icon::new(IconName::Lock).size_3()).child(div().child(n.clone()))
+        }))
+    };
+    match variant {
+        // A: a banner card above the locked list.
+        0 => div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .p_3()
+                    .rounded(px(10.))
+                    .bg(pal.raised)
+                    .border_1()
+                    .border_color(pal.line)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().flex().items_center().gap_2().child(Icon::new(icon).size_4().text_color(pal.text)).child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(pal.text).child(format!("{what} access"))))
+                    .child(div().text_xs().text_color(pal.secondary).child(why))
+                    .child(div().flex().child(allow("proto-drawer-allow", true))),
+            )
+            .child(names_list(pal))
+            .into_any_element(),
+        // B: one checklist-style row, the names indented under it.
+        1 => div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(if access == Access::Denied { IconName::CircleX } else { IconName::Circle }).size_4().text_color(if access == Access::Denied { pal.warn } else { pal.muted }))
+                    .child(div().flex_1().text_sm().text_color(pal.text).child(format!("{what}: {}", if access == Access::Denied { "turned off" } else { "not allowed yet" })))
+                    .child(allow("proto-drawer-allow", false)),
+            )
+            .child(div().pl_6().child(names_list(pal)))
+            .into_any_element(),
+        // C: the list stays in place, greyed, with one line and a button under it.
+        _ => div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().p_2().rounded(px(8.)).border_1().border_color(pal.line).opacity(0.6).child(names_list(pal)))
+            .child(div().text_xs().text_color(pal.secondary).child(why))
+            .child(div().flex().child(allow("proto-drawer-allow", false)))
+            .into_any_element(),
     }
 }

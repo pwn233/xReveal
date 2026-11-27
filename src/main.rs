@@ -6,6 +6,8 @@ mod app;
 mod audio;
 mod drawer;
 mod permission;
+// PROTOTYPE (#134), throwaway branch only.
+mod proto_access;
 mod platform;
 mod report;
 mod screens;
