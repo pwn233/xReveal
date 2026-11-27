@@ -253,6 +253,8 @@ impl AssetSource for AppAssets {
             "xreveal/notch/line-right.svg" => Some(include_bytes!("../assets/notch/line-right.svg")),
             "xreveal/notch/fill-left.svg" => Some(include_bytes!("../assets/notch/fill-left.svg")),
             "xreveal/notch/line-left.svg" => Some(include_bytes!("../assets/notch/line-left.svg")),
+            // The GitHub mark in the drawer's footer (Primer Octicons, MIT).
+            "xreveal/github-mark.svg" => Some(include_bytes!("../assets/github-mark.svg")),
             // The arrow under a locked setting's tip (drawer/lock.rs).
             "xreveal/tooltip/arrow-down.svg" => Some(include_bytes!("../assets/tooltip/arrow-down.svg")),
             _ => None,
