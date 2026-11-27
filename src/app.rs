@@ -1788,30 +1788,8 @@ impl DrawerWindow {
             let event = event.clone();
             this.with_main(cx, move |main, window, cx| main.apply(event, window, cx));
         });
-        // Losing focus to another app closes the drawer, so the pop-up never floats over other
-        // apps. A click on the picture moves focus to the main window, which closes it anyway.
-        let blur = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
-            if window.is_window_active() {
-                return;
-            }
-            let (main, main_window, me) = (this.main.clone(), this.main_window, window.window_handle());
-            cx.spawn(async move |_, cx| {
-                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
-                let _ = main_window.update(cx, |_, window, cx| {
-                    let Some(main) = main.upgrade() else { return };
-                    // Only the drawer on screen, and only once focus has left xReveal: a drawer window
-                    // being replaced (Side, Density) loses focus to the new one, which stays open.
-                    let current = main.read(cx).drawer_window.as_ref().is_some_and(|(handle, _)| *handle == me);
-                    let active = me.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false);
-                    if current && !active && !window.is_window_active() {
-                        main.update(cx, |main, cx| main.set_drawer_open(false, window, cx));
-                    }
-                });
-            })
-            .detach();
-        });
         let slide = drawer::Slide::closed().toward(true);
-        Self { drawer, side, slide, focus, main, main_window, _subscriptions: vec![forward, blur] }
+        Self { drawer, side, slide, focus, main, main_window, _subscriptions: vec![forward] }
     }
 
     /// Runs `f` on the main window's view, in the main window. Deferred until this window's own
