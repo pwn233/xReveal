@@ -710,6 +710,12 @@ impl XReveal {
             cx.new(|cx| DrawerWindow::new(model, tab, side, main_entity, main_window, window, cx))
         }) {
             Ok((handle, host)) => {
+                // A first reading for the Input level meter before it's shown (#180): a new
+                // drawer's meter would otherwise say "No sound playing" until the first one, 50 ms
+                // later, and the Audio tab's settings would jump up when that line goes.
+                let peaks = self.sound.take_peaks();
+                let drawer = host.read(cx).drawer.clone();
+                drawer.update(cx, |d, cx| d.set_peaks(peaks, cx));
                 let _ = handle.update(cx, |_, window, cx| {
                     gpui_kit::base::Root::update(window, cx, |root, _, _| root.style().background = Some(transparent_black().into()));
                     if let Some(owner) = owner {
