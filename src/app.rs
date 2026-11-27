@@ -431,19 +431,21 @@ impl XReveal {
 
     fn drawer_model(&self, cx: &App) -> DrawerModel {
         let setup = &self.store.setup;
-        // Screens, primary first, each by the name the OS gives it.
+        // Screens, primary first, each by the name the OS gives it, told apart when two share one.
         let primary = cx.primary_display().map(|d| d.id());
         let mut displays = cx.displays();
         displays.sort_by_key(|d| Some(d.id()) != primary);
-        let monitors = displays
+        let (ids, named): (Vec<String>, Vec<NamedScreen>) = displays
             .iter()
             .enumerate()
             .filter_map(|(i, d)| {
                 let id = d.uuid().ok()?.to_string();
                 let name = crate::platform::screen_name(u64::from(d.id())).unwrap_or_else(|| format!("Screen {}", i + 1));
-                Some((id, name))
+                let size = d.bounds().size;
+                Some((id, (name, (size.width.as_f32().round() as u32, size.height.as_f32().round() as u32))))
             })
-            .collect();
+            .unzip();
+        let monitors = ids.into_iter().zip(screen_labels(&named)).collect();
         let mut model = DrawerModel {
             picture: setup.picture,
             delay: setup.delay,
@@ -1152,6 +1154,22 @@ pub fn stats_inset(corner: crate::setup::Corner, drawer_side: DrawerSide, drawer
     (side, vertical)
 }
 
+/// A screen's OS name and its size in logical pixels.
+pub type NamedScreen = (String, (u32, u32));
+
+/// Labels for the Monitor setting from each screen's name and size, primary first. Two screens of
+/// the same model share a name, so those get their size too ("Mi monitor · 3440 × 1440"), and a
+/// number if that's the same as well.
+pub fn screen_labels(screens: &[NamedScreen]) -> Vec<String> {
+    fn repeated(labels: &[String], label: &str) -> bool {
+        labels.iter().filter(|l| l.eq_ignore_ascii_case(label)).count() > 1
+    }
+    let names: Vec<String> = screens.iter().map(|(name, _)| name.clone()).collect();
+    let sized: Vec<String> =
+        screens.iter().map(|(name, (w, h))| if repeated(&names, name) { format!("{name} · {w} × {h}") } else { name.clone() }).collect();
+    sized.iter().enumerate().map(|(i, label)| if repeated(&sized, label) { format!("{label} ({})", i + 1) } else { label.clone() }).collect()
+}
+
 /// The placement to remember for a window with outer frame `frame` and content area `content`:
 /// the frame's position with the content's size. GPUI reopens a window with that size as its
 /// content area, so saving the frame's size would grow the window by its title bar every launch.
@@ -1444,8 +1462,20 @@ impl Render for DrawerWindow {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has its own `test` attribute that would replace std's.
-    use super::{DrawerSide, Duration, Summary, content_origin, drawer_area, near_drawer_edge, saved_placement, stats_inset, stats_rows};
+    use super::{DrawerSide, Duration, Summary, content_origin, drawer_area, near_drawer_edge, saved_placement, screen_labels, stats_inset, stats_rows};
     use crate::setup::{Corner, StatsBox};
+
+    #[test]
+    fn screens_of_the_same_model_are_told_apart() {
+        let screen = |name: &str, w, h| (name.to_string(), (w, h));
+        let different = [screen("DELL U2720Q", 3840, 2160), screen("Mi monitor", 3440, 1440)];
+        assert_eq!(screen_labels(&different), ["DELL U2720Q", "Mi monitor"], "names alone when they differ");
+        // Seen on the Windows test PC: two Xiaomi screens, named with different capitals.
+        let same_model = [screen("Mi monitor", 3440, 1440), screen("Mi Monitor", 2560, 1440)];
+        assert_eq!(screen_labels(&same_model), ["Mi monitor · 3440 × 1440", "Mi Monitor · 2560 × 1440"]);
+        let twins = [screen("LG", 2560, 1440), screen("LG", 2560, 1440), screen("Mi monitor", 3440, 1440)];
+        assert_eq!(screen_labels(&twins), ["LG · 2560 × 1440 (1)", "LG · 2560 × 1440 (2)", "Mi monitor"]);
+    }
 
     fn value<'a>(rows: &'a [(&str, String)], label: &str) -> &'a str {
         rows.iter().find(|(l, _)| *l == label).map(|(_, v)| v.as_str()).unwrap_or_else(|| panic!("no {label} row"))
