@@ -71,7 +71,8 @@ impl SettingsDrawer {
             .border_1()
             .border_color(if open { pal.accent_line } else { pal.line })
             .flex()
-            .items_start()
+            // The chevron sits in the middle, also when a long name wraps onto more lines.
+            .items_center()
             .gap_2()
             .cursor_pointer()
             .hover(|d| d.bg(pal.raised_hover))
@@ -84,7 +85,7 @@ impl SettingsDrawer {
                     .text_color(if shown.is_some() { pal.text } else { pal.muted })
                     .child(shown.cloned().unwrap_or_else(|| placeholder.to_owned())),
             )
-            .child(Icon::new(IconName::ChevronDown).size_4().mt(px(1.5)).text_color(pal.muted))
+            .child(Icon::new(IconName::ChevronDown).size_4().flex_none().text_color(pal.muted))
             // Remember where it is, for the list.
             .child(
                 canvas(
