@@ -45,14 +45,7 @@ pub fn dialog(pal: Palette, notes: &[&'static str], scroll: &ScrollHandle, actio
             .child(div().mt(px(7.)).size(px(4.)).flex_none().rounded_full().bg(pal.accent))
             .child(div().flex_1().min_w_0().text_sm().line_height(px(20.)).text_color(pal.text).child(*n))
     });
-    let (offset, max) = (scroll.offset().y, scroll.max_offset().y);
-    let more_above = offset < px(-1.);
-    let more_below = max > px(0.) && -offset < max - px(1.);
-    let fade = |towards_top: bool| {
-        let (angle, edge) = if towards_top { (180., px(0.)) } else { (0., px(0.)) };
-        let d = div().absolute().left_0().right_0().h(px(28.)).bg(linear_gradient(angle, linear_color_stop(pal.raised, 0.), linear_color_stop(pal.raised.opacity(0.), 1.)));
-        if towards_top { d.top(edge) } else { d.bottom(edge) }
-    };
+
     let mut list = div().id("whats-new-notes").max_h(px(LIST_HEIGHT)).overflow_y_scroll().track_scroll(scroll).flex().flex_col().gap_2().pr_1().children(bullets);
     let mut more = div().id("whats-new-github").text_xs().text_color(pal.muted).cursor_pointer().hover(|d| d.text_color(pal.text)).child("Full notes on GitHub");
     let mut ok = div().id("whats-new-ok").px_4().py_1().rounded(px(6.)).bg(pal.accent).text_color(pal.deep).text_sm().cursor_pointer().hover(|d| d.opacity(0.9)).child("Got it");
@@ -83,10 +76,30 @@ pub fn dialog(pal: Palette, notes: &[&'static str], scroll: &ScrollHandle, actio
                 .child(div().text_lg().font_weight(FontWeight::MEDIUM).text_color(pal.text).child(format!("What's new in {VERSION}")))
                 .child(div().text_xs().text_color(pal.muted).child("Just updated")),
         )
-        .child(div().relative().child(list).children(more_above.then(|| fade(true))).children(more_below.then(|| fade(false))))
+        .child(div().relative().child(list).children(scroll_fades(scroll, pal.raised)))
         .child(div().flex().justify_between().items_center().child(more).child(ok));
     // The backdrop dims the picture and takes the clicks: only Got it closes the dialog.
     div().absolute().inset_0().flex().items_center().justify_center().p_6().bg(hsla(0., 0., 0., 0.55)).occlude().child(panel).into_any_element()
+}
+
+/// The fades over a scrolling list on a `background`: at the top once it's scrolled down, at the
+/// bottom while there's more below. Its parent must be `relative`. Shared with the update
+/// button's tip (#145).
+pub fn scroll_fades(scroll: &ScrollHandle, background: Hsla) -> Vec<AnyElement> {
+    let (offset, max) = (scroll.offset().y, scroll.max_offset().y);
+    let fade = |top: bool| {
+        let gradient = linear_gradient(if top { 180. } else { 0. }, linear_color_stop(background, 0.), linear_color_stop(background.opacity(0.), 1.));
+        let d = div().absolute().left_0().right_0().h(px(28.)).bg(gradient);
+        if top { d.top_0() } else { d.bottom_0() }.into_any_element()
+    };
+    let mut out = Vec::new();
+    if offset < px(-1.) {
+        out.push(fade(true));
+    }
+    if max > px(0.) && -offset < max - px(1.) {
+        out.push(fade(false));
+    }
+    out
 }
 
 /// Past this the list scrolls.

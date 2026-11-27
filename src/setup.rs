@@ -59,6 +59,8 @@ pub struct Setup {
     /// The Drawer swipe (#141): a sideways two-finger swipe on a trackpad opens and closes the
     /// Settings drawer. On unless turned off.
     pub drawer_swipe: bool,
+    /// Update available (#145): the switch, when GitHub last answered, and the latest release.
+    pub updates: crate::update::Updates,
 }
 
 impl Default for Setup {
@@ -81,6 +83,7 @@ impl Default for Setup {
             sound_skipped: false,
             whats_new_seen: None,
             drawer_swipe: true,
+            updates: crate::update::Updates::default(),
         }
     }
 }
