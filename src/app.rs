@@ -30,6 +30,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CloseDrawer, Some(KEY_CONTEXT)),
         KeyBinding::new("f3", ToggleStats, Some(KEY_CONTEXT)),
         KeyBinding::new("f11", ToggleFullscreen, Some(KEY_CONTEXT)),
+        // macOS's own fullscreen shortcut: on a Mac keyboard F11 needs fn and defaults to Show Desktop.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, Some(KEY_CONTEXT)),
         // Windows closes the window on Alt+F4 by itself, which quits too.
         KeyBinding::new("cmd-q", Quit, None),
     ]);
