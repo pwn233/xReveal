@@ -13,6 +13,7 @@ mod setup;
 mod source;
 mod theme;
 mod video;
+mod whats_new;
 
 use gpui_kit::*;
 

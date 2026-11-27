@@ -28,10 +28,6 @@ use crate::theme::{self, mono_family};
 use crate::video::picture::{Adjustments, Choice, ColourRange, ColourSpace, FillMode, PictureSettings, TargetRatio};
 use crate::video::timing::DelaySettings;
 
-/// Where xReveal lives, and this version's release page (opened from the drawer's footer).
-const REPOSITORY: &str = "https://github.com/pwn233/xReveal";
-const RELEASE_PAGE: &str = concat!("https://github.com/pwn233/xReveal/releases/tag/v", env!("CARGO_PKG_VERSION"));
-
 /// The drawer's width, which follows Density.
 pub fn width() -> f32 {
     theme::spacing().drawer
@@ -1016,7 +1012,7 @@ impl SettingsDrawer {
                             .cursor_pointer()
                             .hover(|d| d.text_color(pal.text))
                             .child(concat!("xReveal ", env!("CARGO_PKG_VERSION")))
-                            .on_click(|_, _, cx| cx.open_url(RELEASE_PAGE)),
+                            .on_click(|_, _, cx| cx.open_url(crate::whats_new::RELEASE_PAGE)),
                     )
                     .child(
                         div()
@@ -1024,7 +1020,7 @@ impl SettingsDrawer {
                             .group("repository")
                             .cursor_pointer()
                             .child(svg().path("xreveal/github-mark.svg").size(px(14.)).text_color(pal.muted).group_hover("repository", |s| s.text_color(pal.text)))
-                            .on_click(|_, _, cx| cx.open_url(REPOSITORY)),
+                            .on_click(|_, _, cx| cx.open_url(crate::whats_new::REPOSITORY)),
                     ),
             )
             .into_any_element()
