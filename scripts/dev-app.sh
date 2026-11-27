@@ -28,6 +28,8 @@ app="target/dev-app/xReveal.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 cp "target/$profile/xreveal" "$app/Contents/MacOS/xreveal"
+mkdir -p "$app/Contents/Resources"
+cp packaging/macos/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 sed "s/__VERSION__/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
 
 identity="${XREVEAL_SIGN_IDENTITY:-}"

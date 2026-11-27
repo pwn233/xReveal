@@ -1,0 +1,2 @@
+// The Windows exe's icon (#130): Explorer, the taskbar and Alt+Tab use the first icon resource.
+1 ICON "xreveal.ico"
