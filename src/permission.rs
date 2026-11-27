@@ -1,5 +1,5 @@
 //! Camera and Microphone access (docs/spec/v1.md §2.1). macOS asks the person; Windows has no
-//! prompt, only a global privacy switch that makes opening a card fail with `E_ACCESSDENIED`.
+//! prompt, only its privacy switches for desktop apps (#176).
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Access {
@@ -29,7 +29,11 @@ pub fn allow(privacy: Privacy) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: its privacy switches for desktop apps, read as they are now (#176).
+#[cfg(target_os = "windows")]
+pub use crate::platform::windows::access::access;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn access(_privacy: Privacy) -> Access {
     Access::Granted
 }
