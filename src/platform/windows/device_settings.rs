@@ -23,7 +23,20 @@ pub const CLOSED: u8 = 1;
 /// The driver refused while Media Foundation had the device: close the stream and try again.
 pub const REFUSED: u8 = 2;
 
-/// The DirectShow moniker of the device whose path is `link` (MF's symbolic link is the same path).
+/// The device part of an interface path, without the interface class and reference string after it:
+/// `\\?\usb#vid_345f&pid_2131&mi_00#8&9e76000&0&0000` from `…0000#{e5323777-…}\global`.
+fn device_part(path: &str) -> &str {
+    path.rfind("#{").map_or(path, |at| &path[..at])
+}
+
+/// Whether DirectShow's `DevicePath` and Media Foundation's symbolic link name the same device.
+/// They can differ in their interface class: MF names a card that registers as a camera under
+/// `{e5323777-…}` (camera), DirectShow under `{65e8773d-…}` (capture) or `{6994ad05-…}` (video).
+fn same_device(directshow: &str, media_foundation: &str) -> bool {
+    device_part(directshow).eq_ignore_ascii_case(device_part(media_foundation))
+}
+
+/// The DirectShow moniker of the device whose MF symbolic link is `link`.
 unsafe fn moniker(link: &str) -> Option<IMoniker> {
     unsafe {
         let devices: ICreateDevEnum = CoCreateInstance(&CLSID_SystemDeviceEnum, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -41,7 +54,7 @@ unsafe fn moniker(link: &str) -> Option<IMoniker> {
             if bag.Read(w!("DevicePath"), &mut value, None).is_ok() && value.Anonymous.Anonymous.vt == VT_BSTR {
                 let path = value.Anonymous.Anonymous.Anonymous.bstrVal.to_string();
                 let _ = VariantClear(&mut value);
-                if path.eq_ignore_ascii_case(link) {
+                if same_device(&path, link) {
                     return Some(moniker);
                 }
             }
@@ -93,4 +106,28 @@ pub fn open(link: &str, title: &str, owner: HWND, state: Arc<AtomicU8>) {
         state.store(if shown.is_some() { CLOSED } else { REFUSED }, Ordering::SeqCst);
         CoUninitialize();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_device;
+
+    const MF: &str = r"\?\usb#vid_345f&pid_2131&mi_00#8&9e76000&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global";
+
+    #[test]
+    fn a_camera_matches_its_directshow_path_under_another_interface_class() {
+        let capture = r"\?\USB#VID_345F&PID_2131&MI_00#8&9e76000&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+        let video = r"\?\usb#vid_345f&pid_2131&mi_00#8&9e76000&0&0000#{6994ad05-93ef-11d0-a3cc-00a0c9223196}\global";
+        assert!(same_device(capture, MF));
+        assert!(same_device(video, MF));
+        assert!(same_device(MF, MF));
+    }
+
+    #[test]
+    fn another_device_or_interface_does_not_match() {
+        let other_interface = r"\?\usb#vid_345f&pid_2131&mi_02#8&9e76000&0&0002#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+        let other_card = r"\?\usb#vid_345f&pid_2131&mi_00#8&1111111&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+        assert!(!same_device(other_interface, MF));
+        assert!(!same_device(other_card, MF));
+    }
 }
