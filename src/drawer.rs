@@ -985,7 +985,7 @@ impl SettingsDrawer {
             .items_center()
             .gap_3()
             .child(mute)
-            .child(div().flex_1().min_w_0().when(muted, |d| d.opacity(0.4)).child(Slider::new(&self.sliders.volume)))
+            .child(div().flex_1().min_w_0().mx(px(-KNOB_OVERHANG)).px(px(KNOB_OVERHANG)).cursor_pointer().when(muted, |d| d.opacity(0.4)).child(Slider::new(&self.sliders.volume)))
             .child(
                 div()
                     .w(px(44.))
@@ -1353,9 +1353,14 @@ fn slider_control(state: &Entity<SliderState>, value: String) -> Div {
         .flex()
         .items_center()
         .gap_3()
-        .child(div().flex_1().min_w_0().child(Slider::new(state)))
+        // GPUI Kit's slider sets no cursor of its own. The hand also covers the knob, which hangs
+        // [`KNOB_OVERHANG`] past either end of the bar.
+        .child(div().flex_1().min_w_0().mx(px(-KNOB_OVERHANG)).px(px(KNOB_OVERHANG)).cursor_pointer().child(Slider::new(state)))
         .child(div().w(px(56.)).flex_none().text_xs().font_family(mono_family()).text_right().text_color(pal.secondary).child(value))
 }
+
+/// How far GPUI Kit's slider knob (16 px, centred on the value) hangs past either end of its bar.
+const KNOB_OVERHANG: f32 = 8.;
 
 /// The longest label that still fits a third of the drawer ("2 frames", "Limited", "BT.709").
 const SHORT_CHIP: usize = 8;

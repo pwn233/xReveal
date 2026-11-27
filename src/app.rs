@@ -1088,12 +1088,7 @@ impl Overlays {
         // The notch: a tab attached to the edge (the window's, or the drawer's while it's open).
         // Closed, it slides out as the pointer nears the edge and opens the drawer; open, it
         // rides on the drawer's inner edge and closes it. Its clicks land on the main window.
-        if self.handle.visible() || self.slide.visible() {
-            if self.handle.moving() || self.slide.moving() {
-                window.request_animation_frame();
-            }
-            let drawer_edge = if self.slide.visible() { drawer::width() * self.slide.shown() } else { 0.0 };
-            let inset = px(drawer_edge - NOTCH_BODY * (1.0 - self.handle.shown()) - 1.0);
+        if let Some(h) = self.notch(window) {
             // Towards the inside to open; back towards the edge to close.
             let points_right = (side == DrawerSide::Left) != self.drawer_open;
             let (fill, line) = match side {
@@ -1115,24 +1110,33 @@ impl Overlays {
                     gpui_kit::component::Icon::new(if points_right { gpui_kit::assets::IconName::ChevronRight } else { gpui_kit::assets::IconName::ChevronLeft })
                         .size_4(),
                 );
-            let h = div()
-                .absolute()
-                .top(relative(0.5))
-                .mt(px(-NOTCH_HEIGHT / 2.0))
-                .w(px(NOTCH_BODY + 1.0))
-                .h(px(NOTCH_HEIGHT))
-                .cursor_pointer()
+            let h = h
                 // Exactly the drawer's panel, with the outline running on into the drawer's edge.
                 .child(svg().path(fill).absolute().inset_0().size_full().text_color(pal.panel))
                 .child(svg().path(line).absolute().inset_0().size_full().text_color(pal.line))
                 .child(chevron);
-            out.push(match side {
-                DrawerSide::Right => h.right(inset),
-                DrawerSide::Left => h.left(inset),
-            }
-            .into_any_element());
+            out.push(h.into_any_element());
         }
         out
+    }
+
+    /// Where the notch is, empty, with the hand cursor; `None` while it's out of sight. Where the
+    /// overlays have their own click-through window (Windows), that window draws the notch, which
+    /// can't set the cursor there, and the main window, which takes its clicks, places an empty copy.
+    fn notch(&self, window: &mut Window) -> Option<Div> {
+        if !self.handle.visible() && !self.slide.visible() {
+            return None;
+        }
+        if self.handle.moving() || self.slide.moving() {
+            window.request_animation_frame();
+        }
+        let drawer_edge = if self.slide.visible() { drawer::width() * self.slide.shown() } else { 0.0 };
+        let inset = px(drawer_edge - NOTCH_BODY * (1.0 - self.handle.shown()) - 1.0);
+        let h = div().absolute().top(relative(0.5)).mt(px(-NOTCH_HEIGHT / 2.0)).w(px(NOTCH_BODY + 1.0)).h(px(NOTCH_HEIGHT)).cursor_pointer();
+        Some(match self.side {
+            DrawerSide::Right => h.right(inset),
+            DrawerSide::Left => h.left(inset),
+        })
     }
 }
 
@@ -1633,7 +1637,9 @@ impl Render for XReveal {
         let passive = if self.overlays_in_own_window {
             let edge = px(STATS_MARGIN);
             let column = (!notices.is_empty()).then(|| div().absolute().top(edge).left(edge).right(edge).flex().flex_col().items_center().gap_2().children(notices).into_any_element());
-            column.into_iter().collect()
+            // An empty copy of the notch, for its hand cursor (see `Overlays::notch`).
+            let notch = self.overlays().notch(window).map(IntoElement::into_any_element);
+            column.into_iter().chain(notch).collect()
         } else {
             self.overlays().render(window, notices)
         };
