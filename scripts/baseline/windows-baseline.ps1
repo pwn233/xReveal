@@ -58,7 +58,7 @@ public static class XrWin {
       RECT r; GetWindowRect(h, out r); var sb = new StringBuilder(256); GetWindowText(h, sb, 256);
       var mi = new MONITORINFOEX(); mi.cbSize = Marshal.SizeOf(typeof(MONITORINFOEX));
       GetMonitorInfo(MonitorFromWindow(h, 2), ref mi); var m = mi.rcMonitor;
-      bool full = r.L == m.L && r.T == m.T && r.R == m.R && r.B == m.B; if (full) fs = true;
+      bool full = r.L <= m.L && r.T <= m.T && r.R >= m.R && r.B >= m.B; if (full) fs = true;
       list.Add(string.Format("'{0}' {1}x{2} at ({3},{4}) on {5} [{6}]{7}", sb, r.R - r.L, r.B - r.T, r.L, r.T,
         mi.szDevice, Hz(mi.szDevice), full ? " = whole monitor" : ""));
       return true; }, IntPtr.Zero);
@@ -87,7 +87,8 @@ $meta = [ordered]@{
     gpus      = @(Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name) (driver $($_.DriverVersion))" })
     ramGB     = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
     monitors  = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object { "$($_.DeviceName) $([XrWin]::Hz($_.DeviceName))$(if ($_.Primary) {' (primary)'})" })
-    xreveal   = (Get-Item $Exe).VersionInfo.ProductVersion
+    # The exe has no version resource; the installer records its version in the Uninstall key.
+    xreveal   = "$((Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\xReveal' -ErrorAction SilentlyContinue).DisplayVersion) (exe built $((Get-Item $Exe).LastWriteTime.ToString('yyyy-MM-dd HH:mm')))"
     exe       = $Exe
     intervalSeconds = $IntervalSeconds
 }
@@ -156,8 +157,15 @@ while ((Get-Date) -lt $fsEnd) {
 Start-Sleep -Seconds ($IntervalSeconds * 2); Stop-Process $tp -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1
 Write-Host "`n"; Beep
 
-# --- Read the samples: row i is taken at sampleStart + i * interval (typeperf's own timestamps are locale-formatted)
+# --- Read the samples. typeperf's first column is its timestamp ("MM/dd/yyyy HH:mm:ss.fff" on Windows 11);
+# its interval drifts ~14 ms per sample, so row i is NOT sampleStart + i * interval. That is only the fallback.
 $rows = @(Import-Csv $csv)
+$stampCol = $rows[0].PSObject.Properties.Name | Select-Object -First 1
+$meta.stampFallbacks = 0
+function Stamp($s, [int]$i) { $d = [datetime]::MinValue
+    if ([datetime]::TryParseExact("$s".Trim(), 'MM/dd/yyyy HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$d)) { return $d }
+    if ([datetime]::TryParse("$s".Trim(), [ref]$d)) { return $d }
+    $script:meta.stampFallbacks++; $sampleStart.AddSeconds($i * $IntervalSeconds) }
 $meta.rows = $rows.Count
 if ($rows.Count -lt ($SoakMinutes + $FullscreenSettleMinutes + $FullscreenMeasureMinutes) * 60 / $IntervalSeconds) { Write-Warning "Only $($rows.Count) samples in $csv; the run may have been cut short." }
 $cols = $rows[0].PSObject.Properties.Name
@@ -176,30 +184,35 @@ $c = @{
 $gpuCols = ColsLike 'GPU Engine.*Utilization Percentage$'
 $dedCols = ColsLike 'Dedicated Usage$'; $shCols = ColsLike 'Shared Usage$'
 $meta.gpuEngineInstances = $gpuCols.Count
+if (-not $gpuCols.Count) { Write-Warning "No GPU Engine columns in ${csv}: GPU % will be n/a." }
+if (-not $dedCols.Count) { Write-Warning "No GPU Process Memory columns in ${csv}: GPU memory will be n/a." }
 $n = $logical = $meta.logicalCpus
 $samples = for ($i = 0; $i -lt $rows.Count; $i++) {
     $r = $rows[$i]
     $gpuVals = @($gpuCols | ForEach-Object { Num $r.$_ } | Where-Object { -not [double]::IsNaN($_) })
     [pscustomobject]@{
-        t     = $sampleStart.AddSeconds($i * $IntervalSeconds)
+        t     = Stamp $r.$stampCol $i
         cpu   = (Num $r.($c.cpu)) / $logical
         gpu   = if ($gpuVals.Count) { ($gpuVals | Measure-Object -Maximum).Maximum } else { [double]::NaN }
         wspMB = (Num $r.($c.wsp)) / 1MB
         pbMB  = (Num $r.($c.pb)) / 1MB
         wsMB  = (Num $r.($c.ws)) / 1MB
-        dedMB = (@($dedCols | ForEach-Object { Num $r.$_ }) | Measure-Object -Sum).Sum / 1MB
-        shMB  = (@($shCols | ForEach-Object { Num $r.$_ }) | Measure-Object -Sum).Sum / 1MB
+        dedMB = if ($dedCols.Count) { (@($dedCols | ForEach-Object { Num $r.$_ }) | Measure-Object -Sum).Sum / 1MB } else { [double]::NaN }
+        shMB  = if ($shCols.Count) { (@($shCols | ForEach-Object { Num $r.$_ }) | Measure-Object -Sum).Sum / 1MB } else { [double]::NaN }
         handles = Num $r.($c.h)
         threads = Num $r.($c.t)
         cpuMachine = Num $r.($c.cpuMachine)
         utilMachine = if ($c.utilMachine) { Num $r.($c.utilMachine) } else { [double]::NaN }
     }
 }
+# Task Manager's CPU column counts Processor Utility (frequency-scaled), not Processor Time. Estimate it by
+# scaling the process's share by the machine's Utility / Time ratio in the same sample.
+foreach ($s in $samples) { $s | Add-Member cpuUtil $(if ($s.cpuMachine -gt 0) { $s.cpu * $s.utilMachine / $s.cpuMachine } else { [double]::NaN }) }
 function Median([double[]]$v) { $v = @($v | Where-Object { -not [double]::IsNaN($_) } | Sort-Object); if (-not $v.Count) { return [double]::NaN }
     $m = [int][math]::Floor($v.Count / 2); if ($v.Count % 2) { $v[$m] } else { ($v[$m - 1] + $v[$m]) / 2 } }
 function P95([double[]]$v) { $v = @($v | Where-Object { -not [double]::IsNaN($_) } | Sort-Object); if (-not $v.Count) { return [double]::NaN }; $v[[int][math]::Min($v.Count - 1, [math]::Ceiling(0.95 * $v.Count) - 1)] }
 function Between($from, $to) { @($samples | Where-Object { $_.t -ge $from -and $_.t -lt $to }) }
-$fields = 'cpu', 'gpu', 'wspMB', 'pbMB', 'wsMB', 'dedMB', 'shMB', 'handles', 'threads', 'cpuMachine', 'utilMachine'
+$fields = 'cpu', 'cpuUtil', 'gpu', 'wspMB', 'pbMB', 'wsMB', 'dedMB', 'shMB', 'handles', 'threads', 'cpuMachine', 'utilMachine'
 function Phase($s) { $o = [ordered]@{ n = $s.Count }; foreach ($f in $fields) { $o[$f] = Median ($s.$f); $o["${f}P95"] = P95 ($s.$f) }; [pscustomobject]$o }
 
 $win = Phase @(Between $launch.AddMinutes($SoakMinutes - 3) $soakEnd)
@@ -212,7 +225,8 @@ $minutes = for ($m = 0; $m -lt $SoakMinutes; $m++) {
     [pscustomobject]@{ min = $m + 1; n = $s.Count; pbMB = Median ($s.pbMB); wspMB = Median ($s.wspMB); dedMB = Median ($s.dedMB); handles = Median ($s.handles); threads = Median ($s.threads); cpu = Median ($s.cpu); gpu = Median ($s.gpu) }
 }
 # Least-squares line through minutes 11-20 (after the 10-minute warm-up); sigma = spread of the 1-min medians around it
-function Fit($ys) { $xs = 1..$ys.Count; $mx = ($xs | Measure-Object -Average).Average; $my = ($ys | Measure-Object -Average).Average
+function Fit($ys) { $ys = @($ys); if ($ys.Count -lt 3) { return [pscustomobject]@{ slopePerHour = [double]::NaN; sigma = [double]::NaN; range = [double]::NaN } }
+    $xs = 1..$ys.Count; $mx = ($xs | Measure-Object -Average).Average; $my = ($ys | Measure-Object -Average).Average
     $sxy = 0.0; $sxx = 0.0; for ($i = 0; $i -lt $ys.Count; $i++) { $sxy += ($xs[$i] - $mx) * ($ys[$i] - $my); $sxx += ($xs[$i] - $mx) * ($xs[$i] - $mx) }
     $b = $sxy / $sxx; $a = $my - $b * $mx; $ss = 0.0; for ($i = 0; $i -lt $ys.Count; $i++) { $e = $ys[$i] - ($a + $b * $xs[$i]); $ss += $e * $e }
     $sd = [math]::Sqrt($ss / [math]::Max(1, $ys.Count - 2))
@@ -235,10 +249,12 @@ $L.Add("- **xReveal:** $($meta.xreveal); counters from ``$($meta.processSet)``, 
 $L.Add("- **Windowed:** $($meta.windowsWindowed -join '; ')  ")
 $L.Add("- **Fullscreen:** $($meta.windowsFullscreen -join '; ')")
 if ($meta.openedFullscreen) { $L.Add('- Note: xReveal opened in Fullscreen and was switched to Windowed by hand in the first minute.') }
+if ($meta.stampFallbacks) { $L.Add("- Note: $($meta.stampFallbacks) of $($rows.Count) typeperf timestamps didn't parse; those rows were placed by index.") }
 $L.Add(''); $L.Add('## Budgets (medians; p95 in brackets)'); $L.Add('')
 $L.Add('| | Windowed (soak min 18-20) | Fullscreen (last 3 min) | Budget |'); $L.Add('|---|---|---|---|')
 $row = { param($label, $f, $fmt, $unit, $budget) $L.Add("| $label | $(& $fmt $win.$f)$unit ($(& $fmt $win."${f}P95")) | $(& $fmt $full.$f)$unit ($(& $fmt $full."${f}P95")) | $budget |") }
 & $row 'CPU, share of the machine' 'cpu' $f2 '%' '<= 5%'
+& $row 'CPU, scaled to Processor Utility (Task Manager basis, estimate)' 'cpuUtil' $f2 '%' ''
 & $row 'GPU, process (max engine)' 'gpu' $f1 '%' '<= 10%'
 & $row 'Memory: private working set (Task Manager "Memory")' 'wspMB' $f1 ' MB' '<= 100 MB'
 & $row 'Private Bytes (Task Manager "Commit size")' 'pbMB' $f1 ' MB' ''
