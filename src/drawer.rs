@@ -258,7 +258,7 @@ pub struct SettingsDrawer {
     custom_ratio: bool,
     sliders: Sliders,
     /// The selectors: Input (card), Video format, sound Input, Output (see [`chooser`]).
-    choosers: [chooser::Chooser; 4],
+    choosers: [chooser::Chooser; chooser::COUNT],
     /// The selector whose list is open.
     open_chooser: Option<usize>,
     /// The lock warning under the pointer, and where each one is, with the window's width (see [`lock`]).
@@ -607,18 +607,9 @@ impl SettingsDrawer {
         );
         let modes = WindowMode::OFFERED;
         let mode_labels: Vec<&str> = modes.iter().map(|m| m.label()).collect();
-        let window_mode = chips(
-            "window-mode",
-            &mode_labels,
-            modes.iter().position(|m| *m == self.model.window_mode).unwrap_or(0),
-            cx.listener(move |this, i: &usize, _, cx| {
-                if modes[*i] != this.model.window_mode {
-                    this.model.window_mode = modes[*i];
-                    cx.emit(DrawerEvent::WindowMode(modes[*i]));
-                    cx.notify();
-                }
-            }),
-        );
+        // A selector: "Borderless" and "Fullscreen" don't fit a third of the drawer each.
+        let mode_labels: Vec<String> = mode_labels.into_iter().map(str::to_owned).collect();
+        let window_mode = self.chooser_of(chooser::WINDOW, "Window", "Windowed", &mode_labels, modes.iter().position(|m| *m == self.model.window_mode), cx);
         let labels: Vec<&str> = self.model.monitors.iter().map(|(_, label)| label.as_str()).collect();
         let at = self.model.monitor.as_ref().and_then(|m| self.model.monitors.iter().position(|(id, _)| id == m)).unwrap_or(usize::MAX);
         let monitor = chips(
@@ -689,12 +680,9 @@ impl SettingsDrawer {
                 .on_click(cx.listener(move |this, _, _, cx| this.set_look(Look { accent, ..this.model.look }, cx)))
         }));
         let densities = [Density::Compact, Density::Default, Density::Spacious];
-        let density = chips(
-            "density",
-            &["Compact", "Default", "Spacious"],
-            densities.iter().position(|d| *d == look.density).unwrap_or(1),
-            cx.listener(move |this, i: &usize, _, cx| this.set_look(Look { density: densities[*i], ..this.model.look }, cx)),
-        );
+        // A selector, like Window: the three names don't fit a third of the drawer each.
+        let density_labels = ["Compact", "Default", "Spacious"].map(str::to_owned);
+        let density = self.chooser_of(chooser::DENSITY, "Density", "Default", &density_labels, densities.iter().position(|d| *d == look.density), cx);
         let sides = [DrawerSide::Left, DrawerSide::Right];
         let side = chips(
             "side",
@@ -1255,6 +1243,9 @@ fn slider_control(state: &Entity<SliderState>, value: String) -> Div {
         .child(div().w(px(56.)).flex_none().text_xs().font_family(mono_family()).text_right().text_color(pal.secondary).child(value))
 }
 
+/// The longest label that still fits a third of the drawer ("2 frames", "Limited", "BT.709").
+const SHORT_CHIP: usize = 8;
+
 /// How long a control takes to ease into its new state.
 const EASE: Duration = Duration::from_millis(180);
 
@@ -1272,16 +1263,20 @@ fn ease_in(group: &'static str, index: usize, chosen: bool) -> (ElementId, Anima
 }
 
 /// A group of choices that wraps onto a second row instead of overflowing.
+/// Three or fewer short labels share the row in equal widths; otherwise (more of them, or a long
+/// one such as a monitor's name) they wrap, each as wide as its label.
 fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Div {
     let pal = theme::palette();
     let on_pick = std::rc::Rc::new(on_pick);
-    div().w_full().flex().flex_wrap().gap(px(6.)).children(labels.iter().enumerate().map(|(i, label)| {
+    let even = labels.len() <= 3 && labels.iter().all(|l| l.chars().count() <= SHORT_CHIP);
+    div().w_full().flex().when(!even, |d| d.flex_wrap()).gap(px(6.)).children(labels.iter().enumerate().map(|(i, label)| {
         let chosen = i == selected;
         let on_pick = on_pick.clone();
         let chip = div()
             .id((id, i))
             .h(px(theme::spacing().chip))
-            .px_3()
+            .when(even, |d| d.flex_1().min_w_0().px_2().justify_center().whitespace_nowrap())
+            .when(!even, |d| d.px_3())
             .rounded(px(8.))
             .flex()
             .items_center()

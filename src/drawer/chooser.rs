@@ -21,6 +21,9 @@ pub const CARD: usize = 0;
 pub const FORMAT: usize = 1;
 pub const SOUND_INPUT: usize = 2;
 pub const OUTPUT: usize = 3;
+pub const WINDOW: usize = 4;
+pub const DENSITY: usize = 5;
+pub const COUNT: usize = 6;
 
 /// What one selector lists, and which entry is chosen.
 #[derive(Default)]
@@ -42,10 +45,17 @@ impl SettingsDrawer {
     /// Selector `which`, whose ←/→ row is titled `title`, showing `placeholder` when nothing is
     /// chosen. Its list floats under it, over the settings below.
     pub(super) fn chooser(&self, which: usize, title: &'static str, placeholder: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let chooser = &self.choosers[which];
+        self.chooser_of(which, title, placeholder, &chooser.labels, chooser.chosen, cx)
+    }
+
+    /// A selector whose entries come from the caller (Window, Density) rather than the model's
+    /// lists.
+    pub(super) fn chooser_of(&self, which: usize, title: &'static str, placeholder: &'static str, labels: &[String], chosen: Option<usize>, cx: &mut Context<Self>) -> AnyElement {
         let pal = theme::palette();
         let chooser = &self.choosers[which];
         let open = self.open_chooser == Some(which);
-        let shown = chooser.chosen.and_then(|i| chooser.labels.get(i));
+        let shown = chosen.and_then(|i| labels.get(i));
         let width = chooser.width.clone();
         let trigger = div()
             .id(("chooser", which))
@@ -81,8 +91,8 @@ impl SettingsDrawer {
             return trigger.into_any_element();
         }
 
-        let rows = chooser.labels.iter().cloned().enumerate().map(|(i, label)| {
-            let chosen = chooser.chosen == Some(i);
+        let rows = labels.iter().cloned().enumerate().map(|(i, label)| {
+            let chosen = chosen == Some(i);
             div()
                 .id(("chooser-option", which * 1000 + i))
                 .px_2()
