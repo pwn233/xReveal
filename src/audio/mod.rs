@@ -1,5 +1,6 @@
 //! Sound (docs/spec/v1.md §2.7, §3.6): which input and output play, and keeping them playing.
 
+pub mod echo;
 pub mod pacer;
 pub mod pipeline;
 pub mod ring;
@@ -8,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use crate::setup::Setup;
 use crate::source::SourceIdentity;
+pub use echo::DeviceKind;
+use echo::EchoGuard;
 use pipeline::{AudioDevice, AudioPipeline, MAX_BUFFER, Mix};
 
 /// The key `setup.audio_buffers` uses for the system output.
@@ -44,6 +47,10 @@ pub struct Sound {
     card: Option<SourceIdentity>,
     seen_underruns: u64,
     next_try: Option<Instant>,
+    /// The echo guard (#112): who owns the mute while the computer's mic plays to its speakers.
+    echo: EchoGuard,
+    /// The mute the guard just set, for the app to remember.
+    mute_change: Option<bool>,
 }
 
 impl Sound {
@@ -68,10 +75,35 @@ impl Sound {
         let output = setup.audio.output.clone().filter(|id| pipeline::outputs().iter().any(|d| &d.id == id));
         let key = output.clone().unwrap_or_else(|| SYSTEM_OUTPUT.into());
         let buffer = setup.audio_buffers.get(&key).copied();
-        match AudioPipeline::start(&input, output.as_deref(), buffer, mix(setup)) {
+        // The echo guard (#112): the computer's own mic through its own speakers starts muted,
+        // before a single sample plays, unless the person already unmuted this route.
+        let echoing = echo::echoes(pipeline::kind(Some(&input), true), pipeline::kind(output.as_deref(), false));
+        let mut mix = mix(setup);
+        let (muted, change) = self.echo.start((input.clone(), output.clone()), echoing, mix.muted);
+        mix.muted = muted;
+        if change.is_some() {
+            self.mute_change = change;
+        }
+        match AudioPipeline::start(&input, output.as_deref(), buffer, mix) {
             Ok(p) => self.pipeline = Some(p),
             Err(error) => self.notice = Some(error),
         }
+    }
+
+    /// The mute the echo guard just set (once), for the app to remember: so the Audio tab shows it
+    /// and the person can undo it.
+    pub fn take_mute_change(&mut self) -> Option<bool> {
+        self.mute_change.take()
+    }
+
+    /// The person set Mute to `muted`: from now on the mute is theirs (see [`EchoGuard::chosen`]).
+    pub fn mute_chosen(&mut self, muted: bool) {
+        self.echo.chosen(muted);
+    }
+
+    /// The echo guard is holding the sound muted: say why (Audio tab, and a bar over the picture).
+    pub fn echo_muted(&self, setup: &Setup) -> bool {
+        self.pipeline.is_some() && self.echo.holding(setup.audio.muted)
     }
 
     /// The input's loudest samples (left, right) since the last call, or `None` when nothing plays.
@@ -83,6 +115,7 @@ impl Sound {
     pub fn stop(&mut self) {
         self.pipeline = None;
         self.card = None;
+        self.echo.stop();
     }
 
     /// Volume, mute or the A/V sync offset changed.
@@ -141,7 +174,7 @@ impl Sound {
             volume: setup.audio.volume,
             muted: setup.audio.muted,
             latency_hint,
-            notice: self.notice.clone(),
+            notice: if self.echo_muted(setup) { Some(echo::MUTED_NOTICE.into()) } else { self.notice.clone() },
         }
     }
 }
@@ -149,3 +182,4 @@ impl Sound {
 fn mix(setup: &Setup) -> Mix {
     Mix { volume: setup.audio.volume, muted: setup.audio.muted, offset_ms: setup.delay.av_sync_offset_ms }
 }
+

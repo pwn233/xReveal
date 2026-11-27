@@ -80,6 +80,27 @@ pub fn by_serial(card_name: &str, card_serial: Option<&str>, inputs: &[AudioDevi
         .map(|d| d.id.clone())
 }
 
+/// What the input or output with cpal ID `id` is, for the echo guard (#112). `None` is the system
+/// output.
+pub fn kind(id: Option<&str>, input: bool) -> super::echo::DeviceKind {
+    let id = match id {
+        Some(id) => id.to_owned(),
+        None => match find(None, input).and_then(|d| d.id().ok()) {
+            Some(id) => id.id().to_owned(),
+            None => return super::echo::DeviceKind::Other,
+        },
+    };
+    #[cfg(target_os = "macos")]
+    return crate::platform::macos::sound_devices::kind(&id, input);
+    #[cfg(target_os = "windows")]
+    return crate::platform::windows::container::kind_of_endpoint(&id, input);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (id, input);
+        super::echo::DeviceKind::Other
+    }
+}
+
 fn find(id: Option<&str>, input: bool) -> Option<cpal::Device> {
     let host = cpal::default_host();
     match id {
