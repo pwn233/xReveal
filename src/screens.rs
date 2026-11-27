@@ -80,8 +80,10 @@ impl Screen {
     pub fn backdrop(&self) -> Option<Hsla> {
         match self {
             Screen::Picture => None,
-            // The last frame stays on the video surface; dim it (docs/spec/v1.md §2.8).
-            Screen::Unplugged { .. } => Some(Hsla::black().opacity(0.6)),
+            // The last frame stays on the video surface; dim it (docs/spec/v1.md §2.8). On Windows
+            // the surface hides while a screen shows, and the window is see-through under it, so
+            // dimming would show the desktop behind xReveal: plain black there.
+            Screen::Unplugged { .. } if !cfg!(target_os = "windows") => Some(Hsla::black().opacity(0.6)),
             _ => Some(Hsla::black()),
         }
     }
@@ -200,7 +202,9 @@ mod tests {
     #[test]
     fn unplugged_dims_the_last_frame_and_the_rest_are_black() {
         assert!(Screen::Picture.backdrop().is_none());
-        assert_eq!(Screen::Unplugged { card: "x".into() }.backdrop().map(|c| c.a), Some(0.6));
+        // Windows hides the video surface under a screen, so there's no last frame to dim.
+        let unplugged = if cfg!(target_os = "windows") { 1.0 } else { 0.6 };
+        assert_eq!(Screen::Unplugged { card: "x".into() }.backdrop().map(|c| c.a), Some(unplugged));
         assert_eq!(Screen::NoSignal { card: "x".into() }.backdrop().map(|c| c.a), Some(1.0));
         assert_eq!(Screen::no_input(None).backdrop().map(|c| c.a), Some(1.0));
         assert_eq!(Screen::no_card("Couldn't open USB2 Video."), Screen::NoCard { title: "Couldn't open USB2 Video".into() });
