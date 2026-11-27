@@ -86,20 +86,30 @@ pub fn dialog(pal: Palette, notes: &[&'static str], scroll: &ScrollHandle, actio
 /// bottom while there's more below. Its parent must be `relative`. Shared with the update
 /// button's tip (#145).
 pub fn scroll_fades(scroll: &ScrollHandle, background: Hsla) -> Vec<AnyElement> {
-    let (offset, max) = (scroll.offset().y, scroll.max_offset().y);
+    let (top, bottom) = fades(scroll.offset().y.as_f32(), scroll.max_offset().y.as_f32());
     let fade = |top: bool| {
         let gradient = linear_gradient(if top { 180. } else { 0. }, linear_color_stop(background, 0.), linear_color_stop(background.opacity(0.), 1.));
         let d = div().absolute().left_0().right_0().h(px(28.)).bg(gradient);
         if top { d.top_0() } else { d.bottom_0() }.into_any_element()
     };
     let mut out = Vec::new();
-    if offset < px(-1.) {
+    if top {
         out.push(fade(true));
     }
-    if max > px(0.) && -offset < max - px(1.) {
+    if bottom {
         out.push(fade(false));
     }
     out
+}
+
+/// Whether a list scrolled to `offset` (0 at the top, negative further down) of at most `max`
+/// shows its top and bottom fades. GPUI's wheel handler adds the delta without a limit and the next
+/// layout clamps it, so a render in between can see an offset past either end: clamped here first,
+/// or a wheel turn on a list with nothing more to show would flash a fade for a frame.
+fn fades(offset: f32, max: f32) -> (bool, bool) {
+    let max = max.max(0.);
+    let offset = offset.clamp(-max, 0.);
+    (offset < -1., -offset < max - 1.)
 }
 
 /// Past this the list scrolls.
@@ -117,7 +127,7 @@ pub struct Actions {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_heading_for, section};
+    use super::{fades, is_heading_for, section};
 
     const SAMPLE: &str = "# Changelog\n\nIntro.\n\n## 0.2.0 – 2026-12-20\n\n- New thing.\n- Fixed thing.\n\n## 0.1.0 – 2026-11-28\n\n- First.\n";
 
@@ -139,5 +149,20 @@ mod tests {
     #[test]
     fn this_version_has_notes() {
         assert!(!super::notes().is_empty(), "CHANGELOG.md needs a section for this version");
+    }
+
+    #[test]
+    fn fades_show_only_where_there_is_more() {
+        assert_eq!(fades(0., 100.), (false, true), "at the top: more below");
+        assert_eq!(fades(-50., 100.), (true, true), "in the middle: more both ways");
+        assert_eq!(fades(-100., 100.), (true, false), "at the bottom: more above");
+    }
+
+    #[test]
+    fn an_offset_past_either_end_counts_as_that_end() {
+        // A wheel turn before the next layout clamps the offset (#168).
+        assert_eq!(fades(-60., 0.), (false, false), "nothing to scroll: no fade, however far the wheel turned");
+        assert_eq!(fades(-160., 100.), (true, false), "past the bottom");
+        assert_eq!(fades(60., 100.), (false, true), "past the top");
     }
 }
