@@ -28,6 +28,10 @@ use crate::theme::{self, mono_family};
 use crate::video::picture::{Adjustments, Choice, ColourRange, ColourSpace, FillMode, PictureSettings, TargetRatio};
 use crate::video::timing::DelaySettings;
 
+/// Where xReveal lives, and this version's release page (opened from the drawer's footer).
+const REPOSITORY: &str = "https://github.com/pwn233/xReveal";
+const RELEASE_PAGE: &str = concat!("https://github.com/pwn233/xReveal/releases/tag/v", env!("CARGO_PKG_VERSION"));
+
 /// The drawer's width, which follows Density.
 pub fn width() -> f32 {
     theme::spacing().drawer
@@ -983,7 +987,7 @@ impl SettingsDrawer {
                     this.confirm_reset = true;
                     cx.notify();
                 })))
-                .child(link("quit", "Quit xReveal").on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::Quit))))
+                .child(link("quit", "Quit").on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::Quit))))
                 .into_any_element()
         };
         div()
@@ -994,8 +998,35 @@ impl SettingsDrawer {
             .border_color(pal.line)
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_2()
             .child(body)
+            // The version, from Cargo.toml (#129), opening its release page; then the repository.
+            // It's where Update available will show (#145).
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .id("version")
+                            .text_xs()
+                            .font_family(mono_family())
+                            .text_color(pal.muted)
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(pal.text))
+                            .child(concat!("xReveal ", env!("CARGO_PKG_VERSION")))
+                            .on_click(|_, _, cx| cx.open_url(RELEASE_PAGE)),
+                    )
+                    .child(
+                        div()
+                            .id("repository")
+                            .group("repository")
+                            .cursor_pointer()
+                            .child(svg().path("xreveal/github-mark.svg").size(px(14.)).text_color(pal.muted).group_hover("repository", |s| s.text_color(pal.text)))
+                            .on_click(|_, _, cx| cx.open_url(REPOSITORY)),
+                    ),
+            )
             .into_any_element()
     }
 
