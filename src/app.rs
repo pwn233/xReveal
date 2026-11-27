@@ -685,7 +685,9 @@ impl XReveal {
             titlebar: None,
             kind: WindowKind::PopUp,
             focus: true,
-            show: true,
+            // Shown once it has lost the frame Windows gives it (`own_popup`): shown at once, Windows 11
+            // draws its light border round it for a frame, a white line along the drawer's inner edge.
+            show: false,
             is_movable: false,
             is_resizable: false,
             is_minimizable: false,
@@ -715,6 +717,8 @@ impl XReveal {
                     }
                     // Its first frame was drawn before the root was made see-through; draw it again.
                     window.refresh();
+                    // Shows it, with the keys.
+                    window.activate_window();
                 });
                 self.drawer_window = Some((handle, host));
                 self.place_popups(window, cx);
