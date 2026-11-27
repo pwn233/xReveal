@@ -275,6 +275,18 @@ impl XReveal {
     /// it comes back or stops being busy, and notices another app changing its format.
     fn watch_signal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.watch_access(window, cx);
+        // PROTOTYPE (#135), C: the drawer opens by itself on the notes.
+        if let Some(s) = crate::proto_whatsnew::state()
+            && s.variant == 2
+            && s.pending
+            && !self.drawer_open
+        {
+            crate::proto_whatsnew::update(|s| {
+                s.pending = false;
+                s.notes_open = true;
+            });
+            self.set_drawer_open(true, window, cx);
+        }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let screen = 'screen: {
             let camera = permission::access(Privacy::Camera);
@@ -1123,6 +1135,9 @@ impl XReveal {
     }
 
     fn set_drawer_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !open {
+            crate::proto_whatsnew::update(|s| s.notes_open = false);
+        }
         if open && !self.drawer_open {
             // Without a live picture, list the cards again: one may have been plugged in since.
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1379,7 +1394,33 @@ impl Render for XReveal {
         });
         // The notices with buttons live in this window (they're macOS's: microphone access, another
         // app's format), and join the overlays' bars at the top centre.
-        let notices: Vec<AnyElement> = microphone.into_iter().chain(taken_over).map(IntoElement::into_any_element).collect();
+        // PROTOTYPE (#135), A: a top bar that opens the notes in the drawer.
+        let whats_new_bar = crate::proto_whatsnew::state().filter(|s| s.variant == 0 && s.pending).map(|_| {
+            panel(div().flex().items_center().gap_3())
+                .child(format!("xReveal was updated to {}", crate::proto_whatsnew::VERSION))
+                .child(
+                    div()
+                        .id("proto-see-whats-new")
+                        .text_color(pal.accent)
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(pal.text))
+                        .child("See what's new")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            crate::proto_whatsnew::update(|s| {
+                                s.pending = false;
+                                s.notes_open = true;
+                            });
+                            this.set_drawer_open(true, window, cx);
+                        })),
+                )
+                .child(div().id("proto-dismiss-whats-new").text_color(pal.muted).cursor_pointer().child("✕").on_click(|_, w, _| {
+                    crate::proto_whatsnew::update(|s| s.pending = false);
+                    w.refresh();
+                }))
+        });
+        let notices: Vec<AnyElement> = whats_new_bar.into_iter().chain(microphone).chain(taken_over).map(IntoElement::into_any_element).collect();
+        let proto_card = crate::proto_whatsnew::state().filter(|s| s.variant == 1 && s.pending).map(|_| crate::proto_whatsnew::corner_card(pal));
+        let proto_bar = crate::proto_whatsnew::active().then(crate::proto_whatsnew::bar);
         let passive = if self.overlays_in_own_window {
             let edge = px(STATS_MARGIN);
             let column = (!notices.is_empty()).then(|| div().absolute().top(edge).left(edge).right(edge).flex().flex_col().items_center().gap_2().children(notices).into_any_element());
@@ -1432,6 +1473,8 @@ impl Render for XReveal {
             .children(drawer)
             // After the drawer, so the notch can cover the drawer's border where they meet.
             .children(passive)
+            .children(proto_card)
+            .children(proto_bar)
     }
 }
 

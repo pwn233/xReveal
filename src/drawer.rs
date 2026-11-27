@@ -1224,6 +1224,38 @@ impl Render for SettingsDrawer {
             div().w_full().py(px(theme::spacing().section)).when(i > 0, |d| d.border_t_1().border_color(pal.line)).child(row)
         });
         let root = div().size_full().key_context(nav::KEY_CONTEXT).track_focus(&self.focus);
+        // PROTOTYPE (#135): the notes in place of the settings.
+        let content = if crate::proto_whatsnew::notes_open() {
+            crate::proto_whatsnew::drawer_notes(
+                pal,
+                cx.listener(|_, _, _, cx| {
+                    crate::proto_whatsnew::update(|s| s.notes_open = false);
+                    cx.notify();
+                }),
+            )
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(
+                    div()
+                        .id("drawer-pane")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .px_5()
+                        .flex()
+                        .flex_col()
+                        .children(sections),
+                )
+                .child(reset_all)
+                .into_any_element()
+        };
         self.nav_handlers(root, cx)
             .flex()
             // The rail on the outer edge: right of the content when the drawer is on the right.
@@ -1231,28 +1263,7 @@ impl Render for SettingsDrawer {
             .text_color(pal.text)
             .bg(pal.panel)
             .child(rail)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(header)
-                    .child(
-                        div()
-                            .id("drawer-pane")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
-                            .px_5()
-                            .flex()
-                            .flex_col()
-                            .children(sections),
-                    )
-                    .child(reset_all),
-            )
+            .child(content)
     }
 }
 
