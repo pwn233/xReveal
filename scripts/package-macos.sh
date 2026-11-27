@@ -2,8 +2,9 @@
 # Builds the macOS release assets (docs/spec/v1.md §6): xReveal.app, ad-hoc signed, as a .dmg and a
 # .zip, in dist/. Usage: scripts/package-macos.sh [version]   (default: Cargo.toml's version)
 #
-# Signing: ad-hoc unless XREVEAL_SIGN_IDENTITY names a Developer ID, so paid signing and
-# notarisation can slot in here later without changing anything else.
+# Signing (#162): XREVEAL_SIGN_IDENTITY, else xReveal's stable self-signed certificate when it's in
+# the keychain (scripts/make-signing-cert.sh), else ad hoc. A stable identity keeps macOS's Camera and
+# Microphone access across updates. Paid signing and notarisation can slot in here later.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,7 +20,15 @@ cp target/release/xreveal "$app/Contents/MacOS/xreveal"
 mkdir -p "$app/Contents/Resources"
 cp packaging/macos/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 sed "s/__VERSION__/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
-codesign --force --sign "${XREVEAL_SIGN_IDENTITY:--}" "$app"
+identity="${XREVEAL_SIGN_IDENTITY:-}"
+if [[ -z "$identity" ]] && security find-certificate -c "xReveal Self-Signed" >/dev/null 2>&1; then
+  identity="xReveal Self-Signed"
+fi
+if [[ -z "$identity" ]]; then
+  echo "package-macos: no signing identity; ad-hoc signing (macOS will ask for camera/microphone again after updates)." >&2
+  identity="-"
+fi
+codesign --force --sign "$identity" "$app"
 codesign --verify "$app"
 
 base="xReveal-$version-macos-arm64"

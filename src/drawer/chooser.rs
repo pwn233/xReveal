@@ -117,8 +117,10 @@ impl SettingsDrawer {
                 .gap_2()
                 .cursor_pointer()
                 .hover(|d| d.bg(pal.wash))
-                .child(div().w(px(14.)).flex_none().mt(px(2.5)).children(chosen.then(|| Icon::new(IconName::Check).size_3p5().text_color(pal.accent))))
+                // The label lines up with the selector's own text, and the tick with its chevron:
+                // both 13 px in from either edge (border, padding).
                 .child(div().flex_1().min_w_0().text_sm().line_height(px(19.)).text_color(pal.text).child(label))
+                .child(div().w(px(16.)).flex_none().mt(px(2.5)).flex().justify_center().children(chosen.then(|| Icon::new(IconName::Check).size_3p5().text_color(pal.accent))))
                 .on_click(cx.listener(move |this, _, window, cx| this.choose(which, title, i, window, cx)))
         });
         let list = div()
