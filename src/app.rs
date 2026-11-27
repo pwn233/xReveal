@@ -1336,7 +1336,6 @@ impl XReveal {
                     self.open_drawer_window(window, cx);
                 }
             }
-            DrawerEvent::Quit => cx.quit(),
             DrawerEvent::Allow(privacy) => {
                 permission::allow(privacy);
                 self.watch_access(window, cx);

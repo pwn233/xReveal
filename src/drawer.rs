@@ -162,7 +162,6 @@ pub enum DrawerEvent {
     Mute(bool),
     /// An **Allow access** button on a locked input (#113).
     Allow(Privacy),
-    Quit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -565,6 +564,9 @@ impl SettingsDrawer {
             .flex_col()
             .gap_1()
             .children(tabs)
+            // The update button, the GitHub mark and the version, at the bottom.
+            .child(div().flex_1())
+            .child(self.rail_foot(cx))
             .into_any_element()
     }
 
@@ -1013,57 +1015,27 @@ impl SettingsDrawer {
         vec![input.into_any_element(), output.into_any_element(), volume, av_sync]
     }
 
-    /// The footer, one row (#129, #179): the version, from Cargo.toml, opening its release page;
-    /// then Quit, the repository and the update button (#145).
-    fn footer(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The foot of the rail (#129, #186): the GitHub mark, which opens the repository, and the
+    /// update button (#145), whose tip names this version. In the rail, so every tab's settings
+    /// have the drawer's full height.
+    fn rail_foot(&self, cx: &mut Context<Self>) -> AnyElement {
         let pal = theme::palette();
-        let quit = div()
-            .id("quit")
-            .text_sm()
-            .text_color(pal.secondary)
-            .cursor_pointer()
-            .hover(|d| d.text_color(pal.text))
-            .child("Quit")
-            .on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::Quit)));
         div()
             .flex_none()
-            .px_5()
-            .py_4()
-            .border_t_1()
-            .border_color(pal.line)
+            .pb_3()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_2()
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .id("version")
-                            .text_xs()
-                            .font_family(mono_family())
-                            .text_color(pal.muted)
-                            .cursor_pointer()
-                            .hover(|d| d.text_color(pal.text))
-                            .child(concat!("xReveal ", env!("CARGO_PKG_VERSION")))
-                            .on_click(|_, _, cx| cx.open_url(crate::whats_new::RELEASE_PAGE)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(quit)
-                            .child(
-                                div()
-                                    .id("repository")
-                                    .group("repository")
-                                    .cursor_pointer()
-                                    .child(svg().path("xreveal/github-mark.svg").size(px(14.)).text_color(pal.muted).group_hover("repository", |s| s.text_color(pal.text)))
-                                    .on_click(|_, _, cx| cx.open_url(crate::whats_new::REPOSITORY)),
-                            )
-                            .child(self.update_button(cx)),
-                    ),
+                    .id("repository")
+                    .group("repository")
+                    .cursor_pointer()
+                    .child(svg().path("xreveal/github-mark.svg").size(px(14.)).text_color(pal.muted).group_hover("repository", |s| s.text_color(pal.text)))
+                    .on_click(|_, _, cx| cx.open_url(crate::whats_new::REPOSITORY)),
             )
+            .child(self.update_button(cx))
             .into_any_element()
     }
 
@@ -1223,7 +1195,6 @@ impl Render for SettingsDrawer {
             Tab::Interface => self.interface_tab(cx),
         };
         let header = self.header(cx);
-        let footer = self.footer(cx);
         let rail = self.rail(cx);
         // Each setting is a section, divided from the next by a hairline.
         let sections = rows.into_iter().enumerate().map(|(i, row)| {
@@ -1259,7 +1230,6 @@ impl Render for SettingsDrawer {
                             .flex_col()
                             .children(sections),
                     )
-                    .child(footer),
             )
     }
 }
