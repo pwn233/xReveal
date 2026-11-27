@@ -1,6 +1,6 @@
 //! The video thread on macOS: takes the newest frame, wraps its planes as Metal textures with no
-//! copy (`CVMetalTextureCache`), draws them in one shader pass planned by `video::picture`, and
-//! presents on arrival (docs/spec/v1.md §3.3, §3.4).
+//! copy (made once per capture buffer from its IOSurface), draws them in one shader pass planned by
+//! `video::picture`, and presents on arrival (docs/spec/v1.md §3.3, §3.4).
 
 use std::ptr::NonNull;
 use std::sync::Arc;
