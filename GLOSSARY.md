@@ -65,6 +65,10 @@ _Avoid_: vendor dialog, properties
 The see-through panel that slides in over the live picture (it floats on top, never pushes or shrinks the picture) to change settings. Opens from the right by default; the side can be changed. Looks the same on every OS.
 _Avoid_: sidebar, settings window, overlay menu
 
+**Drawer swipe**
+A sideways two-finger swipe on a trackpad (or Magic Mouse) that pulls the Settings drawer in or pushes it away: fingers moving away from the drawer's side open it, fingers moving toward it close it. On by default; it can be turned off.
+_Avoid_: gesture, swipe (alone)
+
 **Welcome screen**
 The centred screen shown on the very first launch, when there is no Remembered setup yet, where the user picks a Source.
 _Avoid_: onboarding, setup wizard
