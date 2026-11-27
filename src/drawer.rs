@@ -5,15 +5,14 @@
 //! [`DrawerEvent`] and the app applies it to the video pipeline and the Remembered setup. That
 //! keeps it hostable in its own window too (Windows draws it in a separate transparent window).
 
-use gpui_kit::base::IndexPath;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::{Duration, Instant};
 
+mod chooser;
 mod meter;
 mod nav;
 
@@ -253,10 +252,10 @@ pub struct SettingsDrawer {
     confirm_reset: bool,
     custom_ratio: bool,
     sliders: Sliders,
-    card_select: Entity<SelectState<SearchableVec<String>>>,
-    format_select: Entity<SelectState<SearchableVec<String>>>,
-    input_select: Entity<SelectState<SearchableVec<String>>>,
-    output_select: Entity<SelectState<SearchableVec<String>>>,
+    /// The selectors: Input (card), Video format, sound Input, Output (see [`chooser`]).
+    choosers: [chooser::Chooser; 4],
+    /// The selector whose list is open.
+    open_chooser: Option<usize>,
     /// What the Selects list, in order: OS IDs of the cards, and the Video formats of the current one.
     card_ids: Vec<String>,
     formats: Vec<VideoFormat>,
@@ -298,11 +297,6 @@ impl SettingsDrawer {
             stats_opacity: slider(cx, StatsBox::OPACITY.0 * 100.0, StatsBox::OPACITY.1 * 100.0, 1.0, model.stats.opacity() * 100.0),
             opacity: slider(cx, Look::OPACITY.0 * 100.0, Look::OPACITY.1 * 100.0, 1.0, model.look.opacity() * 100.0),
         };
-        let card_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
-        let format_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
-        let input_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
-        let output_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
-
         let mut subscriptions = Vec::new();
         let mut on_picture = |state: &Entity<SliderState>, apply: fn(&mut PictureSettings, f32)| {
             subscriptions.push(cx.subscribe(state, move |this: &mut Self, _, event: &SliderEvent, cx| {
@@ -341,58 +335,9 @@ impl SettingsDrawer {
                 }
             }
         }));
-        subscriptions.push(cx.subscribe(&input_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
-            if let SelectEvent::Confirm(Some(_)) = event
-                && let Some(index) = select.read(cx).selected_index(cx)
-                && let Some(device) = this.model.audio.inputs.get(index.row)
-            {
-                // Choosing the card's own audio goes back to following the card.
-                let chosen = (this.model.audio.paired.as_ref() != Some(&device.id)).then(|| device.id.clone());
-                if chosen != this.model.audio.chosen_input {
-                    this.model.audio.chosen_input = chosen.clone();
-                    cx.emit(DrawerEvent::AudioInput(chosen));
-                }
-            }
-        }));
-        subscriptions.push(cx.subscribe(&output_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
-            if let SelectEvent::Confirm(Some(_)) = event
-                && let Some(index) = select.read(cx).selected_index(cx)
-            {
-                let chosen = index.row.checked_sub(1).and_then(|i| this.model.audio.outputs.get(i)).map(|d| d.id.clone());
-                if chosen != this.model.audio.output {
-                    this.model.audio.output = chosen.clone();
-                    cx.emit(DrawerEvent::AudioOutput(chosen));
-                }
-            }
-        }));
         subscriptions.push(cx.subscribe(&sliders.opacity, |this: &mut Self, _, event: &SliderEvent, cx| {
             if let SliderEvent::Change(SliderValue::Single(value)) = event {
                 this.set_look(Look { opacity: value.round() / 100.0, ..this.model.look }, cx);
-            }
-        }));
-        subscriptions.push(cx.subscribe(&card_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
-            let Some(row) = matches!(event, SelectEvent::Confirm(Some(_))).then(|| select.read(cx).selected_index(cx)).flatten().map(|i| i.row) else { return };
-            // Row 0 is "None"; the inputs follow.
-            if row == 0 {
-                if this.model.current.is_some() {
-                    cx.emit(DrawerEvent::NoInput);
-                }
-            } else if let Some(os_id) = this.card_ids.get(row - 1).cloned()
-                && this.model.current.as_ref().map(|(i, _)| &i.os_id) != Some(&os_id)
-                && let Some(info) = this.model.sources.iter().find(|s| s.identity.os_id == os_id)
-                && let Some(format) = source::default_choice(&info.formats)
-            {
-                cx.emit(DrawerEvent::Source(os_id, format));
-            }
-        }));
-        subscriptions.push(cx.subscribe(&format_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
-            if let SelectEvent::Confirm(Some(_)) = event
-                && let Some(index) = select.read(cx).selected_index(cx)
-                && let Some(format) = this.formats.get(index.row).copied()
-                && let Some((identity, current)) = this.model.current.clone()
-                && current != format
-            {
-                cx.emit(DrawerEvent::Source(identity.os_id, format));
             }
         }));
         let custom_ratio = preset_label(p.target_ratio).is_none();
@@ -409,10 +354,8 @@ impl SettingsDrawer {
             confirm_reset: false,
             custom_ratio,
             sliders,
-            card_select,
-            format_select,
-            input_select,
-            output_select,
+            choosers: Default::default(),
+            open_chooser: None,
             card_ids: Vec::new(),
             formats: Vec::new(),
             _subscriptions: subscriptions,
@@ -474,20 +417,14 @@ impl SettingsDrawer {
         self.card_ids = model.sources.iter().map(|s| s.identity.os_id.clone()).collect();
         let names: Vec<String> = std::iter::once("None".to_owned()).chain(model.sources.iter().map(|s| s.identity.name.clone())).collect();
         let card_index = Some(current_id.as_ref().and_then(|id| self.card_ids.iter().position(|c| c == id)).map_or(0, |i| i + 1));
-        self.card_select.update(cx, |s, cx| {
-            s.set_items(SearchableVec::new(names), window, cx);
-            s.set_selected_index(card_index.map(IndexPath::new), window, cx);
-        });
+        self.choosers[chooser::CARD].set(names, card_index);
 
         // That card's Video formats, with the one on screen selected.
         let info = current_id.as_ref().and_then(|id| model.sources.iter().find(|s| &s.identity.os_id == id));
         self.formats = info.map(|i| source::choices(&i.formats)).unwrap_or_default();
         let labels: Vec<String> = self.formats.iter().copied().map(readout).collect();
         let format_index = model.current.as_ref().and_then(|(_, f)| self.formats.iter().position(|c| c == f));
-        self.format_select.update(cx, |s, cx| {
-            s.set_items(SearchableVec::new(labels), window, cx);
-            s.set_selected_index(format_index.map(IndexPath::new), window, cx);
-        });
+        self.choosers[chooser::FORMAT].set(labels, format_index);
 
         // Sound inputs (the card's own audio marked) and outputs (the system output first).
         let audio = &model.audio;
@@ -500,19 +437,13 @@ impl SettingsDrawer {
         // while nothing plays (no input on screen) still shows as chosen.
         let shown_input = audio.chosen_input.as_ref().or(audio.paired.as_ref()).or(audio.input.as_ref());
         let input_index = shown_input.and_then(|id| audio.inputs.iter().position(|d| &d.id == id));
-        self.input_select.update(cx, |s, cx| {
-            s.set_items(SearchableVec::new(input_names), window, cx);
-            s.set_selected_index(input_index.map(IndexPath::new), window, cx);
-        });
+        self.choosers[chooser::SOUND_INPUT].set(input_names, input_index);
         let output_names: Vec<String> = std::iter::once("System output".to_owned()).chain(audio.outputs.iter().map(|d| d.name.clone())).collect();
         let output_index = match &audio.output {
             None => Some(0),
             Some(id) => audio.outputs.iter().position(|d| &d.id == id).map(|i| i + 1),
         };
-        self.output_select.update(cx, |s, cx| {
-            s.set_items(SearchableVec::new(output_names), window, cx);
-            s.set_selected_index(output_index.map(IndexPath::new), window, cx);
-        });
+        self.choosers[chooser::OUTPUT].set(output_names, output_index);
 
         self.custom_ratio = self.custom_ratio || preset_label(p.target_ratio).is_none();
         self.model = model;
@@ -602,7 +533,7 @@ impl SettingsDrawer {
                     .gap_2()
                     .text_sm()
                     .child(div().flex_none().size(px(8.)).rounded_full().bg(pal.accent))
-                    .child(div().min_w_0().truncate().child(identity.name.clone())),
+                    .child(div().min_w_0().child(identity.name.clone())),
             )
             .child(div().pl(px(16.)).text_xs().font_family(mono_family()).text_color(pal.secondary).child(readout(*format)))
             .into_any_element()
@@ -618,7 +549,7 @@ impl SettingsDrawer {
         );
         let warning = input_lag_warning(DelaySettings { av_sync_offset_ms: 0, ..delay }, self.model.frame_interval);
         let input = if self.model.camera == Access::Granted {
-            setting("Input", hints::CARD, Select::new(&self.card_select).placeholder("No input").menu_max_h(rems(18.)))
+            setting("Input", hints::CARD, self.chooser(chooser::CARD, "Input", "No input", cx))
         } else {
             let names = self.model.sources.iter().map(|s| s.identity.name.clone()).collect();
             setting("Input", hints::CARD_LOCKED, locked_inputs(Privacy::Camera, self.model.camera, names, cx))
@@ -626,7 +557,7 @@ impl SettingsDrawer {
         let mut rows = vec![
             self.live(),
             input,
-            setting("Video format", hints::VIDEO_FORMAT, Select::new(&self.format_select).placeholder("No formats").menu_max_h(rems(18.))),
+            setting("Video format", hints::VIDEO_FORMAT, self.chooser(chooser::FORMAT, "Video format", "No formats", cx)),
             setting("Buffering", hints::BUFFERING, div().flex().flex_col().gap_2().child(buffering).children(warning.map(warn))),
         ];
         if self.model.device_settings {
@@ -940,7 +871,7 @@ impl SettingsDrawer {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(Select::new(&self.input_select).placeholder("No sound input").menu_max_h(rems(18.)))
+                        .child(self.chooser(chooser::SOUND_INPUT, "Input", "No sound input", cx))
                         .child(self.meter.render()),
                 )
             } else {
@@ -952,7 +883,7 @@ impl SettingsDrawer {
             .flex()
             .flex_col()
             .gap_2()
-            .child(setting("Output", hints::AUDIO_OUTPUT, Select::new(&self.output_select).placeholder("System output").menu_max_h(rems(18.))))
+            .child(setting("Output", hints::AUDIO_OUTPUT, self.chooser(chooser::OUTPUT, "Output", "System output", cx)))
             .children(audio.latency_hint.clone().map(warn));
         let pal = theme::palette();
         let muted = audio.muted;
@@ -1468,7 +1399,7 @@ fn locked_inputs(privacy: Privacy, access: Access, names: Vec<String>, cx: &mut 
             .border_1()
             .border_color(pal.line)
             .child(Icon::new(IconName::Lock).size_4().text_color(pal.muted))
-            .child(div().flex_1().min_w_0().truncate().text_sm().text_color(pal.secondary).child(name))
+            .child(div().flex_1().min_w_0().text_sm().text_color(pal.secondary).child(name))
             .child(
                 div()
                     .id(id)
