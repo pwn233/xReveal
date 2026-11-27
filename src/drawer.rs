@@ -1256,10 +1256,25 @@ fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     Hsla::from(Rgba { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) })
 }
 
+thread_local! {
+    /// When something in the drawer was last chosen, by click or by key.
+    static PICKED_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Notes that a choice was just made, so the control taking it eases in (see [`ease_in`]).
+pub(crate) fn note_pick() {
+    PICKED_AT.with(|p| p.set(Some(Instant::now())));
+}
+
 /// The animation that eases a just-chosen control in. Its ID carries the chosen state, so it
-/// plays when that changes (and once when the control first appears chosen).
+/// starts when that changes. It only shows right after a choice (#128): controls that appear
+/// already chosen (the drawer opening, another tab) are drawn in their final state at once,
+/// instead of every chosen control flashing its fill in.
 fn ease_in(group: &'static str, index: usize, chosen: bool) -> (ElementId, Animation) {
-    ((SharedString::from(format!("{group}-ease")), index * 2 + chosen as usize).into(), Animation::new(EASE).with_easing(ease_out_quint()))
+    let fresh = PICKED_AT.with(|p| p.get()).is_some_and(|at| at.elapsed() < EASE * 2);
+    let animation = Animation::new(EASE);
+    let animation = if fresh { animation.with_easing(ease_out_quint()) } else { animation.with_easing(|_| 1.0) };
+    ((SharedString::from(format!("{group}-ease")), index * 2 + chosen as usize).into(), animation)
 }
 
 /// A group of choices that wraps onto a second row instead of overflowing.
@@ -1286,7 +1301,10 @@ fn chips(id: &'static str, labels: &[&str], selected: usize, on_pick: impl Fn(&u
             .when(chosen, |d| d.bg(pal.accent_fill).border_color(pal.accent_line).text_color(pal.accent))
             .when(!chosen, |d| d.bg(pal.raised).border_color(pal.line).text_color(pal.secondary).hover(|d| d.bg(pal.raised_hover).text_color(pal.text)))
             .child(label.to_string())
-            .on_click(move |_, window, cx| on_pick(&i, window, cx));
+            .on_click(move |_, window, cx| {
+                note_pick();
+                on_pick(&i, window, cx)
+            });
         // The newly chosen chip eases from plain into its accent fill.
         let (anim_id, animation) = ease_in(id, i, chosen);
         chip.with_animation(anim_id, animation, move |el, t| {
@@ -1337,7 +1355,10 @@ fn radios(id: &'static str, items: &[(&str, &str)], selected: usize, on_pick: im
                     .child(div().text_sm().text_color(if chosen { pal.text } else { pal.secondary }).child(label.to_string()))
                     .child(div().text_xs().text_color(pal.muted).child(detail.to_string())),
             )
-            .on_click(move |_, window, cx| on_pick(&i, window, cx))
+            .on_click(move |_, window, cx| {
+                note_pick();
+                on_pick(&i, window, cx)
+            })
     }))
 }
 
@@ -1382,7 +1403,10 @@ fn checkboxes(id: &'static str, items: &[(&str, &str)], on: &[bool], cursor: Opt
                     .child(div().text_sm().text_color(if checked { pal.text } else { pal.secondary }).child(label.to_string()))
                     .child(div().text_xs().text_color(pal.muted).child(detail.to_string())),
             )
-            .on_click(move |_, window, cx| on_toggle(&i, window, cx))
+            .on_click(move |_, window, cx| {
+                note_pick();
+                on_toggle(&i, window, cx)
+            })
     }))
 }
 

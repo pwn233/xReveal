@@ -394,6 +394,7 @@ impl SettingsDrawer {
             Nav::Choice { len, at, pick } if len > 0 => {
                 let next = step_choice(at, len, by);
                 if next != at {
+                    super::note_pick();
                     pick(self, next, window, cx);
                 }
             }
@@ -416,7 +417,10 @@ impl SettingsDrawer {
         let Some(row) = rows.get(self.cursor.min(rows.len().saturating_sub(1))) else { return };
         match row.nav {
             Nav::Press(f) => f(self, window, cx),
-            Nav::Switches { flip, .. } => flip(self, self.switch, cx),
+            Nav::Switches { flip, .. } => {
+                super::note_pick();
+                flip(self, self.switch, cx)
+            }
             Nav::Slider { press: Some(f), .. } => f(self, cx),
             _ => {}
         }
