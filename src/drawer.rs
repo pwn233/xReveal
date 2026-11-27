@@ -225,6 +225,12 @@ pub fn readout(format: VideoFormat) -> String {
     format!("{} × {} · {}", format.width, format.height, format.fps.round())
 }
 
+/// A sound input's name in the Input list. The card's own audio is marked first, so the mark
+/// still shows when a long name is cut off: `Input's own audio · Digital Audio Interface (…`.
+pub fn input_label(name: &str, own: bool) -> String {
+    if own { format!("Input's own audio · {name}") } else { name.to_owned() }
+}
+
 pub struct SettingsDrawer {
     model: DrawerModel,
     tab: Tab,
@@ -482,7 +488,7 @@ impl SettingsDrawer {
         let input_names: Vec<String> = audio
             .inputs
             .iter()
-            .map(|d| if audio.paired.as_ref() == Some(&d.id) { format!("{} (the input's own audio)", d.name) } else { d.name.clone() })
+            .map(|d| input_label(&d.name, audio.paired.as_ref() == Some(&d.id)))
             .collect();
         // What you chose, else the input device's own audio, else whatever plays: a choice made
         // while nothing plays (no input on screen) still shows as chosen.
@@ -1441,7 +1447,7 @@ fn quiet_button(id: &'static str, icon: IconName, label: &'static str) -> Statef
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has its own `test` attribute that would replace std's.
-    use super::{DelaySettings, SLIDE_IN, SLIDE_OUT, Slide, TargetRatio, VideoFormat, input_lag_warning, preset_label, readout};
+    use super::{DelaySettings, SLIDE_IN, SLIDE_OUT, Slide, TargetRatio, VideoFormat, input_label, input_lag_warning, preset_label, readout};
     use std::time::Duration;
 
     #[test]
@@ -1484,6 +1490,12 @@ mod tests {
         assert_eq!(input_lag_warning(DelaySettings { buffering_frames: 0, av_sync_offset_ms: 120 }, interval), None, "delays sound, not picture");
         assert_eq!(input_lag_warning(DelaySettings { buffering_frames: 1, av_sync_offset_ms: 0 }, interval).as_deref(), Some("+17 ms input lag"));
         assert_eq!(input_lag_warning(DelaySettings { buffering_frames: 0, av_sync_offset_ms: -40 }, interval).as_deref(), Some("+40 ms input lag"));
+    }
+
+    #[test]
+    fn the_cards_own_audio_is_marked_where_it_stays_visible() {
+        assert_eq!(input_label("Digital Audio Interface (USB2 Digital Audio)", true), "Input's own audio · Digital Audio Interface (USB2 Digital Audio)");
+        assert_eq!(input_label("Microphone (HyperX SoloCast)", false), "Microphone (HyperX SoloCast)");
     }
 
     #[test]

@@ -339,12 +339,15 @@ mod tests {
         for lag in &lags {
             assert!(*lag >= 0.039, "shown {:.1} ms after capture, expected ≥ 40 ms", lag * 1000.0);
         }
-        // Lateness depends on thread scheduling (busy CI machines wake threads late), so check the
-        // typical frame tightly and individual frames only loosely.
+        // Lateness depends on thread scheduling, so check the typical frame tightly and individual
+        // frames only loosely. Shared CI machines wake threads late: the macOS runner has shown
+        // the median 31–51 ms late. There only gross lateness counts; the release times
+        // themselves are checked without threads in `picture_delay_releases_frames_when_due_newest_first`.
+        let (median_slack, worst_slack) = if std::env::var_os("CI").is_some() { (0.150, 0.500) } else { (0.030, 0.250) };
         lags.sort_by(f64::total_cmp);
         let median = lags[lags.len() / 2];
-        assert!(median < 0.040 + 0.030, "median frame shown {:.1} ms after capture: the delay stage is late", median * 1000.0);
+        assert!(median < 0.040 + median_slack, "median frame shown {:.1} ms after capture: the delay stage is late", median * 1000.0);
         let worst = lags[lags.len() - 1];
-        assert!(worst < 0.040 + 0.250, "a frame shown {:.1} ms after capture", worst * 1000.0);
+        assert!(worst < 0.040 + worst_slack, "a frame shown {:.1} ms after capture", worst * 1000.0);
     }
 }
