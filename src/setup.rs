@@ -362,6 +362,8 @@ pub enum Loaded {
     /// The file couldn't be read; it was renamed to `setup.toml.bad`. Start as on first run and
     /// say so (`notice`).
     Recovered { notice: String },
+    /// Read, but some values weren't understood and took their defaults (#153); say which.
+    Partly { setup: Box<Setup>, notice: String },
 }
 
 /// `setup.toml` in the per-machine app data folder, or `None` if the OS gives no such folder.
@@ -381,10 +383,66 @@ pub fn load(path: &Path) -> Loaded {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Loaded::FirstRun,
         Err(error) => return set_aside(path, &error.to_string()),
     };
-    match toml::from_str::<Setup>(&text) {
-        Ok(setup) => Loaded::Setup(Box::new(setup)),
-        Err(error) => set_aside(path, &error.to_string()),
+    match parse(&text) {
+        Ok((setup, reset)) if reset.is_empty() => Loaded::Setup(Box::new(setup)),
+        // Some values weren't understood (say, a choice from a newer xReveal): only those went back
+        // to their defaults (#153).
+        Ok((setup, reset)) => Loaded::Partly { setup: Box::new(setup), notice: format!("Some saved settings weren't understood, so they're back to their defaults ({}).", reset.join(", ")) },
+        Err(error) => set_aside(path, &error),
     }
+}
+
+/// Reads `text` as a Setup. A value that doesn't fit (an unknown choice, a wrong type) is dropped,
+/// so that setting takes its default, and everything else is kept; the dropped keys are returned.
+/// Only text that isn't TOML at all fails.
+fn parse(text: &str) -> Result<(Setup, Vec<String>), String> {
+    let mut table: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
+    let mut reset = Vec::new();
+    // Each round drops the one value serde stopped at; a handful is the most a real file needs.
+    for _ in 0..32 {
+        match serde_path_to_error::deserialize::<_, Setup>(table.clone()) {
+            Ok(setup) => return Ok((setup, reset)),
+            Err(error) => {
+                let at = error.path().to_string();
+                if !drop_at(&mut table, error.path()) {
+                    return Err(error.into_inner().to_string());
+                }
+                reset.push(at);
+            }
+        }
+    }
+    Err("too many settings weren't understood".into())
+}
+
+/// Removes the value at `path` from `table`. False when there's nothing there to remove.
+fn drop_at(table: &mut toml::Table, path: &serde_path_to_error::Path) -> bool {
+    use serde_path_to_error::Segment;
+    fn step<'a>(value: &'a mut toml::Value, segment: &Segment) -> Option<&'a mut toml::Value> {
+        match (segment, value) {
+            (Segment::Map { key }, toml::Value::Table(t)) => t.get_mut(key.as_str()),
+            (Segment::Seq { index }, toml::Value::Array(a)) => a.get_mut(*index),
+            _ => None,
+        }
+    }
+    let segments: Vec<&Segment> = path.iter().collect();
+    let Some((last, parents)) = segments.split_last() else { return false };
+    let mut root = toml::Value::Table(std::mem::take(table));
+    let mut at = Some(&mut root);
+    for segment in parents {
+        at = at.and_then(|value| step(value, segment));
+    }
+    let removed = match (last, at) {
+        (Segment::Map { key }, Some(toml::Value::Table(t))) => t.remove(key.as_str()).is_some(),
+        (Segment::Seq { index }, Some(toml::Value::Array(a))) if *index < a.len() => {
+            a.remove(*index);
+            true
+        }
+        _ => false,
+    };
+    if let toml::Value::Table(t) = root {
+        *table = t;
+    }
+    removed
 }
 
 fn set_aside(path: &Path, why: &str) -> Loaded {
@@ -432,6 +490,7 @@ impl Store {
     pub fn open_at(path: Option<PathBuf>) -> Self {
         let (setup, first_run, notice) = match path.as_deref().map(load) {
             Some(Loaded::Setup(setup)) => (*setup, false, None),
+            Some(Loaded::Partly { setup, notice }) => (*setup, false, Some(notice)),
             Some(Loaded::Recovered { notice }) => (Setup::default(), true, Some(notice)),
             Some(Loaded::FirstRun) | None => (Setup::default(), true, None),
         };
@@ -650,6 +709,21 @@ mod tests {
         assert_eq!(setup.delay.buffering_frames, 1);
         assert_eq!(setup.picture, PictureSettings::default());
         assert_eq!(setup.drawer_side, DrawerSide::Right);
+    }
+
+    #[test]
+    fn a_value_that_isnt_understood_resets_only_that_setting() {
+        // Seen with a build from before the violet accent (#153): the whole file used to be set aside.
+        let dir = TempDir::new("partly");
+        let mut text = toml::to_string_pretty(&sample()).unwrap();
+        assert!(text.contains("drawer-side = \"right\"") && text.contains("accent = \"violet\""), "{text}");
+        text = text.replace("drawer-side = \"right\"", "drawer-side = \"top\"");
+        text = text.replace("accent = \"violet\"", "accent = \"ultraviolet\"");
+        std::fs::write(dir.file(), text).unwrap();
+        let Loaded::Partly { setup, notice } = load(&dir.file()) else { panic!("should load what it can") };
+        assert_eq!(*setup, sample(), "the two take their defaults (which the sample uses), and everything else is kept");
+        assert!(notice.contains("drawer-side") && notice.contains("look.accent"), "{notice}");
+        assert!(dir.file().exists(), "not set aside");
     }
 
     #[test]
