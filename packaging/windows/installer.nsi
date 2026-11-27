@@ -4,6 +4,35 @@
 
 Unicode true
 !include "MUI2.nsh"
+!include "LogicLib.nsh"
+!include "FileFunc.nsh"
+
+; xReveal's in-app update (#163) runs this silently with /S /RELAUNCH: wait for the running
+; xReveal to quit (its exe stays locked until then), install, and start the new version.
+Var Relaunch
+
+Function .onInit
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/RELAUNCH" $R1
+  ${IfNot} ${Errors}
+    StrCpy $Relaunch "1"
+    StrCpy $R2 0
+    ${Do}
+      ${IfNot} ${FileExists} "$INSTDIR\xreveal.exe"
+        ${Break}
+      ${EndIf}
+      ClearErrors
+      FileOpen $R3 "$INSTDIR\xreveal.exe" a
+      ${IfNot} ${Errors}
+        FileClose $R3
+        ${Break}
+      ${EndIf}
+      Sleep 250
+      IntOp $R2 $R2 + 1
+    ${LoopUntil} $R2 >= 80
+  ${EndIf}
+FunctionEnd
 
 Name "xReveal"
 OutFile "${OUT}"
@@ -46,6 +75,9 @@ Section "xReveal"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
+  ${If} $Relaunch == "1"
+    Exec '"$INSTDIR\xreveal.exe"'
+  ${EndIf}
 SectionEnd
 
 Section "Uninstall"

@@ -184,6 +184,8 @@ jobs:
           # A tag with a suffix (v1.1.0-beta.1) is a prerelease: never "latest", never offered (#145).
           prerelease=()
           [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
+          # Checksums of every asset: xReveal's in-app update checks its download against them (#163).
+          (cd assets && sha256sum -- * > SHA256SUMS)
           gh release create "$TAG" assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \

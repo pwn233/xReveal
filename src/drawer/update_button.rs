@@ -13,7 +13,7 @@ use gpui_kit::*;
 
 use super::{DrawerEvent, SettingsDrawer, lock};
 use crate::theme;
-use crate::update::Check;
+use crate::update::{Check, UpdaterView};
 
 const KEY: &str = "update-button";
 /// The tip's widest: wide enough for a few lines of notes.
@@ -27,8 +27,15 @@ impl SettingsDrawer {
     pub(super) fn update_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let pal = theme::palette();
         let offer = self.model.update.clone();
+        let updater = self.model.updater.clone();
         let checking = self.model.update_check == Check::Checking;
+        let ready = offer.is_some() && updater == UpdaterView::Ready;
+        let downloading = match (&offer, &updater) {
+            (Some(_), UpdaterView::Downloading(fraction)) => Some(*fraction),
+            _ => None,
+        };
         let (icon, colour) = match (&offer, checking) {
+            (Some(_), _) if ready => (IconName::RotateCw, pal.accent),
             (Some(_), _) => (IconName::Download, pal.accent),
             (None, true) => (IconName::LoaderCircle, pal.muted),
             (None, false) => (IconName::RefreshCw, pal.muted),
@@ -54,16 +61,21 @@ impl SettingsDrawer {
             .justify_center()
             .cursor_pointer()
             .hover(|d| d.bg(pal.wash))
+            // Ready to restart: filled, so it reads as the thing to press.
+            .when(ready, |d| d.bg(pal.accent_fill).border_1().border_color(pal.accent_line))
             .child(icon)
+            .children(downloading.map(|fraction| progress_ring(fraction, pal.accent, pal.line)))
             .child(canvas(move |b, window, _| bounds.borrow_mut().insert(KEY, (b, window.viewport_size().width)), |_, _, _, _| {}).absolute().inset_0())
             .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
                 this.update_hover.0 = *hovering;
                 this.update_hover_changed(cx);
             }))
-            .on_click(cx.listener(move |this, _, _, cx| match &offer {
-                Some((version, _)) => cx.open_url(&crate::update::release_page(version)),
-                None if this.model.update_check != Check::Checking => cx.emit(DrawerEvent::CheckNow),
-                None => {}
+            .on_click(cx.listener(move |this, _, _, cx| match (&offer, &this.model.updater) {
+                (Some(_), UpdaterView::Ready) => cx.emit(DrawerEvent::RestartToUpdate),
+                (Some(_), UpdaterView::Downloading(_)) => {}
+                (Some(_), _) => cx.emit(DrawerEvent::DownloadUpdate),
+                (None, _) if this.model.update_check != Check::Checking => cx.emit(DrawerEvent::CheckNow),
+                (None, _) => {}
             }))
             .children(tip)
             .into_any_element()
@@ -143,9 +155,16 @@ impl SettingsDrawer {
                         .child(div().mt(px(6.)).size(px(4.)).flex_none().rounded_full().bg(pal.accent))
                         .child(div().flex_1().min_w_0().child(n.clone()))
                 });
+                let (title, line) = match &self.model.updater {
+                    UpdaterView::Idle => (format!("xReveal {version} is out"), "Click to download it.".to_owned()),
+                    UpdaterView::Downloading(Some(f)) => (format!("Downloading xReveal {version}… {:.0}%", f * 100.), "It installs when you restart.".to_owned()),
+                    UpdaterView::Downloading(None) => (format!("Downloading xReveal {version}…"), "It installs when you restart.".to_owned()),
+                    UpdaterView::Ready => (format!("xReveal {version} is ready"), "Click to restart and update.".to_owned()),
+                    UpdaterView::Failed(why) => (format!("Couldn't get xReveal {version}"), format!("{why}. Click to try again.")),
+                };
                 panel
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(format!("xReveal {version} is out")))
-                    .child(div().text_color(pal.secondary).child("Click to open its download page."))
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                    .child(div().text_color(pal.secondary).child(line))
                     .when(!notes.is_empty(), |d| {
                         // Long notes scroll, with a fade wherever there's more.
                         let list = div()
@@ -187,4 +206,39 @@ impl SettingsDrawer {
         };
         panel.into_any_element()
     }
+}
+
+/// A thin ring around the button filling clockwise from the top as the download arrives; just the
+/// faint track while its size isn't known yet.
+fn progress_ring(fraction: Option<f32>, fill: Hsla, track: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let centre = bounds.center();
+            let r = bounds.size.width.min(bounds.size.height) / 2. - px(1.5);
+            let at = |turn: f32| {
+                let a = turn * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                point(centre.x + r * a.cos(), centre.y + r * a.sin())
+            };
+            let arc = |from: f32, to: f32| {
+                let mut path = PathBuilder::stroke(px(2.));
+                path.move_to(at(from));
+                // Two halves at most per arc, so a large arc never flips.
+                let mid = (from + to) / 2.;
+                path.arc_to(point(r, r), px(0.), false, true, at(mid));
+                path.arc_to(point(r, r), px(0.), false, true, at(to));
+                path.build().ok()
+            };
+            if let Some(track) = arc(0., 0.999).map(|p| (p, track)) {
+                window.paint_path(track.0, track.1);
+            }
+            if let Some(f) = fraction.filter(|f| *f > 0.01)
+                && let Some(path) = arc(0., f.min(0.999))
+            {
+                window.paint_path(path, fill);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
 }

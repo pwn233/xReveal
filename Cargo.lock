@@ -8805,6 +8805,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "sha2 0.10.9",
  "toml 1.2.3+spec-1.1.0",
  "windows 0.62.2",
  "windows-core 0.62.2",
