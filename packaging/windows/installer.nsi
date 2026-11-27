@@ -19,6 +19,9 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "FileDescription" "xReveal installer"
 VIAddVersionKey "LegalCopyright" "MIT OR Apache-2.0"
 
+; The app icon (#130), for the installer and uninstaller too.
+!define MUI_ICON "xreveal.ico"
+!define MUI_UNICON "xreveal.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\xreveal.exe"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES

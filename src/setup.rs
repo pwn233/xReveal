@@ -151,7 +151,7 @@ impl Look {
 
 impl Default for Look {
     fn default() -> Self {
-        Self { theme: ThemeChoice::Dark, accent: Accent::Blue, opacity: 0.98, density: Density::Default }
+        Self { theme: ThemeChoice::Dark, accent: Accent::Violet, opacity: 0.98, density: Density::Default }
     }
 }
 
@@ -169,7 +169,9 @@ pub enum ThemeChoice {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Accent {
+    /// The app icon's purple (#130), the default.
     #[default]
+    Violet,
     Blue,
     Teal,
     Green,
@@ -178,7 +180,7 @@ pub enum Accent {
 }
 
 impl Accent {
-    pub const ALL: [Accent; 5] = [Accent::Blue, Accent::Teal, Accent::Green, Accent::Amber, Accent::Pink];
+    pub const ALL: [Accent; 6] = [Accent::Violet, Accent::Blue, Accent::Teal, Accent::Green, Accent::Amber, Accent::Pink];
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
