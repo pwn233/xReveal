@@ -297,6 +297,8 @@ pub struct SettingsDrawer {
     update_hover: (bool, bool),
     update_tip_open: bool,
     update_tip_closing: bool,
+    /// The download ring as shown, easing after the real progress (`update_button::Ring`).
+    update_ring: std::cell::Cell<update_button::Ring>,
     update_tip_close: Option<Task<()>>,
     /// Where the update tip's notes are scrolled to, for their fades.
     update_notes_scroll: ScrollHandle,
@@ -407,6 +409,7 @@ impl SettingsDrawer {
             update_hover: (false, false),
             update_tip_open: false,
             update_tip_closing: false,
+            update_ring: Default::default(),
             update_tip_close: None,
             update_notes_scroll: ScrollHandle::new(),
             hovered_lock: None,
