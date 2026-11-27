@@ -310,7 +310,12 @@ impl XReveal {
             // The first screen stays until Camera is allowed and Microphone is allowed or skipped (#143).
             let camera = permission::access(Privacy::Camera);
             let microphone = permission::access(Privacy::Microphone);
-            if camera != Access::Granted || (microphone != Access::Granted && !self.store.setup.sound_skipped) {
+            // Windows never asks: with its camera switch off it says so (#176), and the sound
+            // never holds up the picture.
+            if cfg!(target_os = "windows") && camera == Access::Denied {
+                break 'screen Screen::Blocked;
+            }
+            if cfg!(target_os = "macos") && (camera != Access::Granted || (microphone != Access::Granted && !self.store.setup.sound_skipped)) {
                 break 'screen Screen::Permission { camera, microphone };
             }
             let Some(video) = &mut self.video else { return };
@@ -437,9 +442,16 @@ impl XReveal {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(video) = &mut self.video {
                 video.refresh_sources();
+                // Windows stopped the input when its switch went off (#176): open it again.
+                #[cfg(target_os = "windows")]
+                if camera_was == Access::Denied && video.wanted().is_some() && video.retry().is_ok() {
+                    self.status = video.description().to_owned();
+                }
             }
         }
-        if now.1 == Access::Granted && microphone_was != Access::Granted {
+        // Given: the sound starts. Taken away (Windows' switch, #176): the input it played from
+        // fails, so it stops, without an error of its own; the access box says why.
+        if now.1 != microphone_was {
             self.restart_sound(window, cx);
         }
         self.refresh_drawer(window, cx);
@@ -793,6 +805,7 @@ impl XReveal {
             tip: self.tip.is_some(),
             blank_hint: self.blank_hint.clone().filter(|_| self.tip.is_none()),
             echo: self.screen.shows_picture() && self.sound.echo_muted(&self.store.setup),
+            microphone_off: self.overlays_in_own_window && self.screen.shows_picture() && permission::access(Privacy::Microphone) == Access::Denied,
             stats: stats.shown.then(|| (stats, stats_rows(self.stats(), &self.status, crate::video::time_to_picture(crate::video::FIRST_PRESENT.get().copied(), crate::video::ACCESS_GRANTED.get().copied()), stats))),
             slide: self.slide,
             drawer_open: self.drawer_open,
@@ -989,6 +1002,10 @@ struct Overlays {
     blank_hint: Option<String>,
     /// The echo guard muted the sound (#112).
     echo: bool,
+    /// Microphone access is off while the picture shows: a bar here where the overlays have their
+    /// own window (Windows, #176), since that window can't take the link's click; the main window
+    /// shows it, with the link, otherwise.
+    microphone_off: bool,
     stats: Option<(StatsBox, Vec<(&'static str, String)>)>,
     slide: drawer::Slide,
     drawer_open: bool,
@@ -1018,6 +1035,9 @@ impl Overlays {
         // The bars at the top centre, one under another when more than one shows.
         let mut bars: Vec<AnyElement> = Vec::new();
         bars.extend(self.notice.clone().map(|n| bar(n.into())));
+        if self.microphone_off {
+            bars.push(bar("Microphone access is off, so xReveal can't play sound. Settings (Tab) › Audio turns it back on.".into()));
+        }
         if self.echo {
             bars.push(bar(crate::audio::echo::MUTED_NOTICE.into()));
         }
@@ -1608,8 +1628,9 @@ impl Render for XReveal {
         let backdrop = self.screen.backdrop();
         let actions = self.screen_actions(cx);
         let screen = self.screen.render(screen_palette, &actions);
-        // macOS microphone access turned off (with a link, so not in the click-through overlays).
-        let microphone_off = self.screen.shows_picture() && permission::access(Privacy::Microphone) == Access::Denied;
+        // Microphone access turned off, with a link (where the overlays have their own window, a bar
+        // there says it instead: see `Overlays::microphone_off`).
+        let microphone_off = !self.overlays_in_own_window && self.screen.shows_picture() && permission::access(Privacy::Microphone) == Access::Denied;
         let microphone = microphone_off.then(|| {
             panel(div().flex().items_center().gap_3()).child("Microphone access is off, so xReveal can't play sound").child(
                 div()

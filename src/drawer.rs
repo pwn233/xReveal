@@ -238,9 +238,16 @@ pub mod hints {
     /// A locked setting's tip (#146).
     pub const NEEDS_CAMERA: &str = "Allow Camera access to change this.";
     pub const NEEDS_MICROPHONE: &str = "Allow Microphone access to change this.";
+    #[cfg(not(target_os = "windows"))]
     pub const CARD_LOCKED: &str = "xReveal needs Camera access to show any input. macOS asks once; after that it's in System Settings › Privacy & Security › Camera.";
+    #[cfg(target_os = "windows")]
+    pub const CARD_LOCKED: &str = "Windows is blocking camera access for desktop apps. Turn on \"Let desktop apps access your camera\" in Settings › Privacy & security › Camera.";
+    #[cfg(not(target_os = "windows"))]
     pub const AUDIO_INPUT_LOCKED: &str =
         "xReveal needs Microphone access to play the input's sound. macOS asks once; after that it's in System Settings › Privacy & Security › Microphone.";
+    #[cfg(target_os = "windows")]
+    pub const AUDIO_INPUT_LOCKED: &str =
+        "Windows is blocking microphone access for desktop apps. Turn on \"Let desktop apps access your microphone\" in Settings › Privacy & security › Microphone.";
     pub const AUDIO_OUTPUT: &str = "Where you hear it. System output follows your computer's sound setting.";
     pub const VOLUME: &str = "xReveal's own volume, on top of your computer's";
 }
@@ -1541,7 +1548,11 @@ fn locked_inputs(privacy: Privacy, access: Access, cx: &mut Context<SettingsDraw
         (Privacy::Microphone, Access::Denied) => (IconName::Mic, "Microphone access is off"),
         (Privacy::Microphone, _) => (IconName::Mic, "Microphone access needed"),
     };
-    let label = if access == Access::Denied { "Open System Settings" } else { "Allow access" };
+    let label = match access {
+        Access::Denied if cfg!(target_os = "windows") => "Open Windows settings",
+        Access::Denied => "Open System Settings",
+        _ => "Allow access",
+    };
     let id = match privacy {
         Privacy::Camera => "allow-camera",
         Privacy::Microphone => "allow-microphone",

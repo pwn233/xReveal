@@ -73,6 +73,8 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_Performance",
+    # Camera and Microphone access: the privacy settings' consent store (#176).
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_UI_HiDpi",
