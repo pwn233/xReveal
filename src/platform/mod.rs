@@ -159,6 +159,7 @@ pub fn scroll_follows_fingers() -> bool {
     #[cfg(not(target_os = "macos"))]
     true
 }
+<<<<<<< HEAD
 
 /// Asks GitHub for xReveal's latest release (#145), blocking the calling background thread for up
 /// to about 15 s. `None` when there was no usable answer.
@@ -170,3 +171,5 @@ pub fn latest_release() -> Option<crate::update::Answer> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     None
 }
+=======
+>>>>>>> origin/main

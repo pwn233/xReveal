@@ -106,12 +106,15 @@ pub struct DrawerModel {
     pub side: DrawerSide,
     /// The Drawer swipe is on (#141).
     pub swipe: bool,
+<<<<<<< HEAD
     /// **Check for updates** is on (#145).
     pub check_updates: bool,
     /// A newer release to offer, and its notes (#145).
     pub update: Option<(String, Vec<String>)>,
     /// How the last check this run went (#145).
     pub update_check: crate::update::Check,
+=======
+>>>>>>> origin/main
     pub window_mode: WindowMode,
     /// Every screen (its identity and the name to show), and the one xReveal is on.
     pub monitors: Vec<(String, String)>,
@@ -136,10 +139,13 @@ pub enum DrawerEvent {
     Side(DrawerSide),
     /// The Drawer swipe turned on or off (#141).
     Swipe(bool),
+<<<<<<< HEAD
     /// **Check for updates** turned on or off (#145).
     CheckUpdates(bool),
     /// The update button asked to check now (#145).
     CheckNow,
+=======
+>>>>>>> origin/main
     WindowMode(WindowMode),
     /// Show xReveal on this screen (by its identity).
     Monitor(String),
@@ -208,7 +214,10 @@ pub mod hints {
     pub const STRENGTH: &str = "0% looks just like Stretch. Higher keeps the centre more natural and stretches the edges more.";
     pub const CUSTOM_RATIO: &str = "Width ÷ height of your own shape, like 2.39 for a cinema ratio";
     pub const DRAWER_SIDE: &str = "Which side this panel opens from";
+<<<<<<< HEAD
     pub const CHECK_UPDATES: &str = "Once a day, xReveal asks GitHub whether there's a newer version. Nothing else is sent.";
+=======
+>>>>>>> origin/main
     pub const SWIPE: &str = if cfg!(target_os = "macos") {
         "Swipe two fingers sideways on the trackpad: away from this panel's side to open it, back to close it. Start in the middle of the trackpad; a swipe from its right edge opens Notification Center."
     } else {
@@ -746,6 +755,7 @@ impl SettingsDrawer {
                 }
             }),
         );
+<<<<<<< HEAD
         let check_updates = chips(
             "check-updates",
             &["On", "Off"],
@@ -759,6 +769,8 @@ impl SettingsDrawer {
                 }
             }),
         );
+=======
+>>>>>>> origin/main
         vec![
             setting("Theme", hints::THEME, theme_chips),
             setting("Accent", hints::ACCENT, swatches),
@@ -766,7 +778,10 @@ impl SettingsDrawer {
             setting("Density", hints::DENSITY, density),
             setting("Drawer side", hints::DRAWER_SIDE, side),
             setting("Swipe to open settings", hints::SWIPE, swipe),
+<<<<<<< HEAD
             setting("Check for updates", hints::CHECK_UPDATES, check_updates),
+=======
+>>>>>>> origin/main
         ]
     }
 
@@ -1116,7 +1131,11 @@ impl SettingsDrawer {
                 let a = &self.model.audio;
                 self.model.delay.av_sync_offset_ms == 0 && a.volume == 1.0 && !a.muted && a.chosen_input.is_none() && a.output.is_none()
             }
+<<<<<<< HEAD
             Tab::Interface => self.model.look == Look::default() && self.model.side == DrawerSide::default() && self.model.swipe && self.model.check_updates,
+=======
+            Tab::Interface => self.model.look == Look::default() && self.model.side == DrawerSide::default() && self.model.swipe,
+>>>>>>> origin/main
         }
     }
 
@@ -1182,10 +1201,13 @@ impl SettingsDrawer {
                     model.swipe = true;
                     events.push(DrawerEvent::Swipe(true));
                 }
+<<<<<<< HEAD
                 if !model.check_updates {
                     model.check_updates = true;
                     events.push(DrawerEvent::CheckUpdates(true));
                 }
+=======
+>>>>>>> origin/main
             }
         }
         self.set_model(model, window, cx);
