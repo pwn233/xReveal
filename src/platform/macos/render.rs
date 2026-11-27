@@ -11,8 +11,10 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::{CFRetained, CGSize};
 use objc2_core_video::{
-    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBufferGetHeightOfPlane,
-    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidthOfPlane, CVPixelBufferIsPlanar, kCVReturnSuccess,
+    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer, CVPixelBufferGetBaseAddress,
+    CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane,
+    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidthOfPlane, CVPixelBufferIsPlanar,
+    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVReturnSuccess,
 };
 use objc2_foundation::NSString;
 use objc2_metal::{
@@ -25,6 +27,7 @@ use objc2_quartz_core::{CACurrentMediaTime, CAMetalDrawable};
 
 use super::capture::{PixelBuffer, fourcc};
 use super::surface::RenderTarget;
+use crate::video::flat;
 use crate::video::picture::{self, FrameInfo, Layout, Plan, ShaderParams};
 use crate::video::{VideoShared, lock, timing};
 use crate::video::slot::FrameSlot;
@@ -173,6 +176,11 @@ impl Renderer {
             }
             other => return Err(format!("pixel format {} isn't drawn yet", fourcc(other))),
         };
+        // A few luma samples, to notice a picture that stays one flat colour (#108).
+        let step = if matches!(info.layout, Layout::Yuy2) { 2 } else { 1 };
+        if let Some(samples) = luma_samples(image, (info.width as usize, info.height as usize), step) {
+            lock(&self.shared.flat).observe(&samples, std::time::Instant::now());
+        }
         let textures: Vec<Texture> =
             planes.iter().map(|p| CVMetalTextureGetTexture(p).ok_or("no plane texture")).collect::<Result<_, _>>()?;
 
@@ -236,6 +244,28 @@ impl Renderer {
             .map(|texture| unsafe { CFRetained::from_raw(texture) })
             .ok_or(format!("plane {index} texture failed ({status})"))
     }
+}
+
+/// The [`flat::luma_grid`] samples of a `width`×`height` frame, read from its first plane, where
+/// neighbouring luma values sit `step` bytes apart: 1 for NV12, 2 for YUY2 (Y0 Cb Y1 Cr). The
+/// buffer is only locked for reading, which doesn't copy it.
+fn luma_samples(image: &CVPixelBuffer, (width, height): (usize, usize), step: usize) -> Option<Vec<u8>> {
+    let read_only = CVPixelBufferLockFlags::ReadOnly;
+    if unsafe { CVPixelBufferLockBaseAddress(image, read_only) } != kCVReturnSuccess {
+        return None;
+    }
+    let (base, row) = if CVPixelBufferIsPlanar(image) {
+        (CVPixelBufferGetBaseAddressOfPlane(image, 0), CVPixelBufferGetBytesPerRowOfPlane(image, 0))
+    } else {
+        (CVPixelBufferGetBaseAddress(image), CVPixelBufferGetBytesPerRow(image))
+    };
+    let samples = (!base.is_null() && row >= width * step).then(|| {
+        // SAFETY: while the buffer is locked its first plane is `row` bytes for each of its `height` rows.
+        let bytes = unsafe { std::slice::from_raw_parts(base as *const u8, row * height) };
+        flat::luma_grid(width, height, |x, y| bytes[y * row + x * step])
+    });
+    unsafe { CVPixelBufferUnlockBaseAddress(image, read_only) };
+    samples
 }
 
 #[cfg(test)]
