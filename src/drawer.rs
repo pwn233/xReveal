@@ -253,13 +253,15 @@ pub struct SettingsDrawer {
     confirm_reset: bool,
     custom_ratio: bool,
     sliders: Sliders,
-    card_select: Entity<SelectState<SearchableVec<String>>>,
-    format_select: Entity<SelectState<SearchableVec<String>>>,
-    input_select: Entity<SelectState<SearchableVec<String>>>,
-    output_select: Entity<SelectState<SearchableVec<String>>>,
+    card_select: Entity<SelectState<SearchableVec<Wrap>>>,
+    format_select: Entity<SelectState<SearchableVec<Wrap>>>,
+    input_select: Entity<SelectState<SearchableVec<Wrap>>>,
+    output_select: Entity<SelectState<SearchableVec<Wrap>>>,
     /// What the Selects list, in order: OS IDs of the cards, and the Video formats of the current one.
     card_ids: Vec<String>,
     formats: Vec<VideoFormat>,
+    /// PROTOTYPE (#127): which chooser's list is open.
+    proto_open: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -298,10 +300,10 @@ impl SettingsDrawer {
             stats_opacity: slider(cx, StatsBox::OPACITY.0 * 100.0, StatsBox::OPACITY.1 * 100.0, 1.0, model.stats.opacity() * 100.0),
             opacity: slider(cx, Look::OPACITY.0 * 100.0, Look::OPACITY.1 * 100.0, 1.0, model.look.opacity() * 100.0),
         };
-        let card_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
-        let format_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
-        let input_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
-        let output_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx));
+        let card_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<Wrap>::new()), None, window, cx));
+        let format_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<Wrap>::new()), None, window, cx));
+        let input_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<Wrap>::new()), None, window, cx));
+        let output_select = cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<Wrap>::new()), None, window, cx));
 
         let mut subscriptions = Vec::new();
         let mut on_picture = |state: &Entity<SliderState>, apply: fn(&mut PictureSettings, f32)| {
@@ -341,7 +343,7 @@ impl SettingsDrawer {
                 }
             }
         }));
-        subscriptions.push(cx.subscribe(&input_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
+        subscriptions.push(cx.subscribe(&input_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<Wrap>>, cx| {
             if let SelectEvent::Confirm(Some(_)) = event
                 && let Some(index) = select.read(cx).selected_index(cx)
                 && let Some(device) = this.model.audio.inputs.get(index.row)
@@ -354,7 +356,7 @@ impl SettingsDrawer {
                 }
             }
         }));
-        subscriptions.push(cx.subscribe(&output_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
+        subscriptions.push(cx.subscribe(&output_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<Wrap>>, cx| {
             if let SelectEvent::Confirm(Some(_)) = event
                 && let Some(index) = select.read(cx).selected_index(cx)
             {
@@ -370,7 +372,7 @@ impl SettingsDrawer {
                 this.set_look(Look { opacity: value.round() / 100.0, ..this.model.look }, cx);
             }
         }));
-        subscriptions.push(cx.subscribe(&card_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
+        subscriptions.push(cx.subscribe(&card_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<Wrap>>, cx| {
             let Some(row) = matches!(event, SelectEvent::Confirm(Some(_))).then(|| select.read(cx).selected_index(cx)).flatten().map(|i| i.row) else { return };
             // Row 0 is "None"; the inputs follow.
             if row == 0 {
@@ -385,7 +387,7 @@ impl SettingsDrawer {
                 cx.emit(DrawerEvent::Source(os_id, format));
             }
         }));
-        subscriptions.push(cx.subscribe(&format_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<String>>, cx| {
+        subscriptions.push(cx.subscribe(&format_select, |this: &mut Self, select, event: &SelectEvent<SearchableVec<Wrap>>, cx| {
             if let SelectEvent::Confirm(Some(_)) = event
                 && let Some(index) = select.read(cx).selected_index(cx)
                 && let Some(format) = this.formats.get(index.row).copied()
@@ -415,6 +417,7 @@ impl SettingsDrawer {
             output_select,
             card_ids: Vec::new(),
             formats: Vec::new(),
+            proto_open: None,
             _subscriptions: subscriptions,
         };
         this.set_model(model, window, cx);
@@ -469,13 +472,15 @@ impl SettingsDrawer {
             state.update(cx, |s, cx| s.set_value(value, window, cx));
         }
 
+        PROTO_LABELS.with(|l| l.borrow_mut().clear());
         // Card list, with the one on screen selected.
         let current_id = model.current.as_ref().map(|(i, _)| i.os_id.clone());
         self.card_ids = model.sources.iter().map(|s| s.identity.os_id.clone()).collect();
         let names: Vec<String> = std::iter::once("None".to_owned()).chain(model.sources.iter().map(|s| s.identity.name.clone())).collect();
         let card_index = Some(current_id.as_ref().and_then(|id| self.card_ids.iter().position(|c| c == id)).map_or(0, |i| i + 1));
         self.card_select.update(cx, |s, cx| {
-            s.set_items(SearchableVec::new(names), window, cx);
+            PROTO_LABELS.with(|l| l.borrow_mut().push(names.clone()));
+            s.set_items(SearchableVec::new(wrap(names)), window, cx);
             s.set_selected_index(card_index.map(IndexPath::new), window, cx);
         });
 
@@ -485,7 +490,8 @@ impl SettingsDrawer {
         let labels: Vec<String> = self.formats.iter().copied().map(readout).collect();
         let format_index = model.current.as_ref().and_then(|(_, f)| self.formats.iter().position(|c| c == f));
         self.format_select.update(cx, |s, cx| {
-            s.set_items(SearchableVec::new(labels), window, cx);
+            PROTO_LABELS.with(|l| l.borrow_mut().push(labels.clone()));
+            s.set_items(SearchableVec::new(wrap(labels)), window, cx);
             s.set_selected_index(format_index.map(IndexPath::new), window, cx);
         });
 
@@ -501,7 +507,8 @@ impl SettingsDrawer {
         let shown_input = audio.chosen_input.as_ref().or(audio.paired.as_ref()).or(audio.input.as_ref());
         let input_index = shown_input.and_then(|id| audio.inputs.iter().position(|d| &d.id == id));
         self.input_select.update(cx, |s, cx| {
-            s.set_items(SearchableVec::new(input_names), window, cx);
+            PROTO_LABELS.with(|l| l.borrow_mut().push(input_names.clone()));
+            s.set_items(SearchableVec::new(wrap(input_names)), window, cx);
             s.set_selected_index(input_index.map(IndexPath::new), window, cx);
         });
         let output_names: Vec<String> = std::iter::once("System output".to_owned()).chain(audio.outputs.iter().map(|d| d.name.clone())).collect();
@@ -510,7 +517,8 @@ impl SettingsDrawer {
             Some(id) => audio.outputs.iter().position(|d| &d.id == id).map(|i| i + 1),
         };
         self.output_select.update(cx, |s, cx| {
-            s.set_items(SearchableVec::new(output_names), window, cx);
+            PROTO_LABELS.with(|l| l.borrow_mut().push(output_names.clone()));
+            s.set_items(SearchableVec::new(wrap(output_names)), window, cx);
             s.set_selected_index(output_index.map(IndexPath::new), window, cx);
         });
 
@@ -618,7 +626,7 @@ impl SettingsDrawer {
         );
         let warning = input_lag_warning(DelaySettings { av_sync_offset_ms: 0, ..delay }, self.model.frame_interval);
         let input = if self.model.camera == Access::Granted {
-            setting("Input", hints::CARD, Select::new(&self.card_select).placeholder("No input").menu_max_h(rems(18.)))
+            setting("Input", hints::CARD, self.chooser(0, "Input", &self.card_select, "No input", cx))
         } else {
             let names = self.model.sources.iter().map(|s| s.identity.name.clone()).collect();
             setting("Input", hints::CARD_LOCKED, locked_inputs(Privacy::Camera, self.model.camera, names, cx))
@@ -626,7 +634,7 @@ impl SettingsDrawer {
         let mut rows = vec![
             self.live(),
             input,
-            setting("Video format", hints::VIDEO_FORMAT, Select::new(&self.format_select).placeholder("No formats").menu_max_h(rems(18.))),
+            setting("Video format", hints::VIDEO_FORMAT, self.chooser(1, "Video format", &self.format_select, "No formats", cx)),
             setting("Buffering", hints::BUFFERING, div().flex().flex_col().gap_2().child(buffering).children(warning.map(warn))),
         ];
         if self.model.device_settings {
@@ -940,7 +948,7 @@ impl SettingsDrawer {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(Select::new(&self.input_select).placeholder("No sound input").menu_max_h(rems(18.)))
+                        .child(self.chooser(2, "Input", &self.input_select, "No sound input", cx))
                         .child(self.meter.render()),
                 )
             } else {
@@ -952,7 +960,7 @@ impl SettingsDrawer {
             .flex()
             .flex_col()
             .gap_2()
-            .child(setting("Output", hints::AUDIO_OUTPUT, Select::new(&self.output_select).placeholder("System output").menu_max_h(rems(18.))))
+            .child(setting("Output", hints::AUDIO_OUTPUT, self.chooser(3, "Output", &self.output_select, "System output", cx)))
             .children(audio.latency_hint.clone().map(warn));
         let pal = theme::palette();
         let muted = audio.muted;
@@ -1238,6 +1246,7 @@ impl Render for SettingsDrawer {
                     .h_full()
                     .flex()
                     .flex_col()
+                    .children(self.proto_bar(cx))
                     .child(header)
                     .child(
                         div()
@@ -1577,4 +1586,163 @@ mod tests {
         assert_eq!(readout(VideoFormat { width: 1280, height: 720, fps: 60.0 }), "1280 × 720 · 60");
         assert_eq!(readout(VideoFormat { width: 1920, height: 1080, fps: 59.94 }), "1920 × 1080 · 60");
     }
+}
+
+// ---- PROTOTYPE (#127), throwaway: three ways for the drawer's selectors to show whole text. ----
+
+thread_local! {
+    /// The four selectors' labels, in order: Input (card), Video format, sound Input, Output.
+    static PROTO_LABELS: std::cell::RefCell<Vec<Vec<String>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+static PROTO_MODE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const PROTO_MODES: [&str; 3] = ["A · Inline list", "B · Own popup", "C · Wrap the closed one only"];
+
+fn proto_active() -> bool {
+    std::env::var_os("XREVEAL_PROTO_SELECT").is_some()
+}
+
+/// A selector item whose text wraps in the closed selector.
+#[derive(Clone)]
+pub struct Wrap(String);
+
+fn wrap(labels: Vec<String>) -> Vec<Wrap> {
+    labels.into_iter().map(Wrap).collect()
+}
+
+impl gpui_kit::component::select::SelectItem for Wrap {
+    type Value = String;
+    fn title(&self) -> SharedString {
+        self.0.clone().into()
+    }
+    fn value(&self) -> &String {
+        &self.0
+    }
+    fn display_title(&self) -> Option<AnyElement> {
+        let wraps = proto_active() && PROTO_MODE.load(std::sync::atomic::Ordering::Relaxed) == 2;
+        wraps.then(|| div().whitespace_normal().child(self.0.clone()).into_any_element())
+    }
+}
+
+impl SettingsDrawer {
+    fn proto_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !proto_active() {
+            return None;
+        }
+        let mode = PROTO_MODE.load(std::sync::atomic::Ordering::Relaxed);
+        let step = |id: &'static str, label: &'static str, by: usize| {
+            div().id(id).px_2().rounded(px(6.)).bg(hsla(0., 0., 0., 0.12)).cursor_pointer().child(label).on_click(cx.listener(move |this, _, _, cx| {
+                let m = PROTO_MODE.load(std::sync::atomic::Ordering::Relaxed);
+                PROTO_MODE.store((m + by) % PROTO_MODES.len(), std::sync::atomic::Ordering::Relaxed);
+                this.proto_open = None;
+                cx.notify();
+            }))
+        };
+        Some(
+            div()
+                .mx_3()
+                .mt_3()
+                .px_3()
+                .py_1()
+                .rounded_full()
+                .bg(hsla(50. / 360., 1., 0.5, 1.))
+                .text_color(hsla(0., 0., 0., 1.))
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(step("proto-prev", "◀", PROTO_MODES.len() - 1))
+                .child(format!("PROTOTYPE · {}", PROTO_MODES[mode]))
+                .child(step("proto-next", "▶", 1))
+                .into_any_element(),
+        )
+    }
+
+    /// One selector, in the prototype's current way (or GPUI Kit's Select outside the prototype).
+    fn chooser(&self, which: usize, title: &'static str, select: &Entity<SelectState<SearchableVec<Wrap>>>, placeholder: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let mode = PROTO_MODE.load(std::sync::atomic::Ordering::Relaxed);
+        if !proto_active() || mode == 2 {
+            let base = Select::new(select).placeholder(placeholder).menu_max_h(rems(18.));
+            return if proto_active() { base.h_auto().py_2().menu_width(px(360.)).into_any_element() } else { base.into_any_element() };
+        }
+        let pal = theme::palette();
+        let labels = PROTO_LABELS.with(|l| l.borrow().get(which).cloned().unwrap_or_default());
+        let selected = select.read(cx).selected_index(cx).map(|i| i.row);
+        let shown = selected.and_then(|i| labels.get(i).cloned());
+        let open = self.proto_open == Some(which);
+        let trigger = div()
+            .id(("proto-trigger", which))
+            .px_3()
+            .py_2()
+            .rounded(px(8.))
+            .bg(pal.raised)
+            .border_1()
+            .border_color(if open { pal.accent_line } else { pal.line })
+            .flex()
+            .items_start()
+            .gap_2()
+            .cursor_pointer()
+            .child(div().flex_1().min_w_0().text_sm().line_height(px(19.)).text_color(if shown.is_some() { pal.text } else { pal.muted }).child(shown.unwrap_or_else(|| placeholder.to_owned())))
+            .child(Icon::new(IconName::ChevronDown).size_4().mt(px(1.)).text_color(pal.muted))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.proto_open = if this.proto_open == Some(which) { None } else { Some(which) };
+                cx.notify();
+            }));
+        let rows = labels.into_iter().enumerate().map(|(i, label)| {
+            let chosen = selected == Some(i);
+            let select = select.clone();
+            div()
+                .id(("proto-option", which * 100 + i))
+                .px_2()
+                .py(px(6.))
+                .rounded(px(6.))
+                .flex()
+                .items_start()
+                .gap_2()
+                .cursor_pointer()
+                .hover(|d| d.bg(pal.wash))
+                .child(div().w(px(14.)).flex_none().mt(px(2.)).children(chosen.then(|| Icon::new(IconName::Check).size_3p5().text_color(pal.accent))))
+                .child(div().flex_1().min_w_0().text_sm().line_height(px(19.)).text_color(pal.text).child(label))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    select.update(cx, |s, cx| s.set_selected_index(Some(IndexPath::new(i)), window, cx));
+                    if let Some(row) = this.nav_rows().into_iter().find(|r| r.title == title)
+                        && let nav::Nav::Choice { pick, .. } = row.nav
+                    {
+                        pick(this, i, window, cx);
+                    }
+                    this.proto_open = None;
+                    cx.notify();
+                }))
+        });
+        let list = div().p_1().flex().flex_col().gap(px(2.)).rounded(px(8.)).bg(pal.raised).border_1().border_color(pal.line).children(rows);
+        let body = div().flex().flex_col().gap_1().child(trigger);
+        if !open {
+            return body.into_any_element();
+        }
+        if mode == 0 {
+            return body.child(list).into_any_element();
+        }
+        body.child(
+            deferred(
+                anchored().snap_to_window_with_margin(px(8.)).child(
+                    list.w(px(drawer_content_width()))
+                        .max_h(rems(18.))
+                        .overflow_hidden()
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.proto_open = None;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .with_priority(1),
+        )
+        .into_any_element()
+    }
+}
+
+/// Roughly the width of a selector in the drawer's pane.
+fn drawer_content_width() -> f32 {
+    width() - 100.
 }
