@@ -162,7 +162,6 @@ pub enum DrawerEvent {
     Mute(bool),
     /// An **Allow access** button on a locked input (#113).
     Allow(Privacy),
-    ResetAll,
     Quit,
 }
 
@@ -287,7 +286,6 @@ pub struct SettingsDrawer {
     focus: FocusHandle,
     /// The Input level meter (Audio tab), fed while the drawer is open.
     meter: meter::Meter,
-    confirm_reset: bool,
     custom_ratio: bool,
     sliders: Sliders,
     /// The selectors: Input (card), Video format, sound Input, Output (see [`chooser`]).
@@ -402,7 +400,6 @@ impl SettingsDrawer {
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
             meter: meter::Meter::default(),
-            confirm_reset: false,
             custom_ratio,
             sliders,
             choosers: Default::default(),
@@ -431,7 +428,6 @@ impl SettingsDrawer {
     /// Switches to `tab` (e.g. Source, for "Pick another input").
     pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
-        self.confirm_reset = false;
         self.cursor = 0;
         self.switch = 0;
         cx.notify();
@@ -549,7 +545,6 @@ impl SettingsDrawer {
                 .child(tab.label())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.tab = tab;
-                    this.confirm_reset = false;
                     cx.notify();
                 }))
         });
@@ -1015,66 +1010,24 @@ impl SettingsDrawer {
         vec![input.into_any_element(), output.into_any_element(), volume, av_sync]
     }
 
-    fn reset_all(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The footer, one row (#129, #179): the version, from Cargo.toml, opening its release page;
+    /// then Quit, the repository and the update button (#145).
+    fn footer(&self, cx: &mut Context<Self>) -> AnyElement {
         let pal = theme::palette();
-        let body: AnyElement = if self.confirm_reset {
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(div().text_sm().mr_1().child("Reset every setting?"))
-                .child(
-                    div()
-                        .id("reset-yes")
-                        .h(px(theme::spacing().chip))
-                        .px_3()
-                        .rounded(px(8.))
-                        .flex()
-                        .items_center()
-                        .text_sm()
-                        .cursor_pointer()
-                        .bg(pal.danger)
-                        .text_color(pal.on_danger)
-                        .child("Reset")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.confirm_reset = false;
-                            cx.emit(DrawerEvent::ResetAll);
-                        })),
-                )
-                .child(quiet_button("reset-no", IconName::X, "Cancel").on_click(cx.listener(|this, _, _, cx| {
-                    this.confirm_reset = false;
-                    cx.notify();
-                })))
-                .into_any_element()
-        } else {
-            let link = |id: &'static str, label: &'static str| {
-                let colour = if nav::focused(label) { pal.text } else { pal.secondary };
-                div().id(id).text_sm().text_color(colour).cursor_pointer().hover(|d| d.text_color(pal.text)).child(label)
-            };
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(link("reset-all", "Reset all settings").on_click(cx.listener(|this, _, _, cx| {
-                    this.confirm_reset = true;
-                    cx.notify();
-                })))
-                .child(link("quit", "Quit").on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::Quit))))
-                .into_any_element()
-        };
+        let quit = div()
+            .id("quit")
+            .text_sm()
+            .text_color(pal.secondary)
+            .cursor_pointer()
+            .hover(|d| d.text_color(pal.text))
+            .child("Quit")
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::Quit)));
         div()
             .flex_none()
             .px_5()
             .py_4()
             .border_t_1()
             .border_color(pal.line)
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(body)
-            // The version, from Cargo.toml (#129), opening its release page; then the repository.
-            // It's where Update available will show (#145).
             .child(
                 div()
                     .flex()
@@ -1096,6 +1049,7 @@ impl SettingsDrawer {
                             .flex()
                             .items_center()
                             .gap_3()
+                            .child(quit)
                             .child(
                                 div()
                                     .id("repository")
@@ -1266,7 +1220,7 @@ impl Render for SettingsDrawer {
             Tab::Interface => self.interface_tab(cx),
         };
         let header = self.header(cx);
-        let reset_all = self.reset_all(cx);
+        let footer = self.footer(cx);
         let rail = self.rail(cx);
         // Each setting is a section, divided from the next by a hairline.
         let sections = rows.into_iter().enumerate().map(|(i, row)| {
@@ -1302,7 +1256,7 @@ impl Render for SettingsDrawer {
                             .flex_col()
                             .children(sections),
                     )
-                    .child(reset_all),
+                    .child(footer),
             )
     }
 }
