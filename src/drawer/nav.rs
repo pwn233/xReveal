@@ -354,7 +354,6 @@ impl SettingsDrawer {
                         cx.notify();
                     }
                 } }));
-<<<<<<< HEAD
                 rows.push(row("Check for updates", 6, Nav::Choice { len: 2, at: (!self.model.check_updates) as usize, pick: |this, i, _, cx| {
                     let on = i == 0;
                     if on != this.model.check_updates {
@@ -363,8 +362,6 @@ impl SettingsDrawer {
                         cx.notify();
                     }
                 } }));
-=======
->>>>>>> origin/main
             }
         }
         rows.push(Row { title: "Reset all settings", section: None, nav: Nav::Press(|this, _, cx| {

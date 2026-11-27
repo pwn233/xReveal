@@ -12,10 +12,7 @@ mod screens;
 mod setup;
 mod source;
 mod swipe;
-<<<<<<< HEAD
 mod update;
-=======
->>>>>>> origin/main
 mod theme;
 mod video;
 mod whats_new;
