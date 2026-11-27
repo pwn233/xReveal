@@ -1600,6 +1600,19 @@ impl Render for XReveal {
         let panel = |child: Div| child.px_2().py_1().rounded(px(8.)).bg(pal.panel).border_1().border_color(pal.line).text_color(pal.text).text_sm();
         let side = self.shown_side;
         let width = window.bounds().size.width.as_f32();
+        // The pointer left the window from near the edge (#178): no mouse move says so, only the
+        // window's hover state (Windows redraws when it changes), so hide the handle here.
+        if cfg!(target_os = "windows") && self.near_edge && !window.is_window_hovered() {
+            cx.defer_in(window, |this, window, cx| {
+                if this.near_edge && !window.is_window_hovered() {
+                    this.near_edge = false;
+                    if !this.drawer_open {
+                        this.handle_slide = this.handle_slide.toward(false);
+                    }
+                    cx.notify();
+                }
+            });
+        }
 
         let drawer = (!self.drawer_in_own_window && self.slide.visible()).then(|| {
             if self.slide.moving() {
