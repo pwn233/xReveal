@@ -22,6 +22,65 @@ const TIP_WIDTH: f32 = 300.;
 const NOTES_HEIGHT: f32 = 180.;
 /// How long the tip stays after the pointer leaves the button and the tip.
 const CLOSE_AFTER: Duration = Duration::from_millis(300);
+/// The ring's top speed, in turns per second: however fast the download, the ring takes at least
+/// this long to fill (0.7 s), and a ring that's behind catches up smoothly (#184).
+const RING_SPEED: f32 = 1. / 0.7;
+/// How quickly the ring closes on the real progress (per second, exponential).
+const RING_EASE: f32 = 6.;
+
+/// The download ring as drawn: it eases after the real progress, never faster than
+/// [`RING_SPEED`], and fills the whole way before the button turns into Restart.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ring {
+    /// How full it's drawn, while it's drawn.
+    shown: Option<f32>,
+    last: Option<std::time::Instant>,
+}
+
+impl Ring {
+    /// Moves on to `now`, after the real state: downloading (`Some(fraction)`, `None` while the
+    /// size isn't known) or `ready`. Returns how full to draw the ring (`Some(None)` for just its
+    /// track) and whether it's still moving; `None` when there's no ring.
+    pub fn step(&mut self, downloading: Option<Option<f32>>, ready: bool, now: std::time::Instant) -> Option<(Option<f32>, bool)> {
+        let dt = self.last.map_or(0., |t| now.duration_since(t).as_secs_f32().min(0.1));
+        self.last = Some(now);
+        let target = match (downloading, ready) {
+            (Some(Some(fraction)), _) => fraction.clamp(0., 1.),
+            // Its size isn't known yet: the track only, where it was.
+            (Some(None), _) => return Some((self.shown.filter(|s| *s > 0.), false)),
+            // Done: a ring still filling finishes first; none drawn yet means none to finish.
+            (None, true) if self.shown.is_some_and(|s| s < 1.) => 1.,
+            _ => {
+                self.shown = None;
+                return None;
+            }
+        };
+        let shown = self.shown.unwrap_or(0.);
+        let eased = (target - shown) * (1. - (-RING_EASE * dt).exp());
+        let mut next = shown + eased.clamp(-RING_SPEED * dt, RING_SPEED * dt);
+        if (target - next).abs() < 0.004 {
+            next = target;
+        }
+        self.shown = Some(next);
+        let moving = next != target;
+        if ready && !moving {
+            // Full: the button turns into Restart from the next frame.
+            self.shown = None;
+            return Some((Some(1.), true));
+        }
+        Some((Some(next), moving))
+    }
+
+    /// An empty ring, from the press of the download button.
+    pub fn started() -> Self {
+        Ring { shown: Some(0.), last: None }
+    }
+
+    /// The ring is still drawn: during a download, or finishing one that's already done.
+    pub fn finishing(&self) -> bool {
+        self.shown.is_some()
+    }
+}
 
 impl SettingsDrawer {
     pub(super) fn update_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -29,11 +88,16 @@ impl SettingsDrawer {
         let offer = self.model.update.clone();
         let updater = self.model.updater.clone();
         let checking = self.model.update_check == Check::Checking;
-        let ready = offer.is_some() && updater == UpdaterView::Ready;
-        let downloading = match (&offer, &updater) {
+        let done = offer.is_some() && updater == UpdaterView::Ready;
+        let real = match (&offer, &updater) {
             (Some(_), UpdaterView::Downloading(fraction)) => Some(*fraction),
             _ => None,
         };
+        // The ring as drawn eases after the real progress (#184), and finishes before Restart shows.
+        let mut ring = self.update_ring.get();
+        let downloading = ring.step(real, done, std::time::Instant::now());
+        let ready = done && !ring.finishing() && downloading.is_none();
+        self.update_ring.set(ring);
         let (icon, colour) = match (&offer, checking) {
             (Some(_), _) if ready => (IconName::RotateCw, pal.accent),
             (Some(_), _) => (IconName::Download, pal.accent),
@@ -64,16 +128,22 @@ impl SettingsDrawer {
             // Ready to restart: filled, so it reads as the thing to press.
             .when(ready, |d| d.bg(pal.accent_fill).border_1().border_color(pal.accent_line))
             .child(icon)
-            .children(downloading.map(|fraction| progress_ring(fraction, pal.accent, pal.line)))
+            .children(downloading.map(|(fraction, moving)| progress_ring(fraction, moving, pal.accent, pal.line)))
             .child(canvas(move |b, window, _| bounds.borrow_mut().insert(KEY, (b, window.viewport_size().width)), |_, _, _, _| {}).absolute().inset_0())
             .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
                 this.update_hover.0 = *hovering;
                 this.update_hover_changed(cx);
             }))
             .on_click(cx.listener(move |this, _, _, cx| match (&offer, &this.model.updater) {
+                // Still finishing the ring: Restart shows once it's full.
+                (Some(_), UpdaterView::Ready) if this.update_ring.get().finishing() => {}
                 (Some(_), UpdaterView::Ready) => cx.emit(DrawerEvent::RestartToUpdate),
                 (Some(_), UpdaterView::Downloading(_)) => {}
-                (Some(_), _) => cx.emit(DrawerEvent::DownloadUpdate),
+                (Some(_), _) => {
+                    // The ring shows from the press, even when the download is done before the next frame.
+                    this.update_ring.set(Ring::started());
+                    cx.emit(DrawerEvent::DownloadUpdate);
+                }
                 (None, _) if this.model.update_check != Check::Checking => cx.emit(DrawerEvent::CheckNow),
                 (None, _) => {}
             }))
@@ -209,11 +279,15 @@ impl SettingsDrawer {
 }
 
 /// A thin ring around the button filling clockwise from the top as the download arrives; just the
-/// faint track while its size isn't known yet.
-fn progress_ring(fraction: Option<f32>, fill: Hsla, track: Hsla) -> impl IntoElement {
+/// faint track while its size isn't known yet. `moving`: it hasn't caught up yet (see [`Ring`]).
+fn progress_ring(fraction: Option<f32>, moving: bool, fill: Hsla, track: Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
+            // Easing after the real progress: draw again next frame until it has caught up.
+            if moving {
+                window.request_animation_frame();
+            }
             let centre = bounds.center();
             let r = bounds.size.width.min(bounds.size.height) / 2. - px(1.5);
             let at = |turn: f32| {
@@ -241,4 +315,67 @@ fn progress_ring(fraction: Option<f32>, fill: Hsla, track: Hsla) -> impl IntoEle
     )
     .absolute()
     .inset_0()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RING_SPEED, Ring};
+    use std::time::{Duration, Instant};
+
+    /// Steps `ring` every 1/60 s until it stops moving, at most `limit` steps; returns how many.
+    fn run(ring: &mut Ring, downloading: Option<Option<f32>>, ready: bool, start: Instant, limit: usize) -> usize {
+        for i in 1..=limit {
+            match ring.step(downloading, ready, start + Duration::from_secs_f32(i as f32 / 60.)) {
+                Some((_, true)) => {}
+                _ => return i,
+            }
+        }
+        limit
+    }
+
+    #[test]
+    fn a_download_done_at_once_still_fills_the_ring_smoothly() {
+        let start = Instant::now();
+        let mut ring = Ring::started();
+        ring.step(None, true, start);
+        let mut last = 0.;
+        let mut frames = 0;
+        for i in 1..200 {
+            match ring.step(None, true, start + Duration::from_secs_f32(i as f32 / 60.)) {
+                Some((Some(f), true)) => {
+                    assert!(f >= last, "never goes back");
+                    assert!(f - last <= RING_SPEED / 60. + 1e-4, "never faster than its top speed");
+                    last = f;
+                    frames += 1;
+                }
+                Some((Some(f), false)) => panic!("done but still drawn at {f}"),
+                _ => break,
+            }
+        }
+        assert!(last == 1., "fills all the way before Restart");
+        assert!(frames as f32 / 60. >= 0.6, "takes a moment, not one frame: {frames} frames");
+        assert_eq!(ring.step(None, true, start + Duration::from_secs(5)), None, "then Restart shows");
+    }
+
+    #[test]
+    fn follows_the_real_progress_and_settles_on_it() {
+        let start = Instant::now();
+        let mut ring = Ring::default();
+        let frames = run(&mut ring, Some(Some(0.5)), false, start, 600);
+        assert!(frames < 600, "settles");
+        assert_eq!(ring.step(Some(Some(0.5)), false, start + Duration::from_secs(20)), Some((Some(0.5), false)));
+    }
+
+    #[test]
+    fn already_done_when_the_drawer_opens_shows_restart_at_once() {
+        let mut ring = Ring::default();
+        assert_eq!(ring.step(None, true, Instant::now()), None);
+        assert!(!ring.finishing());
+    }
+
+    #[test]
+    fn a_failed_download_drops_the_ring() {
+        let mut ring = Ring::started();
+        assert_eq!(ring.step(None, false, Instant::now()), None);
+    }
 }
