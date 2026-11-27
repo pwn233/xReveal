@@ -28,9 +28,11 @@ objc2-core-foundation = "0.3"
 # The echo guard (#112): which audio devices are the Mac's own mic and speakers.
 objc2-core-audio = "0.3"
 objc2-core-media = { version = "0.3", features = ["objc2-core-video"] }
-objc2-core-video = { version = "0.3", features = ["objc2-metal"] }
+objc2-core-video = { version = "0.3", features = ["objc2-metal", "objc2-io-surface"] }
 objc2-foundation = "0.3"
-objc2-metal = { version = "0.3", features = ["block2"] }
+objc2-metal = { version = "0.3", features = ["block2", "objc2-io-surface"] }
+# The capture buffers' IOSurfaces, wrapped as Metal textures once per buffer (#118).
+objc2-io-surface = "0.3"
 # Metal's "presented" callback (the frame's on-screen time) is an Objective-C block.
 block2 = "0.6"
 objc2-quartz-core = { version = "0.3", features = ["objc2-metal", "objc2-core-foundation"] }
