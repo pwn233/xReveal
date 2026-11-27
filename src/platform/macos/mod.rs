@@ -222,6 +222,11 @@ impl VideoPipeline {
         lock(&self.shared.stats).summary(self.slot.replaced_total())
     }
 
+    /// How long the picture has been one flat colour (#108). Not watched on macOS yet: always zero.
+    pub fn flat_for(&self) -> std::time::Duration {
+        lock(&self.shared.flat).flat_for(std::time::Instant::now())
+    }
+
     /// What is being shown, e.g. `USB2 Video · 1280x720 @ 60 · 420v`, or why nothing is.
     pub fn description(&self) -> &str {
         &self.status

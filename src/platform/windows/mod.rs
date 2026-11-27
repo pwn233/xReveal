@@ -155,6 +155,7 @@ impl VideoPipeline {
         self.open_error = None;
         self.current = Some((identity, choice));
         self.started = Some(Instant::now());
+        lock(&self.shared.flat).reset();
         self.status = capture.description();
         self.capture = Some(capture);
         Ok(())
@@ -282,6 +283,11 @@ impl VideoPipeline {
     /// Timing for the Stats overlay.
     pub fn stats(&self) -> Summary {
         lock(&self.shared.stats).summary(self.slot.replaced_total())
+    }
+
+    /// How long the picture has been one flat colour (#108).
+    pub fn flat_for(&self) -> std::time::Duration {
+        lock(&self.shared.flat).flat_for(Instant::now())
     }
 
     /// What is being shown, e.g. `USB2 Video · 1280x720 @ 60 · NV12`, or why nothing is.

@@ -1,6 +1,7 @@
 //! Platform-independent pieces of the frame pipeline (docs/spec/v1.md §3.3).
 
 pub mod fill;
+pub mod flat;
 #[cfg(any(target_os = "windows", test))]
 pub mod mjpeg;
 pub mod picture;
@@ -17,6 +18,8 @@ pub struct VideoShared {
     pub picture: Mutex<picture::PictureSettings>,
     pub delay: Mutex<timing::DelaySettings>,
     pub stats: Mutex<timing::FrameStats>,
+    /// How long the picture has been one flat colour (#108).
+    pub flat: Mutex<flat::FlatWatch>,
 }
 
 /// Locks a mutex, ignoring poisoning (a panicked holder can't leave these in a broken state).
