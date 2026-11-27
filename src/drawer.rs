@@ -20,6 +20,7 @@ mod nav;
 pub use nav::bind_keys;
 
 use crate::audio::AudioModel;
+use crate::permission::{Access, Privacy};
 use crate::setup::{Accent, Corner, Density, DrawerSide, Look, StatsBox, ThemeChoice, WindowMode};
 use crate::source::{self, SourceIdentity, SourceInfo, VideoFormat};
 use crate::theme::{self, mono_family};
@@ -110,6 +111,9 @@ pub struct DrawerModel {
     pub audio: AudioModel,
     /// The Source's frame interval in seconds, to say how much Buffering costs.
     pub frame_interval: f64,
+    /// Camera and Microphone access: without it the inputs are listed locked (#113).
+    pub camera: Access,
+    pub microphone: Access,
 }
 
 /// A change made in the drawer, for the app to apply.
@@ -135,6 +139,8 @@ pub enum DrawerEvent {
     AudioOutput(Option<String>),
     Volume(f32),
     Mute(bool),
+    /// An **Allow access** button on a locked input (#113).
+    Allow(Privacy),
     ResetAll,
     Quit,
 }
@@ -202,6 +208,9 @@ pub mod hints {
     pub const HUE: &str = "Turns every colour around the colour wheel";
     pub const AV_SYNC: &str = "Lines sound up with the picture. Positive delays the sound, negative delays the picture.";
     pub const AUDIO_INPUT: &str = "Where the sound comes from. Normally the input device's own audio.";
+    pub const CARD_LOCKED: &str = "xReveal needs Camera access to show any input. macOS asks once; after that it's in System Settings › Privacy & Security › Camera.";
+    pub const AUDIO_INPUT_LOCKED: &str =
+        "xReveal needs Microphone access to play the input's sound. macOS asks once; after that it's in System Settings › Privacy & Security › Microphone.";
     pub const AUDIO_OUTPUT: &str = "Where you hear it. System output follows your computer's sound setting.";
     pub const VOLUME: &str = "xReveal's own volume, on top of your computer's";
 }
@@ -608,9 +617,15 @@ impl SettingsDrawer {
             cx.listener(|this, i: &usize, _, cx| this.set_delay(DelaySettings { buffering_frames: *i as u8, ..this.model.delay }, cx)),
         );
         let warning = input_lag_warning(DelaySettings { av_sync_offset_ms: 0, ..delay }, self.model.frame_interval);
+        let input = if self.model.camera == Access::Granted {
+            setting("Input", hints::CARD, Select::new(&self.card_select).placeholder("No input").menu_max_h(rems(18.)))
+        } else {
+            let names = self.model.sources.iter().map(|s| s.identity.name.clone()).collect();
+            setting("Input", hints::CARD_LOCKED, locked_inputs(Privacy::Camera, self.model.camera, names, cx))
+        };
         let mut rows = vec![
             self.live(),
-            setting("Input", hints::CARD, Select::new(&self.card_select).placeholder("No input").menu_max_h(rems(18.))),
+            input,
             setting("Video format", hints::VIDEO_FORMAT, Select::new(&self.format_select).placeholder("No formats").menu_max_h(rems(18.))),
             setting("Buffering", hints::BUFFERING, div().flex().flex_col().gap_2().child(buffering).children(warning.map(warn))),
         ];
@@ -917,16 +932,21 @@ impl SettingsDrawer {
             .flex()
             .flex_col()
             .gap_2()
-            .child(setting(
-                "Input",
-                hints::AUDIO_INPUT,
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(Select::new(&self.input_select).placeholder("No sound input").menu_max_h(rems(18.)))
-                    .child(self.meter.render()),
-            ))
+            .child(if self.model.microphone == Access::Granted {
+                setting(
+                    "Input",
+                    hints::AUDIO_INPUT,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(Select::new(&self.input_select).placeholder("No sound input").menu_max_h(rems(18.)))
+                        .child(self.meter.render()),
+                )
+            } else {
+                let names = audio.inputs.iter().map(|d| d.name.clone()).collect();
+                setting("Input", hints::AUDIO_INPUT_LOCKED, locked_inputs(Privacy::Microphone, self.model.microphone, names, cx))
+            })
             .children(audio.notice.clone().map(warn));
         let output = div()
             .flex()
@@ -1418,6 +1438,56 @@ fn checkboxes(id: &'static str, items: &[(&str, &str)], on: &[bool], cursor: Opt
             )
             .on_click(move |_, window, cx| on_toggle(&i, window, cx))
     }))
+}
+
+/// Inputs xReveal may not use yet, for want of Camera or Microphone access (#113): each on its own
+/// row, locked, with its own button. One grant unlocks them all (macOS asks per app, not per
+/// device). Before macOS has asked, the button asks; once it has, it won't ask again, so the button
+/// opens the privacy settings.
+fn locked_inputs(privacy: Privacy, access: Access, names: Vec<String>, cx: &mut Context<SettingsDrawer>) -> AnyElement {
+    let pal = theme::palette();
+    let label = if access == Access::NotAsked { "Allow access" } else { "Open System Settings" };
+    let what = match privacy {
+        Privacy::Camera => "Inputs show here",
+        Privacy::Microphone => "Sound inputs show here",
+    };
+    let names = if names.is_empty() { vec![format!("{what} once xReveal has access")] } else { names };
+    let rows = names.into_iter().enumerate().map(|(i, name)| {
+        let id = match privacy {
+            Privacy::Camera => ("allow-camera", i),
+            Privacy::Microphone => ("allow-microphone", i),
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded(px(8.))
+            .bg(pal.raised)
+            .border_1()
+            .border_color(pal.line)
+            .child(Icon::new(IconName::Lock).size_4().text_color(pal.muted))
+            .child(div().flex_1().min_w_0().truncate().text_sm().text_color(pal.secondary).child(name))
+            .child(
+                div()
+                    .id(id)
+                    .flex_none()
+                    .px_2()
+                    .py(px(2.))
+                    .rounded(px(6.))
+                    .text_xs()
+                    .cursor_pointer()
+                    .bg(pal.accent_fill)
+                    .border_1()
+                    .border_color(pal.accent_line)
+                    .text_color(pal.accent)
+                    .hover(|d| d.text_color(pal.text))
+                    .child(label)
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(DrawerEvent::Allow(privacy)))),
+            )
+    });
+    div().flex().flex_col().gap_1().children(rows).into_any_element()
 }
 
 fn quiet_button(id: &'static str, icon: IconName, label: &'static str) -> Stateful<Div> {

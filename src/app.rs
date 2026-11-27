@@ -111,6 +111,8 @@ pub struct XReveal {
     screen: Screen,
     /// The remembered Source starts once camera access is given.
     pending_launch: bool,
+    /// Camera and Microphone access as last seen, to notice them granted while xReveal runs (#113).
+    access_seen: (Access, Access),
     /// A broken `setup.toml` was set aside: said once, over the Welcome screen.
     notice: Option<String>,
     /// The picture has been one flat colour for a while: a hint over it, never a screen (#108).
@@ -193,6 +195,7 @@ impl XReveal {
             stats_refresh: None,
             screen: Screen::Starting,
             pending_launch: !camera_ready && remembered_input,
+            access_seen: (permission::access(Privacy::Camera), permission::access(Privacy::Microphone)),
             notice,
             blank_hint: None,
             unplugged: false,
@@ -264,6 +267,7 @@ impl XReveal {
     /// Works out what the Source is doing (docs/spec/v1.md §2.8) and reacts: reopens the card when
     /// it comes back or stops being busy, and notices another app changing its format.
     fn watch_signal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.watch_access(window, cx);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let screen = 'screen: {
             let camera = permission::access(Privacy::Camera);
@@ -375,6 +379,31 @@ impl XReveal {
             cx.notify();
         }
         let _ = window;
+    }
+
+    /// Camera or Microphone access changed while xReveal runs (#113), e.g. granted from a locked
+    /// input's **Allow access** button or in System Settings: unlock the inputs, and pick up what
+    /// macOS only reveals with access.
+    fn watch_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = (permission::access(Privacy::Camera), permission::access(Privacy::Microphone));
+        let (camera_was, microphone_was) = std::mem::replace(&mut self.access_seen, now);
+        if now == (camera_was, microphone_was) {
+            return;
+        }
+        if now.0 == Access::Granted && camera_was != Access::Granted {
+            crate::video::mark_access_granted();
+            // The inputs were listed before access: macOS can list them without their formats, and
+            // a remembered Video format must be looked for in the real list.
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if let Some(video) = &mut self.video {
+                video.refresh_sources();
+            }
+        }
+        if now.1 == Access::Granted && microphone_was != Access::Granted {
+            self.restart_sound(window, cx);
+        }
+        self.refresh_drawer(window, cx);
+        cx.notify();
     }
 
     /// Plays the input on screen again with the current route (it changed, or the buffer grew).
@@ -491,6 +520,8 @@ impl XReveal {
             look: setup.look,
             audio: self.sound.model(setup),
             frame_interval: 1.0 / 60.0,
+            camera: self.access_seen.0,
+            microphone: self.access_seen.1,
             ..Default::default()
         };
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -706,7 +737,7 @@ impl XReveal {
             tip: self.tip.is_some(),
             blank_hint: self.blank_hint.clone().filter(|_| self.tip.is_none()),
             echo: self.screen.shows_picture() && self.sound.echo_muted(&self.store.setup),
-            stats: stats.shown.then(|| (stats, stats_rows(self.stats(), &self.status, crate::video::FIRST_PRESENT.get().copied(), stats))),
+            stats: stats.shown.then(|| (stats, stats_rows(self.stats(), &self.status, crate::video::time_to_picture(crate::video::FIRST_PRESENT.get().copied(), crate::video::ACCESS_GRANTED.get().copied()), stats))),
             slide: self.slide,
             drawer_open: self.drawer_open,
             side: self.shown_side,
@@ -1005,6 +1036,10 @@ impl XReveal {
                 }
             }
             DrawerEvent::Quit => cx.quit(),
+            DrawerEvent::Allow(privacy) => {
+                permission::allow(privacy);
+                self.watch_access(window, cx);
+            }
             DrawerEvent::ResetAll => self.reset_all_settings(window, cx),
         }
         cx.notify();
@@ -1170,7 +1205,7 @@ impl XReveal {
 }
 
 /// The performance box's rows (label, value), with only what `shows` asks for.
-pub fn stats_rows(summary: Option<Summary>, description: &str, launch_to_picture: Option<Duration>, shows: StatsBox) -> Vec<(&'static str, String)> {
+pub fn stats_rows(summary: Option<Summary>, description: &str, to_picture: Option<(&'static str, Duration)>, shows: StatsBox) -> Vec<(&'static str, String)> {
     let mut rows = Vec::new();
     let summary = summary.unwrap_or_default();
     let approx = if summary.present_time_estimated { "≈" } else { "" };
@@ -1181,8 +1216,8 @@ pub fn stats_rows(summary: Option<Summary>, description: &str, launch_to_picture
     if shows.latency {
         rows.push(("capture → screen", ms(summary.capture_to_screen)));
         rows.push(("xReveal's share", ms(summary.arrival_to_screen)));
-        if let Some(launch) = launch_to_picture {
-            rows.push(("launch → picture", format!("{} ms", launch.as_millis())));
+        if let Some((label, took)) = to_picture {
+            rows.push((label, format!("{} ms", took.as_millis())));
         }
     }
     if shows.fps {
@@ -1557,7 +1592,7 @@ mod tests {
             late: 1,
             present_time_estimated: true,
         };
-        let rows = stats_rows(Some(summary), "USB2 Video · 1280x720 @ 60 · 420v", Some(Duration::from_millis(480)), all);
+        let rows = stats_rows(Some(summary), "USB2 Video · 1280x720 @ 60 · 420v", crate::video::time_to_picture(Some(Duration::from_millis(480)), None), all);
         assert_eq!(value(&rows, "capture → screen"), "≈12.3 ms · p99 18.1");
         assert_eq!(value(&rows, "xReveal's share"), "≈4.2 ms · p99 6.0");
         assert_eq!(value(&rows, "launch → picture"), "480 ms");
@@ -1565,7 +1600,7 @@ mod tests {
         assert_eq!(value(&rows, "dropped · late"), "3 · 1");
 
         let just_fps = StatsBox { latency: false, frames: false, format: false, ..all };
-        let rows = stats_rows(Some(summary), "", Some(Duration::from_millis(480)), just_fps);
+        let rows = stats_rows(Some(summary), "", crate::video::time_to_picture(Some(Duration::from_millis(480)), None), just_fps);
         assert_eq!(rows, vec![("fps", "59.9".to_string())]);
     }
 
