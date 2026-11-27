@@ -30,6 +30,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CloseDrawer, Some(KEY_CONTEXT)),
         KeyBinding::new("f3", ToggleStats, Some(KEY_CONTEXT)),
         KeyBinding::new("f11", ToggleFullscreen, Some(KEY_CONTEXT)),
+        // macOS's own fullscreen shortcut: on a Mac keyboard F11 needs fn and defaults to Show Desktop.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, Some(KEY_CONTEXT)),
         // Windows closes the window on Alt+F4 by itself, which quits too.
         KeyBinding::new("cmd-q", Quit, None),
     ]);
@@ -37,18 +40,22 @@ pub fn bind_keys(cx: &mut App) {
     drawer::bind_keys(cx);
 }
 
-/// Switches the window between a normal window and borderless fullscreen. On macOS that is GPUI's
-/// "simple" fullscreen (covering the screen, not a separate Space); on Windows its fullscreen is
-/// already borderless. Call it once per change: the switch happens a moment later.
+/// Switches the window between a normal window and fullscreen. On macOS that is macOS's own
+/// fullscreen (a Space of its own): only there does macOS show the picture direct to display, about
+/// a refresh sooner than a window stretched over the screen (#56). On Windows its fullscreen is
+/// borderless. Call it once per change: the switch happens a moment later.
 pub fn toggle_borderless(window: &Window) {
     #[cfg(target_os = "macos")]
-    window.toggle_simple_fullscreen();
+    if let Some(handle) = crate::platform::window_handle(window) {
+        crate::platform::toggle_fullscreen(handle);
+    }
     #[cfg(not(target_os = "macos"))]
     window.toggle_fullscreen();
 }
 
-/// How long a fullscreen switch from [`toggle_borderless`] takes to happen.
-const FULLSCREEN_SWITCH: Duration = Duration::from_millis(350);
+/// How long a fullscreen switch from [`toggle_borderless`] takes to happen: macOS slides into its
+/// own Space.
+const FULLSCREEN_SWITCH: Duration = Duration::from_millis(if cfg!(target_os = "macos") { 800 } else { 350 });
 
 /// Borderless window mode on or off (docs/spec/v1.md §2.2), centred on screen `display` (else the
 /// one it's on), after `delay`. Done outside GPUI's update, as the native call needs.
@@ -597,17 +604,17 @@ impl XReveal {
         if mode != WindowMode::Fullscreen {
             self.before_fullscreen = mode;
         }
-        // Fullscreen from the macOS green button is its own kind; leave it the same way.
-        if cfg!(target_os = "macos") && window.is_fullscreen() {
-            if mode != WindowMode::Fullscreen {
-                window.toggle_fullscreen();
+        // On macOS the window itself says whether it's fullscreen: the green button enters the same
+        // fullscreen as the Window setting.
+        let in_fullscreen = if cfg!(target_os = "macos") { window.is_fullscreen() } else { was == WindowMode::Fullscreen };
+        if mode == WindowMode::Fullscreen {
+            if !in_fullscreen {
+                toggle_borderless(window);
             }
-        } else if was == WindowMode::Fullscreen || mode == WindowMode::Fullscreen {
+        } else if in_fullscreen {
             toggle_borderless(window);
             // Leaving fullscreen brings back the frame the window had before; then the one asked for.
-            if was == WindowMode::Fullscreen {
-                set_borderless(window, mode == WindowMode::Borderless, None, FULLSCREEN_SWITCH, cx);
-            }
+            set_borderless(window, mode == WindowMode::Borderless, None, FULLSCREEN_SWITCH, cx);
         } else {
             set_borderless(window, mode == WindowMode::Borderless, None, Duration::ZERO, cx);
         }

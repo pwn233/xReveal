@@ -66,6 +66,17 @@ pub fn set_borderless(window: raw_window_handle::RawWindowHandle, borderless: bo
     let _ = (window, borderless, display);
 }
 
+/// Enters or leaves macOS's own fullscreen for `window` (#56), a moment later from the main queue.
+/// A borderless window gets its title bar back first: macOS's fullscreen needs a normal window.
+#[cfg(target_os = "macos")]
+pub fn toggle_fullscreen(window: raw_window_handle::RawWindowHandle) {
+    if let raw_window_handle::RawWindowHandle::AppKit(appkit) = window {
+        // SAFETY: GPUI's raw window handle on macOS is a valid NSView for the window's lifetime.
+        let view: &objc2_app_kit::NSView = unsafe { appkit.ns_view.cast().as_ref() };
+        macos::screens::toggle_fullscreen(view);
+    }
+}
+
 /// Makes `overlay` a click-through layer over `owner`, for the overlays that would otherwise sit
 /// under the video surface (Windows) — see `app::OverlayWindow`.
 pub fn make_overlay(overlay: &gpui_kit::Window, owner: raw_window_handle::RawWindowHandle) {
