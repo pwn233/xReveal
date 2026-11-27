@@ -81,7 +81,8 @@ New-Item -ItemType Directory $out | Out-Null
 # --- The machine
 $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 $meta = [ordered]@{
-    windows   = "$($cv.ProductName) $($cv.DisplayVersion), build $($cv.CurrentBuild).$($cv.UBR)"
+    # ProductName still says "Windows 10" on Windows 11 (build 22000 and later).
+    windows   = "$(if ([int]$cv.CurrentBuild -ge 22000) { $cv.ProductName -replace 'Windows 10', 'Windows 11' } else { $cv.ProductName }) $($cv.DisplayVersion), build $($cv.CurrentBuild).$($cv.UBR)"
     cpu       = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim()
     logicalCpus = [Environment]::ProcessorCount
     gpus      = @(Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name) (driver $($_.DriverVersion))" })
@@ -274,8 +275,8 @@ $L.Add("| Private Bytes | $(& $f2 $fitPb.slopePerHour) MB/h | $(& $f2 $fitPb.sig
 $L.Add("| Private working set | $(& $f2 $fitWsp.slopePerHour) MB/h | $(& $f2 $fitWsp.sigma) MB | $(& $f2 $fitWsp.range) MB |")
 $L.Add("| Dedicated GPU memory | $(& $f2 $fitDed.slopePerHour) MB/h | $(& $f2 $fitDed.sigma) MB | $(& $f2 $fitDed.range) MB |")
 $L.Add('')
-$L.Add("- **Settled by minute 10 (Private Bytes):** $(if ($settled) { 'yes' } else { 'NO: look at the table' }) (rule: slope under 6 MB/h and minutes 11 and 20 within 3 MB).")
-$L.Add("- **2-hour soak assumption (sigma < ~1.6 MB):** Private Bytes sigma = $(& $f2 $fitPb.sigma) MB -> $(if ($fitPb.sigma -lt 1.6) { 'holds' } else { 'DOES NOT HOLD' }).")
+$L.Add("- **Settled by minute 10 (Private Bytes):** $(if ([double]::IsNaN($fitPb.slopePerHour)) { 'n/a (soak too short)' } elseif ($settled) { 'yes' } else { 'NO: look at the table' }) (rule: slope under 6 MB/h and minutes 11 and 20 within 3 MB).")
+$L.Add("- **2-hour soak assumption (sigma < ~1.6 MB):** Private Bytes sigma = $(& $f2 $fitPb.sigma) MB -> $(if ([double]::IsNaN($fitPb.sigma)) { 'n/a' } elseif ($fitPb.sigma -lt 1.6) { 'holds' } else { 'DOES NOT HOLD' }).")
 $L.Add('- Ten points is a rough sigma; it is a check of the assumption, not a leak verdict.')
 $L | Set-Content (Join-Path $out 'summary.md') -Encoding utf8
 $meta | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'meta.json') -Encoding utf8
