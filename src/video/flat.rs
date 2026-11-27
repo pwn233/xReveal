@@ -6,15 +6,18 @@
 use std::time::{Duration, Instant};
 
 /// Columns and rows of the luma samples taken from each frame.
+#[cfg_attr(all(target_os = "macos", not(test)), expect(dead_code, reason = "macOS doesn't sample frames for it yet"))]
 pub const GRID: (usize, usize) = (16, 9);
 /// How far apart (in 8-bit luma) the samples may be and still count as one flat colour: a card's
 /// blank output can carry a little noise.
+#[cfg_attr(all(target_os = "macos", not(test)), expect(dead_code, reason = "macOS doesn't sample frames for it yet"))]
 pub const TOLERANCE: u8 = 3;
 /// How long the picture must stay flat before the hint shows.
 pub const HINT_AFTER: Duration = Duration::from_secs(10);
 
 /// Luma sampled at the middle of each cell of a [`GRID`] over a `width`×`height` frame;
 /// `luma(x, y)` reads one pixel.
+#[cfg_attr(all(target_os = "macos", not(test)), expect(dead_code, reason = "macOS doesn't sample frames for it yet"))]
 pub fn luma_grid(width: usize, height: usize, luma: impl Fn(usize, usize) -> u8) -> Vec<u8> {
     let (columns, rows) = GRID;
     (0..rows)
@@ -24,6 +27,7 @@ pub fn luma_grid(width: usize, height: usize, luma: impl Fn(usize, usize) -> u8)
 }
 
 /// Whether the samples are all one colour, within [`TOLERANCE`].
+#[cfg_attr(all(target_os = "macos", not(test)), expect(dead_code, reason = "macOS doesn't sample frames for it yet"))]
 pub fn is_flat(samples: &[u8]) -> bool {
     match (samples.iter().min(), samples.iter().max()) {
         (Some(low), Some(high)) => high - low <= TOLERANCE,
@@ -39,6 +43,7 @@ pub struct FlatWatch {
 
 impl FlatWatch {
     /// Takes in one frame's samples, seen at `now`.
+    #[cfg_attr(all(target_os = "macos", not(test)), expect(dead_code, reason = "macOS doesn't sample frames for it yet"))]
     pub fn observe(&mut self, samples: &[u8], now: Instant) {
         if is_flat(samples) {
             self.since.get_or_insert(now);
@@ -53,6 +58,7 @@ impl FlatWatch {
     }
 
     /// Forgets the run, for a new Source or Video format.
+    #[cfg_attr(all(target_os = "macos", not(test)), expect(dead_code, reason = "macOS doesn't sample frames for it yet"))]
     pub fn reset(&mut self) {
         self.since = None;
     }
