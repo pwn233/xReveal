@@ -56,6 +56,9 @@ pub struct Setup {
     pub sound_skipped: bool,
     /// The last version whose What's new was seen (#144): a newer one shows its notes once.
     pub whats_new_seen: Option<String>,
+    /// The Drawer swipe (#141): a sideways two-finger swipe on a trackpad opens and closes the
+    /// Settings drawer. On unless turned off.
+    pub drawer_swipe: bool,
 }
 
 impl Default for Setup {
@@ -77,6 +80,7 @@ impl Default for Setup {
             audio_buffers: BTreeMap::new(),
             sound_skipped: false,
             whats_new_seen: None,
+            drawer_swipe: true,
         }
     }
 }

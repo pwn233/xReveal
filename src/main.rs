@@ -11,6 +11,7 @@ mod report;
 mod screens;
 mod setup;
 mod source;
+mod swipe;
 mod theme;
 mod video;
 mod whats_new;

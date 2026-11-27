@@ -120,6 +120,8 @@ pub struct XReveal {
     pending_launch: bool,
     /// Camera and Microphone access as last seen, to notice them granted while xReveal runs (#113).
     access_seen: (Access, Access),
+    /// The Drawer swipe in progress (#141).
+    swipe: crate::swipe::Swipe,
     /// This version's What's new shows (#144): updated since it was last seen. The handle is its
     /// notes' scroll position, shared with the overlay window's copy on Windows.
     whats_new: Option<ScrollHandle>,
@@ -216,6 +218,7 @@ impl XReveal {
             pending_launch: !camera_ready && remembered_input,
             access_seen: (permission::access(Privacy::Camera), permission::access(Privacy::Microphone)),
             whats_new,
+            swipe: Default::default(),
             notice,
             blank_hint: None,
             unplugged: false,
@@ -542,6 +545,7 @@ impl XReveal {
             picture: setup.picture,
             delay: setup.delay,
             side: setup.drawer_side,
+            swipe: setup.drawer_swipe,
             window_mode: setup.window_mode,
             monitors,
             monitor: setup.monitor.clone(),
@@ -776,6 +780,60 @@ impl XReveal {
     }
 }
 
+impl XReveal {
+    /// One scroll event of a possible Drawer swipe (#141): fingers away from the drawer's side
+    /// open it, back towards it close it.
+    fn on_swipe(&mut self, phase: TouchPhase, fingers: (f32, f32), window: &mut Window, cx: &mut Context<Self>) {
+        if !self.store.setup.drawer_swipe {
+            return;
+        }
+        let Some(went) = self.swipe.feed(phase, fingers) else { return };
+        let away = match self.shown_side {
+            DrawerSide::Right => crate::swipe::Fingers::Left,
+            DrawerSide::Left => crate::swipe::Fingers::Right,
+        };
+        let open = went == away;
+        if open != self.drawer_open {
+            self.set_drawer_open(open, window, cx);
+        }
+    }
+}
+
+/// Hears every scroll in the window before anything else does (a capture-phase listener, so a
+/// list or a dialog that keeps a scroll to itself can't hide a swipe), and hands trackpad scrolls
+/// to [`XReveal::on_swipe`]. Only listens; never stops an event.
+fn swipe_listener(app: WeakEntity<XReveal>) -> impl IntoElement {
+    swipe_canvas(move |phase, fingers, window, cx| {
+        let _ = app.update(cx, |app, cx| app.on_swipe(phase, fingers, window, cx));
+    })
+}
+
+/// The same in the drawer's own window (Windows), handing the swipe to the main window's view.
+fn drawer_swipe_listener(host: WeakEntity<DrawerWindow>) -> impl IntoElement {
+    swipe_canvas(move |phase, fingers, _, cx| {
+        let _ = host.update(cx, |host, cx| host.with_main(cx, move |main, window, cx| main.on_swipe(phase, fingers, window, cx)));
+    })
+}
+
+/// An empty element that, each frame, listens for scrolls in its window in the capture phase and
+/// passes precise (trackpad) ones on as finger movement.
+fn swipe_canvas(on_scroll: impl Fn(TouchPhase, (f32, f32), &mut Window, &mut App) + Clone + 'static) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let on_scroll = on_scroll.clone();
+            window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                // Precise scrolling only: a mouse wheel's line steps are never a swipe.
+                let (DispatchPhase::Capture, ScrollDelta::Pixels(delta)) = (phase, event.delta) else { return };
+                let sign = if crate::platform::scroll_follows_fingers() { 1. } else { -1. };
+                on_scroll(event.touch_phase, (sign * delta.x.as_f32(), sign * delta.y.as_f32()), window, cx);
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+}
+
 /// A copy of what the display-only overlays show: the overlay window draws from it, never from
 /// [`XReveal`] itself (which may be mid-update when that window draws).
 #[derive(Clone)]
@@ -1005,6 +1063,7 @@ impl XReveal {
                 // The echo guard's notice goes once the mute is the person's.
                 self.refresh_drawer(window, cx);
             }
+            DrawerEvent::Swipe(on) => self.store.update(|s| s.drawer_swipe = on),
             DrawerEvent::Side(side) => {
                 self.store.update(|s| s.drawer_side = side);
                 if self.drawer_window.is_some() {
@@ -1483,6 +1542,7 @@ impl Render for XReveal {
             .children(drawer)
             // After the drawer, so the notch can cover the drawer's border where they meet.
             .children(passive)
+            .child(swipe_listener(cx.entity().downgrade()))
             .children(whats_new)
     }
 }
@@ -1616,6 +1676,7 @@ impl Render for DrawerWindow {
             .overflow_hidden()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
+            .child(drawer_swipe_listener(cx.entity().downgrade()))
             .on_action(cx.listener(|this, _: &ToggleDrawer, _, cx| this.with_main(cx, |m, w, cx| m.set_drawer_open(false, w, cx))))
             .on_action(cx.listener(|this, _: &CloseDrawer, _, cx| this.with_main(cx, |m, w, cx| m.set_drawer_open(false, w, cx))))
             .on_action(cx.listener(|this, _: &ToggleStats, _, cx| this.with_main(cx, |m, w, cx| m.toggle_stats(w, cx))))
