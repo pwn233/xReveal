@@ -153,12 +153,14 @@ pub fn activate(hwnd: HWND) {
 /// Makes pop-up `popup` (the drawer's or the overlays' window) part of `owner`: owned by it, so it
 /// stays just above it and minimises with it, never over other apps; and without the frame,
 /// rounded corners, shadow and open and close animations Windows gives a window of its kind.
+/// `owner` keeps the look and feel of focus while the pop-up covers it ([`follow_focus`]).
 pub fn own_popup(popup: HWND, owner: HWND) {
     use windows::Win32::Graphics::Dwm::{
         DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
         DwmSetWindowAttribute,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GWLP_HWNDPARENT, GetWindowLongPtrW, HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE, SetWindowLongPtrW, WS_EX_TOPMOST};
+    follow_focus(owner);
     unsafe {
         SetWindowLongPtrW(popup, GWLP_HWNDPARENT, owner.0 as isize);
         let style = GetWindowLongPtrW(popup, GWL_EXSTYLE);
@@ -236,4 +238,54 @@ unsafe extern "system" fn pass_mouse_through(
         return windows::Win32::Foundation::LRESULT(HTTRANSPARENT as isize);
     }
     unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
+/// Focus for xReveal's main window `owner`, whose content its pop-ups cover:
+/// - Its title bar stays lit while another window of xReveal's (the drawer) has the keys, the way
+///   it does for a menu or a drop-down list. Windows would otherwise draw it as if xReveal had lost
+///   focus whenever the drawer opens. It still dims when another app is chosen.
+/// - A click on the picture brings xReveal to the front. The click reaches `owner` through the
+///   overlay window, which never takes focus ([`make_overlay`]), so on its own it wouldn't.
+pub fn follow_focus(owner: HWND) {
+    unsafe {
+        let _ = windows::Win32::UI::Shell::SetWindowSubclass(owner, Some(main_window_focus), 2, 0);
+    }
+}
+
+unsafe extern "system" fn main_window_focus(
+    hwnd: HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Shell::DefSubclassProc;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow, WM_ACTIVATEAPP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_NCACTIVATE, WM_RBUTTONDOWN,
+    };
+    let ours = |window: HWND| unsafe { GetWindowThreadProcessId(window, None) == GetCurrentThreadId() };
+    match message {
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+            if !ours(unsafe { GetForegroundWindow() }) {
+                let _ = unsafe { SetForegroundWindow(hwnd) };
+            }
+            unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+        }
+        // Losing the keys to a window of xReveal's own (`lparam`, still unowned while it opens):
+        // draw the title bar as active anyway.
+        WM_NCACTIVATE if wparam.0 == 0 && lparam.0 != 0 => {
+            let active = ours(HWND(lparam.0 as *mut _));
+            unsafe { DefSubclassProc(hwnd, message, WPARAM(active as usize), lparam) }
+        }
+        // xReveal as a whole gains or loses focus, maybe while the drawer has the keys, when no
+        // WM_NCACTIVATE reaches this window: light or dim its title bar to match.
+        WM_ACTIVATEAPP => {
+            unsafe { DefSubclassProc(hwnd, WM_NCACTIVATE, WPARAM((wparam.0 != 0) as usize), LPARAM(0)) };
+            unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+        }
+        _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+    }
 }
