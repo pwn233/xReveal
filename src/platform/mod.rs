@@ -131,3 +131,12 @@ pub fn window_handle(window: &gpui_kit::Window) -> Option<raw_window_handle::Raw
         None
     }
 }
+
+/// Whether the OS adds its own camera effects that xReveal can point to (macOS: Video Effects).
+pub const HAS_VIDEO_EFFECTS: bool = cfg!(target_os = "macos");
+
+/// Opens the OS's panel for its own camera effects (macOS: Video Effects).
+pub fn show_video_effects() {
+    #[cfg(target_os = "macos")]
+    macos::access::show_video_effects();
+}

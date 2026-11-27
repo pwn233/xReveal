@@ -44,3 +44,12 @@ pub fn open_settings(privacy: Privacy) {
     };
     let _ = std::process::Command::new("open").arg(format!("x-apple.systempreferences:com.apple.preference.security?{page}")).spawn();
 }
+
+/// Opens macOS's Video Effects panel for xReveal, where the person can turn the effects off.
+pub fn show_video_effects() {
+    use objc2::{ClassType, msg_send, sel};
+    let known: bool = unsafe { msg_send![AVCaptureDevice::class(), respondsToSelector: sel!(showSystemUserInterface:)] };
+    if known {
+        unsafe { AVCaptureDevice::showSystemUserInterface(objc2_av_foundation::AVCaptureSystemUserInterface::VideoEffects) };
+    }
+}
