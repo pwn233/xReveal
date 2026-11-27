@@ -187,14 +187,15 @@ fn access_cards(camera: Access, microphone: Access, pal: Palette, actions: &Acti
             Privacy::Camera => (IconName::Camera, "Camera", "Needed", "For the picture from your capture card."),
             Privacy::Microphone => (IconName::Mic, "Microphone", "Optional", "For the card's sound. You can play without it."),
         };
-        let (status_icon, status, colour) = match access {
-            Access::Granted => (IconName::CircleCheck, "Allowed", pal.accent),
-            Access::Denied => (IconName::CircleX, "Turned off", pal.warn),
-            Access::NotAsked => (IconName::Circle, "Not allowed yet", pal.muted),
-        };
         let allow = actions.allow.clone();
         let primary = privacy == Privacy::Camera && access == Access::NotAsked;
-        let label = if access == Access::Denied { "Open System Settings" } else { "Allow access" };
+        let granted = access == Access::Granted;
+        // The button says where it stands: Allowed once given (and does nothing then).
+        let label = match access {
+            Access::Granted => "Allowed",
+            Access::Denied => "Open System Settings",
+            Access::NotAsked => "Allow access",
+        };
         div()
             .w(px(220.))
             .p_4()
@@ -208,27 +209,26 @@ fn access_cards(camera: Access, microphone: Access, pal: Palette, actions: &Acti
             .child(div().flex().items_center().justify_between().child(Icon::new(icon).size_6().text_color(pal.text)).child(div().text_xs().text_color(pal.muted).child(tag)))
             .child(div().text_base().font_weight(FontWeight::MEDIUM).text_color(pal.text).child(name))
             .child(div().text_sm().line_height(px(19.)).text_color(pal.secondary).child(why))
-            .child(div().flex().items_center().gap_1().text_xs().text_color(pal.secondary).child(Icon::new(status_icon).size_3().text_color(colour)).child(status))
-            .when(access != Access::Granted, |d| {
-                d.child(
-                    div()
-                        .id(match privacy {
-                            Privacy::Camera => "allow-camera",
-                            Privacy::Microphone => "allow-microphone",
-                        })
-                        .h(px(30.))
-                        .rounded(px(8.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_sm()
-                        .cursor_pointer()
-                        .when(primary, |d| d.bg(pal.accent).text_color(pal.deep).hover(|d| d.opacity(0.9)))
-                        .when(!primary, |d| d.bg(pal.raised).border_1().border_color(pal.line).text_color(pal.text).hover(|d| d.bg(pal.raised_hover)))
-                        .child(label)
-                        .on_click(move |_, w, cx| allow(privacy, w, cx)),
-                )
-            })
+            .child(
+                div()
+                    .id(match privacy {
+                        Privacy::Camera => "allow-camera",
+                        Privacy::Microphone => "allow-microphone",
+                    })
+                    .mt_1()
+                    .h(px(30.))
+                    .rounded(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .text_sm()
+                    .when(granted, |d| d.bg(pal.accent_fill).border_1().border_color(pal.accent_line).text_color(pal.accent).child(Icon::new(IconName::Check).size_4()))
+                    .when(primary, |d| d.cursor_pointer().bg(pal.accent).text_color(pal.deep).hover(|d| d.opacity(0.9)))
+                    .when(!primary && !granted, |d| d.cursor_pointer().bg(pal.raised).border_1().border_color(pal.line).text_color(pal.text).hover(|d| d.bg(pal.raised_hover)))
+                    .child(label)
+                    .when(!granted, |d| d.on_click(move |_, w, cx| allow(privacy, w, cx))),
+            )
     };
     let skip = actions.skip_sound.clone();
     div()
