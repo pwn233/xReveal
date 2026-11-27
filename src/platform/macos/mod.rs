@@ -4,6 +4,7 @@
 pub mod access;
 mod capture;
 pub mod http;
+pub mod install;
 mod render;
 pub mod screens;
 pub mod sound_devices;

@@ -126,6 +126,8 @@ pub struct XReveal {
     picture_seen: bool,
     /// How the last update check this run went (it's running while `Checking`).
     update_check: crate::update::Check,
+    /// The in-app update (#163).
+    updater: crate::update::Updater,
     _update_watch: Option<Task<()>>,
     /// This version's What's new shows (#144): updated since it was last seen. The handle is its
     /// notes' scroll position, shared with the overlay window's copy on Windows.
@@ -226,6 +228,7 @@ impl XReveal {
             swipe: Default::default(),
             picture_seen: false,
             update_check: Default::default(),
+            updater: Default::default(),
             _update_watch: None,
             notice,
             blank_hint: None,
@@ -282,6 +285,8 @@ impl XReveal {
         this.showing_changed(window, cx);
         this.watch_signal(window, cx);
         this.watch_for_updates(window, cx);
+        // After an in-app update (#163): the previous version goes, off the main thread.
+        cx.background_executor().spawn(async { crate::platform::clean_up_update() }).detach();
         this._signal_watch = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
@@ -559,6 +564,7 @@ impl XReveal {
             check_updates: setup.updates.check,
             update: setup.updates.offer(crate::whats_new::VERSION).map(|v| (v.to_owned(), setup.updates.notes.clone())),
             update_check: self.update_check,
+            updater: self.updater.view(),
             window_mode: setup.window_mode,
             monitors,
             monitor: setup.monitor.clone(),
@@ -805,6 +811,54 @@ impl XReveal {
                 }
             }
         }));
+    }
+
+    /// The in-app update (#163): downloads the offered version, checks it and gets it ready, while
+    /// the update button's ring follows the download. Nothing installs until Restart is pressed.
+    fn download_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(version) = self.store.setup.updates.offer(crate::whats_new::VERSION).map(str::to_owned) else { return };
+        if matches!(self.updater, crate::update::Updater::Downloading(_) | crate::update::Updater::Ready(_)) {
+            return;
+        }
+        let progress = std::sync::Arc::new(crate::update::Progress::default());
+        self.updater = crate::update::Updater::Downloading(progress.clone());
+        self.refresh_drawer(window, cx);
+        let fetching = progress.clone();
+        let done = cx.background_executor().spawn(async move { crate::update::fetch_update(&version, &fetching) });
+        // The ring follows the download while it runs.
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                let downloading = this.update_in(cx, |this, window, cx| {
+                    let downloading = matches!(this.updater, crate::update::Updater::Downloading(_));
+                    if downloading {
+                        this.refresh_drawer(window, cx);
+                    }
+                    downloading
+                });
+                match downloading {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    // xReveal closed mid-download: stop it.
+                    Err(_) => {
+                        progress.cancel();
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = done.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.updater = match result {
+                    Ok(prepared) => crate::update::Updater::Ready(prepared),
+                    Err(why) => crate::update::Updater::Failed(why),
+                };
+                this.refresh_drawer(window, cx);
+            });
+        })
+        .detach();
     }
 
     fn check_for_update(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1120,6 +1174,18 @@ impl XReveal {
             }
             DrawerEvent::Swipe(on) => self.store.update(|s| s.drawer_swipe = on),
             DrawerEvent::CheckNow => self.check_for_update(true, window, cx),
+            DrawerEvent::DownloadUpdate => self.download_update(window, cx),
+            DrawerEvent::RestartToUpdate => {
+                if let crate::update::Updater::Ready(prepared) = &self.updater {
+                    match crate::platform::install_update(prepared) {
+                        Ok(()) => cx.quit(),
+                        Err(why) => {
+                            self.updater = crate::update::Updater::Failed(why);
+                            self.refresh_drawer(window, cx);
+                        }
+                    }
+                }
+            }
             DrawerEvent::CheckUpdates(on) => {
                 self.store.update(|s| if on { s.updates.check = true } else { s.updates.turn_off() });
                 // Switching it on checks at once; off hides an update already found.

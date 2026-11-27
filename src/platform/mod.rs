@@ -170,3 +170,51 @@ pub fn latest_release() -> Option<crate::update::Answer> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     None
 }
+
+/// A GET of `url` (status and body), for the update's checksums (#163).
+pub fn http_get(url: &str) -> Option<(isize, Vec<u8>)> {
+    #[cfg(target_os = "macos")]
+    return macos::http::get(url, "text/plain");
+    #[cfg(target_os = "windows")]
+    return windows::http::get(url, "text/plain");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    None
+}
+
+/// Downloads `url` to `dest` with `progress` (#163). Blocking: run it on a background thread.
+pub fn download(url: &str, dest: &std::path::Path, progress: &crate::update::Progress) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return macos::http::download(url, dest, progress);
+    #[cfg(target_os = "windows")]
+    return windows::http::download(url, dest, progress);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Err("not on this OS".into())
+}
+
+/// Gets a verified download ready to install (#163): returns what [`install_update`] takes.
+pub fn prepare_update(download: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    return macos::install::prepare(download);
+    #[cfg(target_os = "windows")]
+    return windows::install::prepare(download);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Err("not on this OS".into())
+}
+
+/// Installs it and starts the new version; xReveal quits right after (#163).
+pub fn install_update(prepared: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return macos::install::install_and_relaunch(prepared);
+    #[cfg(target_os = "windows")]
+    return windows::install::install_and_relaunch(prepared);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Err("not on this OS".into())
+}
+
+/// Removes what an update left behind (the previous version), at launch.
+pub fn clean_up_update() {
+    #[cfg(target_os = "macos")]
+    macos::install::clean_up();
+    #[cfg(target_os = "windows")]
+    windows::install::clean_up();
+}

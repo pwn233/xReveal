@@ -4,6 +4,7 @@
 pub mod container;
 mod device_settings;
 pub mod http;
+pub mod install;
 pub mod media;
 mod render;
 pub mod screens;

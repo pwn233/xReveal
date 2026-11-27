@@ -112,6 +112,8 @@ pub struct DrawerModel {
     pub update: Option<(String, Vec<String>)>,
     /// How the last check this run went (#145).
     pub update_check: crate::update::Check,
+    /// The in-app update: downloading, ready to restart, or failed (#163).
+    pub updater: crate::update::UpdaterView,
     pub window_mode: WindowMode,
     /// Every screen (its identity and the name to show), and the one xReveal is on.
     pub monitors: Vec<(String, String)>,
@@ -140,6 +142,9 @@ pub enum DrawerEvent {
     CheckUpdates(bool),
     /// The update button asked to check now (#145).
     CheckNow,
+    /// The update button asked to download the newer version, or to restart into it (#163).
+    DownloadUpdate,
+    RestartToUpdate,
     WindowMode(WindowMode),
     /// Show xReveal on this screen (by its identity).
     Monitor(String),
