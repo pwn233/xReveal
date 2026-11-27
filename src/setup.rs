@@ -272,8 +272,23 @@ impl WindowPlacement {
     /// The smallest window worth restoring; anything smaller opens at the default size instead.
     pub const MIN: (f32, f32) = (480.0, 270.0);
 
+    /// Room the window frame takes around the content: both side borders, and the title bar with
+    /// the bottom border. GPUI on Windows puts half of it before `x`/`y` and half after the content.
+    pub const FRAME: (f32, f32) = (16.0, 40.0);
+
     pub fn usable(&self) -> bool {
         self.width >= Self::MIN.0 && self.height >= Self::MIN.1 && [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite())
+    }
+
+    /// The same window, made to fit inside `area` (a screen's visible part: x, y, width, height):
+    /// shrunk if bigger, then moved in from any edge it hangs over. A window that fits stays put.
+    pub fn fit_into(self, (ax, ay, aw, ah): (f32, f32, f32, f32)) -> Self {
+        let width = self.width.min(aw - Self::FRAME.0).max(Self::MIN.0);
+        let height = self.height.min(ah - Self::FRAME.1).max(Self::MIN.1);
+        let (half_w, half_h) = (Self::FRAME.0 / 2.0, Self::FRAME.1 / 2.0);
+        let x = self.x.min(ax + aw - width - half_w).max(ax + half_w);
+        let y = self.y.min(ay + ah - height - half_h).max(ay + half_h);
+        Self { x, y, width, height }
     }
 }
 
@@ -597,6 +612,22 @@ mod tests {
         assert!(only_fps.flip(0).latency && only_fps.flip(0).fps, "others still switch on");
         assert_eq!(Look { opacity: 0.1, ..Look::default() }.opacity(), 0.6, "never fully see-through");
         assert!(WindowPlacement { x: -1900.0, y: 30.0, width: 1280.0, height: 720.0 }.usable(), "a monitor left of the primary");
+    }
+
+    #[test]
+    fn a_remembered_window_is_fitted_onto_its_screen() {
+        let screen = (0.0, 0.0, 3440.0, 1392.0);
+        let inside = WindowPlacement { x: 200.0, y: 100.0, width: 1280.0, height: 720.0 };
+        assert_eq!(inside.fit_into(screen), inside, "a window that fits stays put");
+        // Seen on the Windows test PC: as wide as the screen but starting at its middle.
+        let hanging = WindowPlacement { x: 1532.0, y: 151.0, width: 3440.0, height: 1369.0 };
+        assert_eq!(hanging.fit_into(screen), WindowPlacement { x: 8.0, y: 20.0, width: 3424.0, height: 1352.0 }, "title bar on screen");
+        let past_right = WindowPlacement { x: 3000.0, y: 100.0, width: 1280.0, height: 720.0 };
+        assert_eq!(past_right.fit_into(screen).x, 3440.0 - 1280.0 - 8.0, "moved in from the right edge, same size");
+        // A screen above the primary has negative coordinates.
+        let above = (450.0, -1440.0, 2560.0, 1392.0);
+        let above_left = WindowPlacement { x: 0.0, y: -1500.0, width: 1280.0, height: 720.0 };
+        assert_eq!(above_left.fit_into(above), WindowPlacement { x: 458.0, y: -1420.0, width: 1280.0, height: 720.0 });
     }
 
     #[test]

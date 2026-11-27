@@ -37,9 +37,9 @@ fn main() {
         let store = setup::Store::open();
         // The monitor to open on: the remembered one, recognised by the display's own identity,
         // else the primary (docs/spec/v1.md §2.1). On the remembered one, the window goes back
-        // where it was.
-        let (display_id, remembered) = launch_display(store.setup.monitor.as_deref(), cx);
-        let window_bounds = match store.setup.window.filter(|p| remembered && p.usable()) {
+        // where it was, fitted onto the screen in case it hangs off it or the screen has shrunk.
+        let (display_id, remembered, area) = launch_display(store.setup.monitor.as_deref(), cx);
+        let window_bounds = match store.setup.window.filter(|p| remembered && p.usable()).map(|p| p.fit_into(area)) {
             Some(p) => WindowBounds::Windowed(Bounds { origin: point(px(p.x), px(p.y)), size: size(px(p.width), px(p.height)) }),
             None => WindowBounds::centered(display_id, size(px(1280.), px(720.)), cx),
         };
@@ -111,8 +111,9 @@ fn watch_smoke_test() {
 }
 
 /// The display xReveal opens on: `remembered` (a display UUID) if it's connected, else the primary
-/// display. Also says whether it is the remembered one.
-fn launch_display(remembered: Option<&str>, cx: &App) -> (Option<DisplayId>, bool) {
+/// display. Also says whether it is the remembered one, and gives its visible area (x, y, width,
+/// height, without the taskbar).
+fn launch_display(remembered: Option<&str>, cx: &App) -> (Option<DisplayId>, bool, (f32, f32, f32, f32)) {
     let mut displays = cx.displays();
     let primary = cx.primary_display().map(|d| d.id());
     // Primary first, so the fallback (index 0) is the primary display.
@@ -120,5 +121,9 @@ fn launch_display(remembered: Option<&str>, cx: &App) -> (Option<DisplayId>, boo
     let identities: Vec<String> = displays.iter().map(|d| d.uuid().map(|u| u.to_string()).unwrap_or_default()).collect();
     let index = source::choose_monitor(remembered, &identities);
     let found = remembered.is_some_and(|r| identities.get(index).is_some_and(|i| i == r));
-    (displays.get(index).map(|d| d.id()), found)
+    let display = displays.get(index);
+    let area = display.map(|d| d.visible_bounds()).map_or((0.0, 0.0, f32::MAX, f32::MAX), |b| {
+        (b.origin.x.as_f32(), b.origin.y.as_f32(), b.size.width.as_f32(), b.size.height.as_f32())
+    });
+    (display.map(|d| d.id()), found, area)
 }

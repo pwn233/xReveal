@@ -1,5 +1,10 @@
 //! Monitors on Windows: their names, and moving the window onto one (GPUI has no call for either).
 
+use windows::Win32::Devices::Display::{
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes,
+    QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{DISPLAY_DEVICEW, EnumDisplayDevicesW, GetMonitorInfoW, HMONITOR, MONITORINFO, MONITORINFOEXW};
 use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
@@ -12,13 +17,55 @@ fn info(monitor: u64) -> Option<MONITORINFOEXW> {
     ok.as_bool().then_some(info)
 }
 
-/// A monitor's name as Windows lists it ("DELL U2720Q"), or `None`.
+fn text(wide: &[u16]) -> String {
+    let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+    String::from_utf16_lossy(&wide[..len])
+}
+
+/// A monitor's name as Windows Settings shows it ("DELL U2720Q"), or `None`. That's the monitor's
+/// own (EDID) name from the display configuration; the driver's name, which is often just
+/// "Generic PnP Monitor", is the fallback.
 pub fn name(monitor: u64) -> Option<String> {
     let info = info(monitor)?;
+    let gdi_name = text(&info.szDevice);
+    if let Some(name) = friendly_name(&gdi_name).filter(|n| !n.is_empty()) {
+        return Some(name);
+    }
     let mut device = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
-    unsafe { EnumDisplayDevicesW(PCWSTR(info.szDevice.as_ptr()), 0, &mut device, 0) }.as_bool().then(|| {
-        let len = device.DeviceString.iter().position(|&c| c == 0).unwrap_or(device.DeviceString.len());
-        String::from_utf16_lossy(&device.DeviceString[..len])
+    unsafe { EnumDisplayDevicesW(PCWSTR(info.szDevice.as_ptr()), 0, &mut device, 0) }.as_bool().then(|| text(&device.DeviceString))
+}
+
+/// The EDID name of the monitor showing GDI device `gdi_name` (`\\.\DISPLAY1`).
+fn friendly_name(gdi_name: &str) -> Option<String> {
+    let (mut paths, mut modes) = (0u32, 0u32);
+    unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) }.ok().ok()?;
+    let mut path_list = vec![DISPLAYCONFIG_PATH_INFO::default(); paths as usize];
+    let mut mode_list = vec![DISPLAYCONFIG_MODE_INFO::default(); modes as usize];
+    unsafe { QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut paths, path_list.as_mut_ptr(), &mut modes, mode_list.as_mut_ptr(), None) }.ok().ok()?;
+    path_list.truncate(paths as usize);
+    path_list.iter().find_map(|path| {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } != 0 || !text(&source.viewGdiDeviceName).eq_ignore_ascii_case(gdi_name) {
+            return None;
+        }
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        (unsafe { DisplayConfigGetDeviceInfo(&mut target.header) } == 0).then(|| text(&target.monitorFriendlyDeviceName))
     })
 }
 
