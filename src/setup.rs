@@ -54,6 +54,8 @@ pub struct Setup {
     /// **Continue without sound** was chosen on the first screen (#143), so it doesn't wait for
     /// Microphone access again. Access can still be given later from the Audio tab.
     pub sound_skipped: bool,
+    /// The last version whose What's new was seen (#144): a newer one shows its notes once.
+    pub whats_new_seen: Option<String>,
 }
 
 impl Default for Setup {
@@ -74,6 +76,7 @@ impl Default for Setup {
             sources: Vec::new(),
             audio_buffers: BTreeMap::new(),
             sound_skipped: false,
+            whats_new_seen: None,
         }
     }
 }

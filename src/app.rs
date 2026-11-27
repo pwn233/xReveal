@@ -120,6 +120,9 @@ pub struct XReveal {
     pending_launch: bool,
     /// Camera and Microphone access as last seen, to notice them granted while xReveal runs (#113).
     access_seen: (Access, Access),
+    /// This version's What's new shows (#144): updated since it was last seen. The handle is its
+    /// notes' scroll position, shared with the overlay window's copy on Windows.
+    whats_new: Option<ScrollHandle>,
     /// A broken `setup.toml` was set aside: said once, over the Welcome screen.
     notice: Option<String>,
     /// The picture has been one flat colour for a while: a hint over it, never a screen (#108).
@@ -162,6 +165,15 @@ impl XReveal {
         // Only a remembered input starts by itself; otherwise the no-input screen says to press Tab.
         let remembered_input = store.setup.source.is_some() && !store.first_run;
         let notice = store.notice.take();
+        // What's new (#144): once after an update. A first install has nothing to compare with, so
+        // it counts this version as seen.
+        let whats_new = if store.first_run {
+            store.update(|s| s.whats_new_seen = Some(crate::whats_new::VERSION.into()));
+            false
+        } else {
+            store.setup.whats_new_seen.as_deref() != Some(crate::whats_new::VERSION) && !crate::whats_new::notes().is_empty()
+        }
+        .then(ScrollHandle::new);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let (video, status) = {
             let remembered = store.setup.source.clone();
@@ -203,6 +215,7 @@ impl XReveal {
             screen: Screen::Starting,
             pending_launch: !camera_ready && remembered_input,
             access_seen: (permission::access(Privacy::Camera), permission::access(Privacy::Microphone)),
+            whats_new,
             notice,
             blank_hint: None,
             unplugged: false,
@@ -758,6 +771,7 @@ impl XReveal {
             drawer_open: self.drawer_open,
             side: self.shown_side,
             handle: self.handle_slide,
+            whats_new: self.whats_new.clone().filter(|_| self.overlays_in_own_window),
         }
     }
 }
@@ -777,6 +791,8 @@ struct Overlays {
     drawer_open: bool,
     side: DrawerSide,
     handle: drawer::Slide,
+    /// Draw What's new, on this scroll position (only where the overlays have their own window).
+    whats_new: Option<ScrollHandle>,
 }
 
 impl Overlays {
@@ -789,6 +805,10 @@ impl Overlays {
         let bar = |text: SharedString| panel(div().max_w(px(BAR_WIDTH))).child(text).into_any_element();
         let side = self.side;
         let mut out = Vec::new();
+        if let Some(scroll) = &self.whats_new {
+            // Shown only: the main window's invisible twin takes the clicks and the scrolling.
+            out.push(crate::whats_new::dialog(pal, &crate::whats_new::notes(), scroll, None));
+        }
         if let Some(status) = self.status.clone() {
             out.push(panel(div()).child(status).into_any_element());
         }
@@ -1396,6 +1416,28 @@ impl Render for XReveal {
         } else {
             self.overlays().render(window, notices)
         };
+        // What's new (#144). Its buttons work here; where the overlays have their own click-through
+        // window (Windows), that window draws the card and this one is an invisible twin at the
+        // same place, which the clicks reach.
+        let whats_new = self.whats_new.as_ref().map(|scroll| {
+            let (this, that) = (cx.entity().downgrade(), cx.entity().downgrade());
+            let actions = crate::whats_new::Actions {
+                got_it: Box::new(move |_, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.whats_new = None;
+                        this.store.update(|s| s.whats_new_seen = Some(crate::whats_new::VERSION.into()));
+                        cx.notify();
+                    });
+                }),
+                github: Box::new(|_, cx| cx.open_url(crate::whats_new::RELEASE_PAGE)),
+                // Redraw the fades (and the overlay window's copy, which follows this view).
+                scrolled: Box::new(move |_, cx| {
+                    let _ = that.update(cx, |_, cx| cx.notify());
+                }),
+            };
+            let dialog = crate::whats_new::dialog(pal, &crate::whats_new::notes(), scroll, Some(actions));
+            if self.overlays_in_own_window { div().absolute().inset_0().opacity(0.).child(dialog).into_any_element() } else { dialog }
+        });
 
         div()
             .size_full()
@@ -1441,6 +1483,7 @@ impl Render for XReveal {
             .children(drawer)
             // After the drawer, so the notch can cover the drawer's border where they meet.
             .children(passive)
+            .children(whats_new)
     }
 }
 
