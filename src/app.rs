@@ -113,6 +113,8 @@ pub struct XReveal {
     pending_launch: bool,
     /// Camera and Microphone access as last seen, to notice them granted while xReveal runs (#113).
     access_seen: (Access, Access),
+    /// The OS's own camera effects on for xReveal, as last seen (#118).
+    video_effects: Option<Vec<&'static str>>,
     /// A broken `setup.toml` was set aside: said once, over the Welcome screen.
     notice: Option<String>,
     /// The picture has been one flat colour for a while: a hint over it, never a screen (#108).
@@ -196,6 +198,7 @@ impl XReveal {
             screen: Screen::Starting,
             pending_launch: !camera_ready && remembered_input,
             access_seen: (permission::access(Privacy::Camera), permission::access(Privacy::Microphone)),
+            video_effects: crate::platform::video_effects(),
             notice,
             blank_hint: None,
             unplugged: false,
@@ -385,6 +388,12 @@ impl XReveal {
     /// input's **Allow access** button or in System Settings: unlock the inputs, and pick up what
     /// macOS only reveals with access.
     fn watch_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The camera effects are switched in macOS's own panel: keep the drawer's line in step.
+        let effects = crate::platform::video_effects();
+        if effects != self.video_effects {
+            self.video_effects = effects;
+            self.refresh_drawer(window, cx);
+        }
         let now = (permission::access(Privacy::Camera), permission::access(Privacy::Microphone));
         let (camera_was, microphone_was) = std::mem::replace(&mut self.access_seen, now);
         if now == (camera_was, microphone_was) {
@@ -522,6 +531,7 @@ impl XReveal {
             frame_interval: 1.0 / 60.0,
             camera: self.access_seen.0,
             microphone: self.access_seen.1,
+            video_effects: self.video_effects.clone(),
             ..Default::default()
         };
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1046,6 +1056,7 @@ impl XReveal {
                 }
             }
             DrawerEvent::Quit => cx.quit(),
+            DrawerEvent::VideoEffects => crate::platform::show_video_effects(),
             DrawerEvent::Allow(privacy) => {
                 permission::allow(privacy);
                 self.watch_access(window, cx);

@@ -131,3 +131,18 @@ pub fn window_handle(window: &gpui_kit::Window) -> Option<raw_window_handle::Raw
         None
     }
 }
+
+/// The OS's own camera effects switched on for xReveal, by name; `None` where the OS has none
+/// (Windows) (#118).
+pub fn video_effects() -> Option<Vec<&'static str>> {
+    #[cfg(target_os = "macos")]
+    return Some(macos::access::video_effects_on());
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// Opens the OS's panel for its own camera effects (macOS: Video Effects).
+pub fn show_video_effects() {
+    #[cfg(target_os = "macos")]
+    macos::access::show_video_effects();
+}

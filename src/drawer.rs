@@ -111,6 +111,8 @@ pub struct DrawerModel {
     pub audio: AudioModel,
     /// The Source's frame interval in seconds, to say how much Buffering costs.
     pub frame_interval: f64,
+    /// The OS's own camera effects switched on for xReveal; `None` where there are none (#118).
+    pub video_effects: Option<Vec<&'static str>>,
     /// Camera and Microphone access: without it the inputs are listed locked (#113).
     pub camera: Access,
     pub microphone: Access,
@@ -141,6 +143,8 @@ pub enum DrawerEvent {
     Mute(bool),
     /// An **Allow access** button on a locked input (#113).
     Allow(Privacy),
+    /// Open the OS's panel for its own camera effects (#118).
+    VideoEffects,
     ResetAll,
     Quit,
 }
@@ -208,6 +212,7 @@ pub mod hints {
     pub const HUE: &str = "Turns every colour around the colour wheel";
     pub const AV_SYNC: &str = "Lines sound up with the picture. Positive delays the sound, negative delays the picture.";
     pub const AUDIO_INPUT: &str = "Where the sound comes from. Normally the input device's own audio.";
+    pub const CAMERA_EFFECTS: &str = "macOS can add its own camera effects to the picture, like Reactions a hand in a game can set off. Turn them off for xReveal in Video Effects.";
     pub const CARD_LOCKED: &str = "xReveal needs Camera access to show any input. macOS asks once; after that it's in System Settings › Privacy & Security › Camera.";
     pub const AUDIO_INPUT_LOCKED: &str =
         "xReveal needs Microphone access to play the input's sound. macOS asks once; after that it's in System Settings › Privacy & Security › Microphone.";
@@ -632,6 +637,19 @@ impl SettingsDrawer {
         if self.model.device_settings {
             let open = quiet_button("device-settings", IconName::Settings, "Device settings…").on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::DeviceSettings)));
             rows.push(setting("Device settings…", hints::DEVICE_SETTINGS, div().flex().child(open)));
+        }
+        if let Some(effects) = &self.model.video_effects {
+            let pal = theme::palette();
+            let state = if effects.is_empty() { "All off".to_owned() } else { format!("On: {}", effects.join(", ")) };
+            let open = quiet_button("video-effects", IconName::Camera, "Video Effects…").on_click(cx.listener(|_, _, _, cx| cx.emit(DrawerEvent::VideoEffects)));
+            let line = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(div().min_w_0().text_sm().text_color(if effects.is_empty() { pal.secondary } else { pal.text }).child(state))
+                .child(open);
+            rows.push(setting("Camera effects", hints::CAMERA_EFFECTS, line));
         }
         rows
     }
