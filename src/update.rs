@@ -178,3 +178,15 @@ mod tests {
         assert_eq!(parse(b"not json"), Answer::Nothing);
     }
 }
+
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+mod network {
+    /// The real request, against GitHub. Run by hand: `cargo test -- --ignored github_answers`.
+    #[test]
+    #[ignore = "needs the network"]
+    fn github_answers() {
+        let answer = crate::platform::latest_release();
+        eprintln!("{answer:?}");
+        assert!(answer.is_some(), "GitHub should answer (a release, or 404 before the first one)");
+    }
+}
