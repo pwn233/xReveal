@@ -122,6 +122,11 @@ pub struct XReveal {
     access_seen: (Access, Access),
     /// The Drawer swipe in progress (#141).
     swipe: crate::swipe::Swipe,
+    /// The picture has shown at least once this run: the update check waits for it (#145).
+    picture_seen: bool,
+    /// How the last update check this run went (it's running while `Checking`).
+    update_check: crate::update::Check,
+    _update_watch: Option<Task<()>>,
     /// This version's What's new shows (#144): updated since it was last seen. The handle is its
     /// notes' scroll position, shared with the overlay window's copy on Windows.
     whats_new: Option<ScrollHandle>,
@@ -219,6 +224,9 @@ impl XReveal {
             access_seen: (permission::access(Privacy::Camera), permission::access(Privacy::Microphone)),
             whats_new,
             swipe: Default::default(),
+            picture_seen: false,
+            update_check: Default::default(),
+            _update_watch: None,
             notice,
             blank_hint: None,
             unplugged: false,
@@ -273,6 +281,7 @@ impl XReveal {
         this._subscriptions.push(appearance);
         this.showing_changed(window, cx);
         this.watch_signal(window, cx);
+        this.watch_for_updates(window, cx);
         this._signal_watch = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
@@ -388,6 +397,7 @@ impl XReveal {
                 video.set_surface_visible(matches!(screen, Screen::Picture | Screen::Starting));
             }
             self.screen = screen;
+            self.picture_seen |= self.screen.shows_picture();
             cx.notify();
         }
         // A live picture that has stayed one flat colour: some cards send that with no signal.
@@ -546,6 +556,9 @@ impl XReveal {
             delay: setup.delay,
             side: setup.drawer_side,
             swipe: setup.drawer_swipe,
+            check_updates: setup.updates.check,
+            update: setup.updates.offer(crate::whats_new::VERSION).map(|v| (v.to_owned(), setup.updates.notes.clone())),
+            update_check: self.update_check,
             window_mode: setup.window_mode,
             monitors,
             monitor: setup.monitor.clone(),
@@ -781,6 +794,48 @@ impl XReveal {
 }
 
 impl XReveal {
+    /// Update available (#145): every minute, once the picture has shown, ask GitHub when a day has
+    /// passed since it last answered (sooner when `now`, the switch just turned on).
+    fn watch_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._update_watch = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(60)).await;
+                if this.update_in(cx, |this, window, cx| this.check_for_update(false, window, cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn check_for_update(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let updates = &self.store.setup.updates;
+        let checking = self.update_check == crate::update::Check::Checking;
+        // By hand (`now`: the update button, or the switch turned on) it always asks; by itself
+        // only with the switch on, once the picture has shown, and once a day.
+        if checking || !(now || (updates.check && self.picture_seen && updates.due(crate::update::now()))) {
+            return;
+        }
+        self.update_check = crate::update::Check::Checking;
+        self.refresh_drawer(window, cx);
+        let answer = cx.background_executor().spawn(async { crate::platform::latest_release() });
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                // No usable answer (offline, a proxy, rate-limited): nothing shows but the button's
+                // tip, and it's tried again later.
+                this.update_check = match answer {
+                    Some(answer) => {
+                        this.store.update(|s| s.updates.answered(crate::update::now(), answer));
+                        crate::update::Check::Answered
+                    }
+                    None => crate::update::Check::Failed,
+                };
+                this.refresh_drawer(window, cx);
+            });
+        })
+        .detach();
+    }
+
     /// One scroll event of a possible Drawer swipe (#141): fingers away from the drawer's side
     /// open it, back towards it close it.
     fn on_swipe(&mut self, phase: TouchPhase, fingers: (f32, f32), window: &mut Window, cx: &mut Context<Self>) {
@@ -1064,6 +1119,15 @@ impl XReveal {
                 self.refresh_drawer(window, cx);
             }
             DrawerEvent::Swipe(on) => self.store.update(|s| s.drawer_swipe = on),
+            DrawerEvent::CheckNow => self.check_for_update(true, window, cx),
+            DrawerEvent::CheckUpdates(on) => {
+                self.store.update(|s| if on { s.updates.check = true } else { s.updates.turn_off() });
+                // Switching it on checks at once; off hides an update already found.
+                if on {
+                    self.check_for_update(true, window, cx);
+                }
+                self.refresh_drawer(window, cx);
+            }
             DrawerEvent::Side(side) => {
                 self.store.update(|s| s.drawer_side = side);
                 if self.drawer_window.is_some() {

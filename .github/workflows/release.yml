@@ -158,14 +158,35 @@ jobs:
           path: assets
           merge-multiple: true
 
+      # The notes are that version's section of CHANGELOG.md at the tag (#144, #145): the same text
+      # What's new shows after updating and Update available shows before.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          path: source
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
           VERSION: ${{ needs.check.outputs.version }}
         run: |
+          awk -v v="$VERSION" '
+            /^## / { on = ($2 == v) ; next }
+            on && /^- / { print }
+          ' source/CHANGELOG.md > notes.md
+          if [[ ! -s notes.md ]]; then
+            echo "::error::CHANGELOG.md has no '## $VERSION' section with '- ' lines at $TAG"
+            exit 1
+          fi
+          # A tag with a suffix (v1.1.0-beta.1) is a prerelease: never "latest", never offered (#145).
+          prerelease=()
+          [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
           gh release create "$TAG" assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "xReveal $VERSION" \
-            --generate-notes
+            --notes-file notes.md \
+            "${prerelease[@]}"
