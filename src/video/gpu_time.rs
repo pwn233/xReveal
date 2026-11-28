@@ -18,6 +18,7 @@ pub struct GpuTime {
 
 impl GpuTime {
     /// One frame's command buffer completed at `now` after `busy` on the GPU.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code, reason = "only macOS's render loop times its frames (#218)"))]
     pub fn add(&mut self, now: Instant, busy: Duration) {
         self.first.get_or_insert(now);
         self.frames.push_back((now, busy));
