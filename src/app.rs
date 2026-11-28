@@ -298,7 +298,35 @@ impl XReveal {
         let stats = this.store.setup.stats;
         this.stats_refresh = None;
         this.apply_stats(stats, cx);
+        // PROTOTYPE (#196): the local control channel.
+        #[cfg(feature = "drive")]
+        if crate::drive::wanted() {
+            crate::drive::start(window, cx);
+        }
         this
+    }
+
+    /// PROTOTYPE (#196): one JSON line of what a driver script needs to see that a step finished.
+    #[cfg(feature = "drive")]
+    pub fn drive_state(&self, window: &Window) -> String {
+        let bounds = window.bounds();
+        let stats = self.stats().unwrap_or_default();
+        serde_json::json!({
+            "screen": format!("{:?}", self.screen),
+            "status": self.status,
+            "drawer_open": self.drawer_open,
+            "stats_shown": self.store.setup.stats.shown,
+            "window_mode": format!("{:?}", self.store.setup.window_mode),
+            "fullscreen": window.is_fullscreen(),
+            "bounds": [bounds.origin.x.as_f32(), bounds.origin.y.as_f32(), bounds.size.width.as_f32(), bounds.size.height.as_f32()],
+            "monitor": self.store.setup.monitor,
+            "audio_output": self.store.setup.audio.output,
+            "fps": stats.fps,
+            "dropped": stats.dropped,
+            "late": stats.late,
+            "mouse": [window.mouse_position().x.as_f32(), window.mouse_position().y.as_f32()],
+        })
+        .to_string()
     }
 
     /// Works out what the Source is doing (docs/spec/v1.md §2.8) and reacts: reopens the card when

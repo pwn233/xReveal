@@ -21,6 +21,10 @@ toml = "1.2.3"
 zune-core = "0.5.3"
 zune-jpeg = "0.5"
 
+[features]
+# PROTOTYPE (#196), never merged: the local control channel for unattended runs (src/drive.rs).
+drive = []
+
 [build-dependencies]
 # The Windows exe's icon (#130), with the same embed-resource GPUI uses for its manifest.
 embed-resource = "3.0"

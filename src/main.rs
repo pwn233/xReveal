@@ -5,6 +5,8 @@
 mod app;
 mod audio;
 mod drawer;
+#[cfg(feature = "drive")]
+mod drive;
 mod permission;
 mod platform;
 mod report;
