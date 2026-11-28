@@ -194,6 +194,8 @@ pub struct XReveal {
     /// Held while the Picture shows, so the display doesn't sleep mid-game (#215).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     display_awake: Option<crate::platform::DisplayAwake>,
+    /// Times the window was drawn since the last check, to notice when the UI goes still (#225).
+    renders: u32,
     /// The wanted card was unplugged: open it again as soon as it is back.
     unplugged: bool,
     /// When to try a busy card again.
@@ -305,6 +307,7 @@ impl XReveal {
             crash_note_timer: None,
             logged_source: None,
             blank_hint: None,
+            renders: 0,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             display_awake: None,
             unplugged: false,
@@ -371,6 +374,7 @@ impl XReveal {
                 }
             }
         }));
+        this.trim_drawables_when_still(window, cx);
         let stats = this.store.setup.stats;
         this.stats_refresh = None;
         this.apply_stats(stats, cx);
@@ -493,9 +497,15 @@ impl XReveal {
     pub fn drive_state(&self, window: &Window, cx: &App) -> String {
         let bounds = window.bounds();
         let stats = self.stats().unwrap_or_default();
-        let tab = match &self.drawer_window {
-            Some((_, host)) => host.read(cx).drawer.read(cx).tab(),
-            None => self.drawer.read(cx).tab(),
+        let (tab, update_tip) = match &self.drawer_window {
+            Some((_, host)) => {
+                let drawer = host.read(cx).drawer.read(cx);
+                (drawer.tab(), drawer.update_tip_open())
+            }
+            None => {
+                let drawer = self.drawer.read(cx);
+                (drawer.tab(), drawer.update_tip_open())
+            }
         };
         serde_json::json!({
             "drawer_open": self.drawer_open,
@@ -523,6 +533,14 @@ impl XReveal {
             "mouse": [window.mouse_position().x.as_f32(), window.mouse_position().y.as_f32()],
             // How the last run ended (docs/spec/v1.md §2.11).
             "last_run": self.last_run,
+            // What shows over the picture, for the cards (#220): the update button's tip (§2.10),
+            // What's new (§2.9), the "Blacks look grey?" tip, and the crash note bar (§2.11) with
+            // the length of its pre-filled issue link (capped at about 6 KB).
+            "update_tip_open": update_tip,
+            "whats_new_shown": self.whats_new.is_some(),
+            "tip_shown": self.tip.is_some(),
+            "crash_note": self.crash_note.as_ref().map(|note| if note.issue.is_some() { "crashed" } else { "not_clean" }),
+            "crash_issue_url_len": self.crash_note.as_ref().and_then(|note| note.issue.as_ref()).map(String::len),
         })
         .to_string()
     }
@@ -727,6 +745,37 @@ impl XReveal {
         if awake && self.display_awake.is_none() {
             crate::log::warn("app", "the OS refused to keep the display awake; it may sleep during play");
         }
+    }
+
+    /// Gives back the window-size drawables GPUI's layer piles up while the UI animates (#225):
+    /// the drawer sliding, the update tip fading, What's new. Kept, they put ~50 MB on the
+    /// footprint until the window is resized. Still, the window is drawn a few times a second (the
+    /// performance box, the signal check); animating, up to the display's rate. So once a second
+    /// with more than `BUSY_RENDERS` draws is followed by two seconds without, trim. macOS only:
+    /// on Windows the drawer and overlays have windows of their own.
+    fn trim_drawables_when_still(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        const BUSY_RENDERS: u32 = 20;
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let Some(handle) = crate::platform::window_handle(window) else { return };
+        cx.spawn(async move |this, cx| {
+            let (mut busy, mut quiet) = (false, 0);
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let Ok(renders) = this.update(cx, |this, _| std::mem::take(&mut this.renders)) else { break };
+                if renders > BUSY_RENDERS {
+                    (busy, quiet) = (true, 0);
+                } else if busy {
+                    quiet += 1;
+                    if quiet >= 2 {
+                        (busy, quiet) = (false, 0);
+                        crate::platform::trim_drawables(handle);
+                    }
+                }
+            }
+        })
+        .detach();
     }
 
     /// Plays the input on screen again with the current route (it changed, or the buffer grew).
@@ -1891,19 +1940,6 @@ impl XReveal {
                 _ => {}
             }
         }
-        // Once the drawer has slid in or out and the UI is still, give back the drawables GPUI's
-        // layer piled up while it moved (#225: ~35 MB in a 1280×887 pt window, kept until a resize).
-        if !self.drawer_in_own_window
-            && let Some(handle) = crate::platform::window_handle(window)
-        {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_secs(2)).await;
-                if this.update(cx, |this, _| this.drawer_open == open).unwrap_or(false) {
-                    crate::platform::trim_drawables(handle);
-                }
-            })
-            .detach();
-        }
         // The Input level meter reads the sound about 20 times a second, only while it can be seen.
         self.meter_feed = open.then(|| {
             cx.spawn(async move |this, cx| {
@@ -2087,6 +2123,7 @@ pub fn near_drawer_edge(x: f32, width: f32, side: DrawerSide) -> bool {
 
 impl Render for XReveal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders = self.renders.saturating_add(1);
         let pal = theme::palette();
         let panel = |child: Div| child.px_2().py_1().rounded(px(8.)).bg(pal.panel).border_1().border_color(pal.line).text_color(pal.text).text_sm();
         let side = self.shown_side;
