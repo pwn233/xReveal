@@ -427,6 +427,11 @@ impl SettingsDrawer {
         self.tab
     }
 
+    /// The update button's tip is open (spec §2.10), for the driver's `state`.
+    pub fn update_tip_open(&self) -> bool {
+        self.update_tip_open
+    }
+
     /// Switches to `tab` (e.g. Source, for "Pick another input").
     pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;

@@ -72,8 +72,8 @@ pub fn set_borderless(window: raw_window_handle::RawWindowHandle, borderless: bo
     let _ = (window, borderless, display);
 }
 
-/// Frees the window-size drawables GPUI's layer piled up while the drawer slid in or out (#225);
-/// macOS only, where the drawer is drawn in the main window. Call it once the UI is still.
+/// Frees the window-size drawables GPUI's layer piled up while the UI animated (#225); macOS
+/// only, where the drawer and overlays are drawn in the main window. Call it once the UI is still.
 pub fn trim_drawables(window: raw_window_handle::RawWindowHandle) {
     #[cfg(target_os = "macos")]
     if let raw_window_handle::RawWindowHandle::AppKit(appkit) = window {

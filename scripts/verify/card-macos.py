@@ -436,12 +436,15 @@ class UpdateTip(Batch):
         self.away = (width / 2, height / 2)
         return None
 
-    def move(self, p):
-        return self.step("move {:g} {:g}".format(*p), lambda s: abs(s["mouse"][0] - p[0]) < 1 and abs(s["mouse"][1] - p[1]) < 1)
+    def move(self, p, tip_open):
+        """Moves the pointer and waits for the tip to open or close (`update_tip_open`); it closes
+        300 ms after the pointer leaves (CLOSE_AFTER in update_button.rs)."""
+        return self.step("move {:g} {:g}".format(*p), lambda s: abs(s["mouse"][0] - p[0]) < 1 and abs(s["mouse"][1] - p[1]) < 1
+                         and s.get("update_tip_open") == tip_open)
 
     def cycle(self):
         self.run.open_drawer()   # closed for the before window
-        return [self.move(self.button), self.move(self.away)]
+        return [self.move(self.button, True), self.move(self.away, False)]
 
     def finish(self):
         self.d.send("move {:g} {:g}".format(*self.away))
@@ -450,7 +453,7 @@ class UpdateTip(Batch):
     def burst_actions(self):
         moves = [self.button, self.away] * (BURST // 2)
         last = moves[-1]
-        return ["move {:g} {:g}".format(*p) for p in moves], lambda s: abs(s["mouse"][0] - last[0]) < 1
+        return ["move {:g} {:g}".format(*p) for p in moves], lambda s: abs(s["mouse"][0] - last[0]) < 1 and s.get("update_tip_open") is False
 
 
 class Drawer(Batch):
@@ -1175,6 +1178,7 @@ class Run:
                     d.until(lambda s: s.get("launch_to_picture_ms") is not None, 5)
                 row["launch_to_picture_ms"] = d.last.get("launch_to_picture_ms")
                 row["last_run"] = d.last.get("last_run")
+                row["whats_new_shown"] = d.state().get("whats_new_shown")
                 if whats_new:
                     row["whats_new_closed"] = self.close_whats_new(d)
                 row["quit_s"] = self.finish(d)
@@ -1207,7 +1211,7 @@ class Run:
             y -= 6
         end = time.time() + 3
         while time.time() < end:
-            if self.setup_value("", "whats-new-seen") == version:
+            if self.setup_value("", "whats-new-seen") == version and d.state().get("whats_new_shown") is False:
                 return True
             time.sleep(0.2)
         return False
@@ -1238,6 +1242,8 @@ class Run:
                 log_from = os.path.getsize(XLOG) if os.path.exists(XLOG) else 0
                 d, s, took = self.launch("after-" + kind)
                 d.until(lambda s: s.get("last_run") == "crashed", 20)
+                row["crash_note"] = d.last.get("crash_note")
+                row["crash_issue_url_len"] = d.last.get("crash_issue_url_len")
                 row["last_run"] = d.last.get("last_run")
                 row["log"] = self.log_lines_since(log_from, "last run")
                 row["quit_s"] = self.finish(d)
@@ -1252,7 +1258,7 @@ class Run:
         """One more launch: no crash note is left pending, and the last run was clean."""
         try:
             d, s, took = self.launch("last")
-            self.results["last_launch"] = {"last_run": d.last.get("last_run"), "picture": took is not None, "quit_s": self.finish(d)}
+            self.results["last_launch"] = {"last_run": d.last.get("last_run"), "crash_note": d.last.get("crash_note"), "picture": took is not None, "quit_s": self.finish(d)}
         except (CardStop, NoAnswer) as e:
             self.results["last_launch"] = {"error": str(e)}
         self.results["last_launch"]["marker_removed"] = not os.path.exists(MARKER)
@@ -1548,8 +1554,12 @@ class Judge:
                 problems.append("#{}: running.toml left".format(r["cycle"]))
             if r.get("setup_changes"):
                 problems.append("#{}: setup.toml changed ({})".format(r["cycle"], "; ".join(r["setup_changes"])[:120]))
-            if r.get("whats_new") and not r.get("whats_new_closed"):
+            if r.get("whats_new") and not r.get("whats_new_shown"):
+                problems.append("#{}: What's new didn't show".format(r["cycle"]))
+            elif r.get("whats_new") and not r.get("whats_new_closed"):
                 problems.append("#{}: What's new not closed".format(r["cycle"]))
+            if not r.get("whats_new") and r.get("whats_new_shown"):
+                problems.append("#{}: What's new showed unasked".format(r["cycle"]))
         shown = sum(1 for r in rows if r.get("whats_new"))
         closed = sum(1 for r in rows if r.get("whats_new_closed"))
         measured = "{} cycles; What's new shown and closed {} of {}".format(len(rows), closed, shown)
@@ -1564,15 +1574,18 @@ class Judge:
         parts, ok = [], True
         for r in rows:
             want = "crashed" if (r["kind"] == "panic" or r.get("ips")) else "not_clean"
-            good = r.get("last_run") == "crashed" and not r.get("error") and bool(r.get("log"))
+            good = r.get("last_run") == "crashed" and r.get("crash_note") == "crashed" and not r.get("error") and bool(r.get("log"))
             ok = ok and good
             evidence = ".ips" if r.get("ips") else ("panic file" if r.get("panic_file") else "no report")
-            parts.append("{}: {} ({}{})".format(r["kind"], r.get("last_run") or r.get("error"), evidence,
-                                                "" if r.get("log") else ", log says nothing" if want == "crashed" else ""))
+            note = "note bar {}{}".format(r.get("crash_note") or "missing",
+                                          ", issue link {} B".format(r["crash_issue_url_len"]) if r.get("crash_issue_url_len") else "")
+            parts.append("{}: {} ({}, {}{})".format(r["kind"], r.get("last_run") or r.get("error"), evidence, note,
+                                                    "" if r.get("log") else ", log says nothing" if want == "crashed" else ""))
         last = self.r.get("last_launch") or {}
         clean = last.get("last_run") == "clean" and last.get("marker_removed")
         parts.append("next launch {}".format(last.get("last_run") or last.get("error")))
-        return "; ".join(parts) + "; the note bar isn't in `state`", PASS if ok and clean else FAIL
+        clean = clean and last.get("crash_note") is None
+        return "; ".join(parts), PASS if ok and clean else FAIL
 
     def display(self):
         a = self.r.get("assertions")
@@ -1665,8 +1678,7 @@ class CardWriter:
                 L.append("| {} | {} | {} | {} |".format(x["kind"], x.get("last_run") or x.get("error"), ", ".join(x.get("ips") or []) or "none",
                                                         "<br>".join(line[21:] for line in x.get("log") or []) or "–"))
         L += ["", "## Notes", "",
-              "- `state` has no field for the update button's tip, the crash note bar or What's new: the tip batch is judged on the pointer "
-              "reaching the button, What's new on `whats-new-seen` being saved again after Got it, and the note bar isn't checked.",
+              "- The update tip, What's new and the crash note bar are judged on `state` (`update_tip_open`, `whats_new_shown`, `crash_note`).",
               "- Audio output is judged on `state.audio_output`; that sound actually plays there isn't visible to the runner.",
               "- Choosing the card again in Source › Input opens it at its default format (720p60); the runner sets 1080p50 back after the Source batch."]
         if self.run.format_steps and self.run.format_steps > 1:
