@@ -515,6 +515,11 @@ impl XReveal {
             "late": stats.late,
             // The video pass's own GPU share over the last 5 s (#218); null on Windows.
             "gpu_pct": self.gpu_pct(),
+            // The overlay's latency rows (#221): xReveal's share [p50, p99] in ms, and launch → the
+            // first presented frame (from the access grant when xReveal had to wait for it).
+            "share_ms": stats.arrival_to_screen.map(|(p50, p99)| [p50, p99]),
+            "launch_to_picture_ms": crate::video::time_to_picture(crate::video::FIRST_PRESENT.get().copied(), crate::video::ACCESS_GRANTED.get().copied())
+                .map(|(_, took)| took.as_secs_f64() * 1000.0),
             "mouse": [window.mouse_position().x.as_f32(), window.mouse_position().y.as_f32()],
             // How the last run ended (docs/spec/v1.md §2.11).
             "last_run": self.last_run,
