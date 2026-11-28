@@ -71,6 +71,8 @@ fn say(answer: &str) {
 pub fn start(window: &mut Window, cx: &mut Context<XReveal>) {
     // One line for the run's log, not one per command (#198 adds the log file).
     eprintln!("xReveal is driven (XREVEAL_DRIVE=1): commands on stdin, answers on stdout");
+    // One line in the log for the whole run, never one per command (docs/spec/v1.md §2.11).
+    crate::log::info("drive", "driven (XREVEAL_DRIVE=1): commands on stdin, answers on stdout");
     let (sender, mut commands) = futures::channel::mpsc::unbounded::<String>();
     let reader = std::thread::Builder::new().name("xreveal-drive".into()).spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {

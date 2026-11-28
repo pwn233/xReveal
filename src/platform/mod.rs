@@ -229,3 +229,41 @@ pub fn clean_up_update() {
     #[cfg(target_os = "windows")]
     windows::install::clean_up();
 }
+
+/// Whether process `pid` is running and is xReveal (docs/spec/v1.md §2.11: two xReveals would
+/// share the run marker).
+pub fn process_is_xreveal(pid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::crash::process_is_xreveal(pid);
+    #[cfg(target_os = "windows")]
+    return windows::crash::process_is_xreveal(pid);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// The OS, its version and build, for the panic file and the pre-filled issue.
+pub fn os_version() -> String {
+    #[cfg(target_os = "macos")]
+    return macos::crash::os_version();
+    #[cfg(target_os = "windows")]
+    return windows::crash::os_version();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    std::env::consts::OS.to_owned()
+}
+
+/// The OS's own report of xReveal's process `pid` crashing after `started` (Unix seconds), if
+/// there is one. Blocking: call it off the UI thread.
+pub fn find_crash_report(pid: u32, started: u64) -> Option<crate::crash::OsReport> {
+    #[cfg(target_os = "macos")]
+    return macos::crash::find_report(pid, started);
+    #[cfg(target_os = "windows")]
+    return windows::crash::find_report(pid, started);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (pid, started);
+        None
+    }
+}

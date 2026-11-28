@@ -9,3 +9,4 @@ Each version's section is what xReveal shows in **What's new** after updating to
 - The card's own sound, with volume, mute and an A/V sync offset.
 - Camera and Microphone are asked for separately, and you can play without sound.
 - Settings slide in from the side (Tab); your choices are remembered for next time.
+- After a crash, a note offers a pre-filled GitHub issue for you to check and send; nothing is sent by itself.

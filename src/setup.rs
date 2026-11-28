@@ -494,6 +494,7 @@ impl Store {
             Some(Loaded::FirstRun) | None => (Setup::default(), true, None),
         };
         let autosave = path.clone().map(|p| Autosave::new(p, Duration::from_secs(1)));
+        crate::crash::remember_setup(&setup);
         Self { path, setup, first_run, notice, autosave }
     }
 
@@ -501,10 +502,12 @@ impl Store {
     pub fn update(&mut self, change: impl FnOnce(&mut Setup)) {
         let before = self.setup.clone();
         change(&mut self.setup);
-        if self.setup != before
-            && let Some(autosave) = &self.autosave
-        {
-            autosave.changed(&self.setup);
+        if self.setup != before {
+            // The panic file's setup line follows it (docs/spec/v1.md §2.11).
+            crate::crash::remember_setup(&self.setup);
+            if let Some(autosave) = &self.autosave {
+                autosave.changed(&self.setup);
+            }
         }
     }
 
