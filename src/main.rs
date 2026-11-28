@@ -5,6 +5,7 @@
 mod app;
 mod audio;
 mod drawer;
+mod drive;
 mod permission;
 mod platform;
 mod report;
