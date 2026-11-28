@@ -68,7 +68,7 @@ against a Metal System Trace, don't judge the 10% budget on it.
   against spec §4: CPU ≤ 5% of the machine, GPU ≤ 10%.
 - **Memory ceilings** (spec §4, #195): the highest 1-minute median in each state over the whole run.
   Windows: private working set ≤ 40 MB, dedicated GPU memory ≤ 120 MB Windowed / 290 MB Fullscreen.
-  macOS: footprint ≤ 220 MB Windowed / 250 MB Fullscreen (provisional until #201).
+  macOS: footprint ≤ 220 MB Windowed / 250 MB Fullscreen (confirmed by #201).
 - **1-minute medians from launch**, with the window state of each minute.
 - **Minutes 11–20** (#192): the least-squares slope, the wobble (σ) of the 1-minute medians around
   the line, and max − min. *Settled by minute 10* means a slope under 6 MB/h and minutes 11 and 20
