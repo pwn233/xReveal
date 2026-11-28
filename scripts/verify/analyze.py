@@ -72,7 +72,7 @@ OSES = {
         "name": "macOS",
         "rows": [
             ("cpu_pct", "CPU, share of the machine", 2, "%", "<= 5%", 5.0),
-            ("gpu_pct", "GPU, process (accumulatedGPUTime; uncalibrated, see #200)", 1, "%", "<= 10%", 10.0),
+            ("gpu_pct", "GPU, process (AGX accumulatedGPUTime; reads ~1.5x a Metal System Trace, #200)", 1, "%", "hint only: judge <= 10% on the driver's gpu_pct (#218)", None),
             ("footprint_mb", 'Memory footprint (Activity Monitor "Memory", phys_footprint)', 1, " MB", "ceiling below", None),
             ("footprint_peak_mb", "Peak footprint since launch", 1, " MB", "", None),
             ("threads", "Threads", 0, "", "", None),

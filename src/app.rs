@@ -513,6 +513,8 @@ impl XReveal {
             "fps": stats.fps,
             "dropped": stats.dropped,
             "late": stats.late,
+            // The video pass's own GPU share over the last 5 s (#218); null on Windows.
+            "gpu_pct": self.gpu_pct(),
             "mouse": [window.mouse_position().x.as_f32(), window.mouse_position().y.as_f32()],
             // How the last run ended (docs/spec/v1.md §2.11).
             "last_run": self.last_run,
@@ -1957,6 +1959,14 @@ impl XReveal {
     fn stats(&self) -> Option<Summary> {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         return self.video.as_ref().map(VideoPipeline::stats);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        None
+    }
+
+    /// The video pass's own GPU share (#218), for the driver.
+    fn gpu_pct(&self) -> Option<f64> {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        return self.video.as_ref().and_then(VideoPipeline::gpu_pct);
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         None
     }

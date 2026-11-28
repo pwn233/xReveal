@@ -57,9 +57,11 @@ Screen Recording access.
 The folder holds `samples.csv`, `meta.json`, `footprint-start-<pid>.txt` and `footprint-end-<pid>.txt`
 (the breakdown, for when memory grew), `summary.md` and `minutes.csv`.
 
-**GPU on macOS is a hint, not a measurement yet.** `gpu_pct` is the rate of the undocumented
-`AGXDeviceUserClient` `accumulatedGPUTime` counter, taken as nanoseconds. Until #200 calibrates it
-against a Metal System Trace, don't judge the 10% budget on it.
+**GPU on macOS is a hint.** The sampler's `gpu_pct` is the rate of the undocumented
+`AGXDeviceUserClient` `accumulatedGPUTime` counter, taken as nanoseconds. Against a Metal System
+Trace of the same 10 s it reads 1.50–1.55× high (#200), so the summary gives it no verdict. The 10%
+budget is judged on xReveal's own figure instead: `gpu_pct` in the driver's `state` (#218), the
+video pass's `MTLCommandBuffer` GPU time over the last 5 s, within 0.15 points of the trace.
 
 ## What the summary says
 

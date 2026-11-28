@@ -228,6 +228,12 @@ impl VideoPipeline {
         lock(&self.shared.stats).summary(self.slot.replaced_total())
     }
 
+    /// The video pass's GPU busy share over the last 5 s, in percent (#218). `None` until 5 s of
+    /// frames have been drawn, and on Windows, where the OS's own counters already match (#194).
+    pub fn gpu_pct(&self) -> Option<f64> {
+        lock(&self.shared.gpu).share(std::time::Instant::now())
+    }
+
     /// How long the picture has been one flat colour (#108).
     pub fn flat_for(&self) -> std::time::Duration {
         lock(&self.shared.flat).flat_for(std::time::Instant::now())
