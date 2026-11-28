@@ -2,6 +2,7 @@
 
 pub mod fill;
 pub mod flat;
+pub mod gpu_time;
 #[cfg(any(target_os = "windows", test))]
 pub mod mjpeg;
 pub mod picture;
@@ -20,6 +21,8 @@ pub struct VideoShared {
     pub stats: Mutex<timing::FrameStats>,
     /// How long the picture has been one flat colour (#108).
     pub flat: Mutex<flat::FlatWatch>,
+    /// The video pass's own GPU time (#218; macOS only for now).
+    pub gpu: Mutex<gpu_time::GpuTime>,
 }
 
 /// Locks a mutex, ignoring poisoning (a panicked holder can't leave these in a broken state).

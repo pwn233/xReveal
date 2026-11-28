@@ -62,6 +62,7 @@ pub fn run(target: RenderTarget, slot: &FrameSlot<PixelBuffer>, shared: Arc<Vide
                 // Keep the previous frame's buffers alive until the GPU is done with them.
                 if let Some(previous) = in_flight.replace(next) {
                     previous.command_buffer.waitUntilCompleted();
+                    record_gpu_time(&shared, &previous.command_buffer);
                 }
             }
             Ok(None) => {}
@@ -146,6 +147,15 @@ struct Renderer {
 const MAX_SURFACES: usize = 16;
 
 /// Everything a submitted frame still needs until the GPU has finished with it.
+/// Adds a completed frame's GPU time to the video pass's total (#218): what a Metal System Trace
+/// shows for it, unlike macOS's per-process counter (#200).
+fn record_gpu_time(shared: &VideoShared, command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
+    let busy = command_buffer.GPUEndTime() - command_buffer.GPUStartTime();
+    if busy.is_finite() && busy > 0.0 {
+        lock(&shared.gpu).add(std::time::Instant::now(), std::time::Duration::from_secs_f64(busy));
+    }
+}
+
 struct InFlight {
     command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     /// The capture buffer stays retained while the GPU reads it, so the capture pool can't reuse it.

@@ -16,7 +16,8 @@ Each row (samples.csv):
 - footprint_mb, footprint_peak_mb: ri_phys_footprint and ri_lifetime_max_phys_footprint (MiB).
 - threads: proc_pidinfo(PROC_PIDTASKINFO).pti_threadnum; open_files: proc_pidinfo(PROC_PIDLISTFDS).
 - gpu_pct: the accumulatedGPUTime delta of the IORegistry's AGXDeviceUserClient entries created by
-  the pid, taken as ns / wall time. Undocumented and uncalibrated (#200): treat it as a hint.
+  the pid, taken as ns / wall time. Undocumented, and it reads about 1.5x a Metal System Trace
+  (#200): a hint. The GPU budget is judged on xReveal's own `gpu_pct` in the driver's state (#218).
 - mode, window, display: xReveal's largest on-screen window (CGWindowList, no Screen Recording
   needed): fullscreen when it covers its display (below the notch counts), windowed otherwise,
   none when no window is on screen (minimised, hidden, another Space).
@@ -369,7 +370,7 @@ def sample(args):
     os.makedirs(out, exist_ok=True)
     meta = {"os": "macos", "stamp": stamp, "interval_s": args.interval,
             "sampler": "sample-macos.py (proc_pid_rusage, proc_pidinfo, ioreg AGXDeviceUserClient)",
-            "gpu_note": "accumulatedGPUTime, uncalibrated, see #200", "tick_ns": TICK_NS}
+            "gpu_note": "accumulatedGPUTime, reads ~1.5x a Metal System Trace (#200); a hint", "tick_ns": TICK_NS}
     meta.update(machine())
     meta["setup_start"] = read_setup()
     meta["processes"] = []
