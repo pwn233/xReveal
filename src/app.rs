@@ -57,6 +57,50 @@ pub fn toggle_borderless(window: &Window) {
 /// own Space.
 const FULLSCREEN_SWITCH: Duration = Duration::from_millis(if cfg!(target_os = "macos") { 800 } else { 350 });
 
+/// The longest macOS's fullscreen slide is waited for, from asking for it to its start and from its
+/// start to its end. Past it the switch counts as finished, in case macOS never says so.
+const SWITCH_LIMIT: Duration = Duration::from_secs(3);
+
+/// macOS's fullscreen slide (#203). macOS drops a fullscreen toggle sent while it is sliding, so a
+/// Window mode asked for meanwhile waits and is applied when the slide ends. On Windows, Fullscreen
+/// is instant and this never runs.
+#[derive(Debug, Default)]
+struct FullscreenSwitch {
+    /// A slide has been asked for or is running.
+    running: bool,
+    /// The Window mode changed during the slide: apply it when the slide ends.
+    queued: bool,
+    /// Counts starts and ends, so a time limit can tell whether its switch is still the current one.
+    seq: u64,
+}
+
+impl FullscreenSwitch {
+    /// A slide was asked for, or macOS started one. The number is for [`Self::timed_out`].
+    fn start(&mut self) -> u64 {
+        self.running = true;
+        self.seq += 1;
+        self.seq
+    }
+
+    /// The slide ended. Whether a Window mode is waiting to be applied.
+    fn finish(&mut self) -> bool {
+        self.running = false;
+        self.seq += 1;
+        std::mem::take(&mut self.queued)
+    }
+
+    /// Keeps a Window mode change for the end of the slide, if one is running. Whether it did.
+    fn wait(&mut self) -> bool {
+        self.queued |= self.running;
+        self.running
+    }
+
+    /// The switch numbered `seq` by [`Self::start`] is still running, with nothing since.
+    fn timed_out(&self, seq: u64) -> bool {
+        self.running && self.seq == seq
+    }
+}
+
 /// Borderless window mode on or off (docs/spec/v1.md §2.2), centred on screen `display` (else the
 /// one it's on), after `delay`. Done outside GPUI's update, as the native call needs.
 pub fn set_borderless(window: &Window, borderless: bool, display: Option<u64>, delay: Duration, cx: &mut App) {
@@ -100,6 +144,9 @@ pub struct XReveal {
     overlay_window: Option<(AnyWindowHandle, Entity<OverlayWindow>)>,
     /// The Window mode F11 goes back to from Fullscreen: Windowed or Borderless, whichever was last.
     before_fullscreen: WindowMode,
+    /// macOS's fullscreen slide, and a Window mode waiting for it to end (#203).
+    fullscreen_switch: FullscreenSwitch,
+    _fullscreen_watch: Option<Task<()>>,
     /// Where the window and its content were when the drawer and overlay windows were last placed.
     /// GPUI also reports a bounds change whenever the window gains or loses focus; only a real move,
     /// resize or scale change places them again.
@@ -135,6 +182,8 @@ pub struct XReveal {
     /// A broken `setup.toml` was set aside: said once, over the Welcome screen.
     notice: Option<String>,
     /// The last run didn't end cleanly (docs/spec/v1.md §2.11): the note about it, until it goes.
+    /// How the last run ended, for the driver's `state`: "clean", "not_clean" or "crashed".
+    last_run: &'static str,
     crash_note: Option<crate::crash::Note>,
     /// Hides the note 30 s after it first shows; set while it shows.
     crash_note_timer: Option<Task<()>>,
@@ -230,6 +279,8 @@ impl XReveal {
                 WindowMode::Fullscreen => WindowMode::Windowed,
                 mode => mode,
             },
+            fullscreen_switch: FullscreenSwitch::default(),
+            _fullscreen_watch: None,
             placed: (window.bounds(), window.viewport_size(), window.scale_factor()),
             near_edge: false,
             handle_slide: drawer::Slide::closed(),
@@ -246,6 +297,7 @@ impl XReveal {
             updater: Default::default(),
             _update_watch: None,
             notice,
+            last_run: "clean",
             crash_note: None,
             crash_note_timer: None,
             logged_source: None,
@@ -300,6 +352,7 @@ impl XReveal {
             theme::apply(&this.store.setup.look, theme::appearance_is_dark(window.appearance()), cx);
         });
         this._subscriptions.push(appearance);
+        this.watch_fullscreen(window, cx);
         this.showing_changed(window, cx);
         this.watch_signal(window, cx);
         this.watch_for_updates(window, cx);
@@ -316,6 +369,7 @@ impl XReveal {
         let stats = this.store.setup.stats;
         this.stats_refresh = None;
         this.apply_stats(stats, cx);
+        this.last_run = crate::crash::describe(&last_run);
         this.after_last_run(last_run, window, cx);
         if let Some(test) = crate::crash::crash_test() {
             // The verification cards' crash: 10 s after the picture first shows, on this thread.
@@ -327,6 +381,10 @@ impl XReveal {
                 crate::crash::crash_now(test);
             })
             .detach();
+        }
+        // The driver's control channel, for unattended runs (#204).
+        if crate::drive::wanted() {
+            crate::drive::start(window, cx);
         }
         this
     }
@@ -349,6 +407,9 @@ impl XReveal {
             let (note, mut evidence) = found.await;
             let shown = this.update_in(cx, |this, _, cx| {
                 log_last_run(&evidence);
+                if evidence.crashed() {
+                    this.last_run = "crashed";
+                }
                 this.crash_note = Some(note);
                 this.show_crash_note(cx);
                 cx.notify();
@@ -364,6 +425,9 @@ impl XReveal {
             let note = note.await;
             let _ = this.update_in(cx, |this, _, cx| {
                 log_last_run(&evidence);
+                if evidence.crashed() {
+                    this.last_run = "crashed";
+                }
                 // Still showing: it becomes the crash note, with its own 30 s.
                 if this.crash_note.is_some() {
                     this.crash_note = Some(note);
@@ -417,6 +481,52 @@ impl XReveal {
                 let _ = b.update(cx, |this, cx| this.dismiss_crash_note(cx));
             }),
         })
+    }
+
+    /// The driver's `state` (#204): one JSON line with what a script needs to see that a step has
+    /// finished.
+    pub fn drive_state(&self, window: &Window, cx: &App) -> String {
+        let bounds = window.bounds();
+        let stats = self.stats().unwrap_or_default();
+        let tab = match &self.drawer_window {
+            Some((_, host)) => host.read(cx).drawer.read(cx).tab(),
+            None => self.drawer.read(cx).tab(),
+        };
+        serde_json::json!({
+            "drawer_open": self.drawer_open,
+            "drawer_tab": format!("{tab:?}"),
+            "stats_shown": self.store.setup.stats.shown,
+            "window_mode": format!("{:?}", self.store.setup.window_mode),
+            "fullscreen": window.is_fullscreen(),
+            // macOS is sliding into or out of Fullscreen (#203): `fullscreen` isn't settled yet.
+            "transition_in_progress": self.fullscreen_switch.running,
+            "bounds": [bounds.origin.x.as_f32(), bounds.origin.y.as_f32(), bounds.size.width.as_f32(), bounds.size.height.as_f32()],
+            "monitor": self.store.setup.monitor,
+            "screen": format!("{:?}", self.screen),
+            "status": self.status,
+            "audio_output": self.store.setup.audio.output,
+            "fps": stats.fps,
+            "dropped": stats.dropped,
+            "late": stats.late,
+            "mouse": [window.mouse_position().x.as_f32(), window.mouse_position().y.as_f32()],
+            // How the last run ended (docs/spec/v1.md §2.11).
+            "last_run": self.last_run,
+        })
+        .to_string()
+    }
+
+    /// The drawer's own window while it's open there (Windows): it has xReveal's keys, not the main
+    /// window. `None` when the main window has them.
+    pub fn keys_window(&self) -> Option<AnyWindowHandle> {
+        self.drawer_window.as_ref().filter(|_| self.drawer_open).map(|(handle, _)| *handle)
+    }
+
+    /// Where a pointer at `position` in this window's content goes: the drawer's own window and the
+    /// point in it, when the drawer is open there and the point is over it. `None`: this window.
+    pub fn pointer_target(&self, position: Point<Pixels>, window: &Window) -> Option<(AnyWindowHandle, Point<Pixels>)> {
+        let handle = self.keys_window()?;
+        let area = drawer_area(window.viewport_size(), self.store.setup.drawer_side);
+        area.contains(&position).then(|| (handle, position - area.origin))
     }
 
     /// Works out what the Source is doing (docs/spec/v1.md §2.8) and reacts: reopens the card when
@@ -820,21 +930,83 @@ impl XReveal {
         if mode != WindowMode::Fullscreen {
             self.before_fullscreen = mode;
         }
-        // On macOS the window itself says whether it's fullscreen: the green button enters the same
-        // fullscreen as the Window setting.
-        let in_fullscreen = if cfg!(target_os = "macos") { window.is_fullscreen() } else { was == WindowMode::Fullscreen };
+        // macOS would drop a toggle sent during its slide (#203): the mode asked for last is applied
+        // when the slide ends.
+        if !self.fullscreen_switch.wait() {
+            // On macOS the window itself says whether it's fullscreen: the green button enters the
+            // same fullscreen as the Window setting.
+            let in_fullscreen = if cfg!(target_os = "macos") { window.is_fullscreen() } else { was == WindowMode::Fullscreen };
+            self.apply_window_mode(in_fullscreen, window, cx);
+        }
+        self.refresh_drawer(window, cx);
+        cx.notify();
+    }
+
+    /// Makes the window what the remembered Window mode says, from fullscreen or not.
+    fn apply_window_mode(&mut self, in_fullscreen: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = self.store.setup.window_mode;
         if mode == WindowMode::Fullscreen {
             if !in_fullscreen {
-                toggle_borderless(window);
+                self.switch_fullscreen(window, cx);
             }
         } else if in_fullscreen {
-            toggle_borderless(window);
+            self.switch_fullscreen(window, cx);
             // Leaving fullscreen brings back the frame the window had before; then the one asked for.
             set_borderless(window, mode == WindowMode::Borderless, None, FULLSCREEN_SWITCH, cx);
         } else {
             set_borderless(window, mode == WindowMode::Borderless, None, Duration::ZERO, cx);
         }
-        self.refresh_drawer(window, cx);
+    }
+
+    /// Enters or leaves fullscreen. On macOS that starts a slide: until it ends, Window mode changes
+    /// wait (#203).
+    fn switch_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if cfg!(target_os = "macos") {
+            self.fullscreen_slide(true, window, cx);
+        }
+        toggle_borderless(window);
+    }
+
+    /// Follows macOS's fullscreen slides, whoever starts them: F11, the Window setting, the green
+    /// button, or the launch into a remembered Fullscreen (#203).
+    fn watch_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if let Some(handle) = crate::platform::window_handle(window) {
+            use futures::StreamExt as _;
+            let (sender, mut slides) = futures::channel::mpsc::unbounded();
+            crate::platform::watch_fullscreen(handle, move |started| {
+                let _ = sender.unbounded_send(started);
+            });
+            self._fullscreen_watch = Some(cx.spawn_in(window, async move |this, cx| {
+                while let Some(started) = slides.next().await {
+                    if this.update_in(cx, |this, window, cx| this.fullscreen_slide(started, window, cx)).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (window, cx);
+    }
+
+    /// macOS's fullscreen slide started (or was asked for), or ended. At its end, a Window mode
+    /// asked for during it is applied. A slide that never says it ended counts as ended after
+    /// [`SWITCH_LIMIT`].
+    fn fullscreen_slide(&mut self, started: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if started {
+            let seq = self.fullscreen_switch.start();
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(SWITCH_LIMIT).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if this.fullscreen_switch.timed_out(seq) {
+                        this.fullscreen_slide(false, window, cx);
+                    }
+                });
+            })
+            .detach();
+        } else if self.fullscreen_switch.finish() {
+            self.apply_window_mode(window.is_fullscreen(), window, cx);
+        }
         cx.notify();
     }
 
@@ -2154,8 +2326,31 @@ impl Render for DrawerWindow {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has its own `test` attribute that would replace std's.
-    use super::{DrawerSide, Duration, Summary, content_origin, drawer_area, near_drawer_edge, saved_placement, screen_labels, stats_inset, stats_rows};
+    use super::{DrawerSide, Duration, FullscreenSwitch, Summary, content_origin, drawer_area, near_drawer_edge, saved_placement, screen_labels, stats_inset, stats_rows};
     use crate::setup::{Corner, StatsBox};
+
+    #[test]
+    fn a_window_mode_asked_for_during_the_fullscreen_slide_waits_for_its_end() {
+        let mut switch = FullscreenSwitch::default();
+        assert!(!switch.wait(), "no slide: applied at once");
+        switch.start();
+        assert!(switch.wait(), "during the slide: waits");
+        assert!(switch.wait(), "a second change waits too");
+        assert!(switch.finish(), "the slide ends: apply the mode asked for last");
+        assert!(!switch.finish(), "applied once");
+        assert!(!switch.wait());
+    }
+
+    #[test]
+    fn a_slide_that_never_ends_times_out_only_if_nothing_happened_since() {
+        let mut switch = FullscreenSwitch::default();
+        let asked = switch.start();
+        let started = switch.start();
+        assert!(!switch.timed_out(asked), "macOS started the slide since: that one counts");
+        assert!(switch.timed_out(started));
+        switch.finish();
+        assert!(!switch.timed_out(started), "it ended");
+    }
 
     #[test]
     fn screens_of_the_same_model_are_told_apart() {

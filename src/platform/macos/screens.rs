@@ -128,6 +128,38 @@ pub fn toggle_fullscreen(view: &NSView) {
     });
 }
 
+/// Watches macOS's own fullscreen slide for the window holding `view` (#203): `on_change(true)`
+/// when macOS starts sliding it into or out of fullscreen, `on_change(false)` when the slide has
+/// finished. Called on the main thread, from AppKit's notification: send it on rather than update
+/// GPUI from it. Watches for as long as the app runs.
+pub fn watch_fullscreen(view: &NSView, on_change: impl Fn(bool) + Send + Sync + 'static) {
+    use objc2_app_kit::{NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification, NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification};
+    use objc2_foundation::{NSNotification, NSNotificationCenter};
+
+    let Some(window) = view.window() else { return };
+    let on_change = std::sync::Arc::new(on_change);
+    let center = NSNotificationCenter::defaultCenter();
+    // SAFETY: AppKit's own constants, set before any app code runs.
+    let names = unsafe {
+        [
+            (NSWindowWillEnterFullScreenNotification, true),
+            (NSWindowWillExitFullScreenNotification, true),
+            (NSWindowDidEnterFullScreenNotification, false),
+            (NSWindowDidExitFullScreenNotification, false),
+        ]
+    };
+    for (name, started) in names {
+        let on_change = on_change.clone();
+        let block = block2::RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| on_change(started));
+        let object: &objc2::runtime::AnyObject = &window;
+        // SAFETY: the block is Send + Sync (its closure is), and with no queue it runs on the
+        // thread that posts the notification: AppKit's main thread.
+        let observer = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), Some(object), None, &block) };
+        // The window lives as long as the app: so does the observer.
+        std::mem::forget(observer);
+    }
+}
+
 /// Turns the window holding `overlay` into a layer over the one holding `owner`: a child window
 /// (it moves with it and stays just above it, not over other apps) that lets the mouse through.
 pub fn make_overlay(overlay: &NSView, owner: &NSView) {

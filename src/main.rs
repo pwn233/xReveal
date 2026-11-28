@@ -7,6 +7,7 @@ mod audio;
 mod crash;
 mod drawer;
 mod log;
+mod drive;
 mod permission;
 mod platform;
 mod report;

@@ -112,7 +112,7 @@ to run, and `q` to quit.
 | ------------- | ------------------------------------------------------- |
 | `src/main.rs` | Starts the app, initializes GPUI Kit, opens the window  |
 | `src/app.rs`  | `XReveal` root view (title bar, sample controls, theme) |
-| `scripts/`    | `dev-app.sh` (macOS .app launcher), `check-win.sh` (Windows dry lab) |
+| `scripts/`    | `dev-app.sh` (macOS .app launcher), `check-win.sh` (Windows dry lab), `verify/` (CPU, GPU and memory samplers for the verification runs) |
 | `packaging/`  | Platform packaging files (macOS `Info.plist`)            |
 | `.github/workflows/ci.yml` | Build, clippy and tests on macOS and Windows for every PR |
 

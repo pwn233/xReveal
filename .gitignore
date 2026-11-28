@@ -117,3 +117,7 @@ dist
 
 # xreveal --report output
 xreveal-report.txt
+
+# scripts/verify sampler runs
+xreveal-samples-*/
+__pycache__/
