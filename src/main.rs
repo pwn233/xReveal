@@ -4,7 +4,9 @@
 
 mod app;
 mod audio;
+mod crash;
 mod drawer;
+mod log;
 mod permission;
 mod platform;
 mod report;
@@ -22,9 +24,19 @@ use gpui_kit::*;
 use crate::app::XReveal;
 
 fn main() {
+    // The log and the panic hook first, so everything after is covered (docs/spec/v1.md §2.11).
+    crash::init();
+    let folder = crash::folder();
     if std::env::args().any(|a| a == "--report") {
+        // Its own run: the marker goes again when it exits (`report::run`).
+        if let Some(folder) = &folder {
+            crash::begin(folder);
+        }
         report::run();
     }
+    // The run marker: what the last run left, and this run's own.
+    let last_run = folder.as_deref().map_or(crash::LastRun::Clean, crash::begin);
+    log::info("app", format!("started xReveal {} (pid {}) on {}; last run: {}", whats_new::VERSION, std::process::id(), crash::os(), crash::describe(&last_run)));
     let _ = crate::video::LAUNCH.set(std::time::Instant::now());
     if std::env::var_os("XREVEAL_SMOKE_TEST").is_some() {
         watch_smoke_test();
@@ -60,7 +72,7 @@ fn main() {
 
         let (window, _) = gpui_kit::open_window(options, cx, move |window, cx| {
             window.set_window_title("xReveal");
-            cx.new(|cx| XReveal::new(window, cx, store))
+            cx.new(|cx| XReveal::new(window, cx, store, last_run))
         })
         .expect("failed to open the main window");
 

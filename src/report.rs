@@ -55,6 +55,8 @@ pub fn run() -> ! {
         Ok(()) => println!("Saved to xreveal-report.txt"),
         Err(error) => eprintln!("Couldn't save xreveal-report.txt: {error}"),
     }
+    // A finished report isn't a crash (docs/spec/v1.md §2.11).
+    crate::crash::end();
     std::process::exit(0);
 }
 

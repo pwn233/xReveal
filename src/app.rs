@@ -134,6 +134,12 @@ pub struct XReveal {
     whats_new: Option<ScrollHandle>,
     /// A broken `setup.toml` was set aside: said once, over the Welcome screen.
     notice: Option<String>,
+    /// The last run didn't end cleanly (docs/spec/v1.md §2.11): the note about it, until it goes.
+    crash_note: Option<crate::crash::Note>,
+    /// Hides the note 30 s after it first shows; set while it shows.
+    crash_note_timer: Option<Task<()>>,
+    /// What the log last said about the input on screen, to log only changes.
+    logged_source: Option<String>,
     /// The picture has been one flat colour for a while: a hint over it, never a screen (#108).
     blank_hint: Option<String>,
     /// The wanted card was unplugged: open it again as soon as it is back.
@@ -153,11 +159,14 @@ pub struct XReveal {
 }
 
 impl XReveal {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, mut store: Store) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, mut store: Store, last_run: crate::crash::LastRun) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let save_on_quit = cx.on_app_quit(|this, _| {
             this.store.flush();
+            // A clean quit: the run marker goes (docs/spec/v1.md §2.11).
+            crate::log::info("app", "quit");
+            crate::crash::end();
             async {}
         });
 
@@ -174,6 +183,9 @@ impl XReveal {
         // Only a remembered input starts by itself; otherwise the no-input screen says to press Tab.
         let remembered_input = store.setup.source.is_some() && !store.first_run;
         let notice = store.notice.take();
+        if let Some(notice) = &notice {
+            crate::log::warn("setup", notice);
+        }
         // What's new (#144): once after an update. A first install has nothing to compare with, so
         // it counts this version as seen.
         let whats_new = if store.first_run {
@@ -191,7 +203,10 @@ impl XReveal {
                     let status = video.description().to_owned();
                     (Some(video), status)
                 }
-                Err(error) => (None, error),
+                Err(error) => {
+                    crate::log::error("video", format!("the video pipeline didn't start: {error}"));
+                    (None, error)
+                }
             }
         };
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -231,6 +246,9 @@ impl XReveal {
             updater: Default::default(),
             _update_watch: None,
             notice,
+            crash_note: None,
+            crash_note_timer: None,
+            logged_source: None,
             blank_hint: None,
             unplugged: false,
             next_retry: None,
@@ -298,7 +316,107 @@ impl XReveal {
         let stats = this.store.setup.stats;
         this.stats_refresh = None;
         this.apply_stats(stats, cx);
+        this.after_last_run(last_run, window, cx);
+        if let Some(test) = crate::crash::crash_test() {
+            // The verification cards' crash: 10 s after the picture first shows, on this thread.
+            cx.spawn(async move |_, cx| {
+                while crate::video::FIRST_PRESENT.get().is_none() {
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                }
+                cx.background_executor().timer(crate::crash::CRASH_TEST_AFTER).await;
+                crate::crash::crash_now(test);
+            })
+            .detach();
+        }
         this
+    }
+
+    /// The last run left its marker (docs/spec/v1.md §2.11): look, off the UI thread, for what it
+    /// left behind, and show the note about it. The OS's report can come a while after the crash:
+    /// if it turns up while the note still shows, the note becomes the crash note.
+    fn after_last_run(&mut self, last_run: crate::crash::LastRun, window: &mut Window, cx: &mut Context<Self>) {
+        let crate::crash::LastRun::Leftover(marker) = last_run else { return };
+        let Some(folder) = crate::crash::folder() else { return };
+        let setup = self.store.setup.clone();
+        let found = cx.background_executor().spawn({
+            let (folder, marker, setup) = (folder.clone(), marker.clone(), setup.clone());
+            async move {
+                let evidence = crate::crash::look_for_evidence(&folder, marker.as_ref());
+                (crate::crash::note(&folder, &evidence, &setup), evidence)
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let (note, mut evidence) = found.await;
+            let shown = this.update_in(cx, |this, _, cx| {
+                log_last_run(&evidence);
+                this.crash_note = Some(note);
+                this.show_crash_note(cx);
+                cx.notify();
+            });
+            let Some(marker) = marker.filter(|_| shown.is_ok() && evidence.os.is_none()) else { return };
+            let late = cx.background_executor().spawn(async move { crate::crash::wait_for_os_report(&marker) }).await;
+            let Some(os) = late else { return };
+            evidence.os = Some(os);
+            let note = cx.background_executor().spawn({
+                let evidence = evidence.clone();
+                async move { crate::crash::note(&folder, &evidence, &setup) }
+            });
+            let note = note.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                log_last_run(&evidence);
+                // Still showing: it becomes the crash note, with its own 30 s.
+                if this.crash_note.is_some() {
+                    this.crash_note = Some(note);
+                    if this.crash_note_timer.take().is_some() {
+                        this.show_crash_note(cx);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The crash note shows unless What's new (first) or the drawer is up.
+    fn crash_note_visible(&self) -> bool {
+        self.crash_note.is_some() && self.whats_new.is_none() && !self.drawer_open
+    }
+
+    /// Once the crash note can be seen, it goes by itself 30 s later.
+    fn show_crash_note(&mut self, cx: &mut Context<Self>) {
+        if !self.crash_note_visible() || self.crash_note_timer.is_some() {
+            return;
+        }
+        self.crash_note_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::crash::NOTE_FOR).await;
+            let _ = this.update(cx, |this, cx| this.dismiss_crash_note(cx));
+        }));
+    }
+
+    /// The crash note goes for good.
+    fn dismiss_crash_note(&mut self, cx: &mut Context<Self>) {
+        self.crash_note = None;
+        self.crash_note_timer = None;
+        cx.notify();
+    }
+
+    /// What the crash note's buttons do, while it shows.
+    fn crash_actions(&self, cx: &mut Context<Self>) -> Option<CrashActions> {
+        let note = self.crash_note.clone().filter(|_| self.crash_note_visible())?;
+        let (a, b) = (cx.entity().downgrade(), cx.entity().downgrade());
+        Some(CrashActions {
+            issue: note.issue.map(|url| -> crate::screens::Handler {
+                std::rc::Rc::new(move |_, cx| {
+                    // The person's own browser: they check it and press Submit themselves.
+                    cx.open_url(&url);
+                    let _ = a.update(cx, |this, cx| this.dismiss_crash_note(cx));
+                })
+            }),
+            files: std::rc::Rc::new(move |_, cx| cx.reveal_path(&note.reveal)),
+            close: std::rc::Rc::new(move |_, cx| {
+                let _ = b.update(cx, |this, cx| this.dismiss_crash_note(cx));
+            }),
+        })
     }
 
     /// Works out what the Source is doing (docs/spec/v1.md §2.8) and reacts: reopens the card when
@@ -354,6 +472,7 @@ impl XReveal {
                 Some(observed) => {
                     let mut observed = observed;
                     let mut reopened = false;
+                    let was_unplugged = self.unplugged;
                     if !observed.connected {
                         // The card is gone: let go of it, and wait for the same Source.
                         if video.current().is_some() {
@@ -373,7 +492,19 @@ impl XReveal {
                         // Until it opens again, it is still the Card-unplugged screen.
                         observed.connected = false;
                     }
-                    self.taken_over = video.taken_over();
+                    if self.unplugged != was_unplugged
+                        && let Some((identity, _)) = video.wanted()
+                    {
+                        let what = if self.unplugged { "unplugged" } else { "back" };
+                        crate::log::info("device", format!("{} {what}", crate::crash::source_model(identity)));
+                    }
+                    let taken_over = video.taken_over();
+                    if taken_over != self.taken_over
+                        && let Some(format) = taken_over
+                    {
+                        crate::log::warn("source", format!("another app changed the card to {}×{}@{}", format.width, format.height, format.fps.round()));
+                    }
+                    self.taken_over = taken_over;
                     let card = video.wanted().map(|(identity, _)| identity.name.clone()).unwrap_or_default();
                     let screen = if observed.connected && !observed.busy && video.current().is_none() {
                         // It's there but didn't open for another reason: say why.
@@ -401,6 +532,7 @@ impl XReveal {
         // A stream restarted after a dropout or a device returning can meet the echo guard too.
         self.guard_echo(window, cx);
         if screen != self.screen {
+            crate::log::info("signal", screen_event(&screen));
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(video) = &self.video {
                 // Windows' surface covers GPUI's screens, so it hides while one shows.
@@ -420,6 +552,9 @@ impl XReveal {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let blank_hint = None;
         if blank_hint != self.blank_hint {
+            if blank_hint.is_some() {
+                crate::log::info("signal", "one flat colour for 10 s (blank picture hint)");
+            }
             self.blank_hint = blank_hint;
             cx.notify();
         }
@@ -541,6 +676,8 @@ impl XReveal {
                 self.show_tip(cx);
             }
         }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.log_source();
         // The sound follows the input on screen.
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         match self.video.as_ref().and_then(|v| v.current().cloned()) {
@@ -549,6 +686,29 @@ impl XReveal {
         }
         self.guard_echo(window, cx);
         self.refresh_drawer(window, cx);
+    }
+
+    /// Logs the input on screen and its Video format when they change: the Source by its model.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn log_source(&mut self) {
+        let Some(video) = &self.video else { return };
+        let line = match video.current() {
+            Some((identity, choice)) => {
+                let pixel = video
+                    .sources()
+                    .iter()
+                    .find(|s| s.identity.os_id == identity.os_id)
+                    .and_then(|s| crate::source::best_native(&s.formats, *choice))
+                    .map(|native| format!(" {}", format!("{:?}", native.pixel).to_uppercase()))
+                    .unwrap_or_default();
+                format!("{} {}×{}@{}{pixel}", crate::crash::source_model(identity), choice.width, choice.height, choice.fps.round())
+            }
+            None => "none".to_owned(),
+        };
+        if self.logged_source.as_deref() != Some(&line) {
+            crate::log::info("source", &line);
+            self.logged_source = Some(line);
+        }
     }
 
     fn drawer_model(&self, cx: &App) -> DrawerModel {
@@ -818,6 +978,7 @@ impl XReveal {
             side: self.shown_side,
             handle: self.handle_slide,
             whats_new: self.whats_new.clone().filter(|_| self.overlays_in_own_window),
+            crash: self.crash_note.as_ref().filter(|_| self.crash_note_visible()).map(|n| n.issue.is_some()),
         }
     }
 }
@@ -875,8 +1036,14 @@ impl XReveal {
             let result = done.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.updater = match result {
-                    Ok(prepared) => crate::update::Updater::Ready(prepared),
-                    Err(why) => crate::update::Updater::Failed(why),
+                    Ok(prepared) => {
+                        crate::log::info("update", "downloaded and checked; ready to restart");
+                        crate::update::Updater::Ready(prepared)
+                    }
+                    Err(why) => {
+                        crate::log::error("update", format!("the download failed: {why}"));
+                        crate::update::Updater::Failed(why)
+                    }
                 };
                 this.refresh_drawer(window, cx);
             });
@@ -903,9 +1070,16 @@ impl XReveal {
                 this.update_check = match answer {
                     Some(answer) => {
                         this.store.update(|s| s.updates.answered(crate::update::now(), answer));
+                        match this.store.setup.updates.offer(crate::whats_new::VERSION) {
+                            Some(newer) => crate::log::info("update", format!("{newer} is out")),
+                            None => crate::log::info("update", "up to date"),
+                        }
                         crate::update::Check::Answered
                     }
-                    None => crate::update::Check::Failed,
+                    None => {
+                        crate::log::warn("update", "couldn't reach GitHub");
+                        crate::update::Check::Failed
+                    }
                 };
                 this.refresh_drawer(window, cx);
             });
@@ -998,6 +1172,93 @@ fn log_scroll(which: &str, event: &ScrollEvent) {
     }
 }
 
+/// Logs what the next launch found about the last run.
+fn log_last_run(evidence: &crate::crash::Evidence) {
+    let mut found = Vec::new();
+    if let Some(panic) = &evidence.panic {
+        found.push(format!("a panic at {}", panic.location));
+    }
+    if let Some(os) = &evidence.os {
+        found.push(format!("the OS's report ({} in {})", os.exception, os.module));
+    }
+    if found.is_empty() {
+        crate::log::warn("app", "the last run didn't close normally; no crash report found yet");
+    } else {
+        crate::log::warn("app", format!("the last run crashed: found {}", found.join(" and ")));
+    }
+}
+
+/// What the log calls a screen (docs/spec/v1.md §2.8). No card names: those are in `source:` lines.
+fn screen_event(screen: &Screen) -> String {
+    match screen {
+        Screen::Picture => "live".into(),
+        Screen::Starting => "starting".into(),
+        Screen::Permission { camera, microphone } => format!("waiting for access (camera {camera:?}, microphone {microphone:?})"),
+        Screen::Blocked => "camera access is off".into(),
+        Screen::NoInput { .. } => "no input".into(),
+        Screen::NoCard { title } => format!("the input didn't open: {title}"),
+        Screen::NoSignal { .. } => "no signal".into(),
+        Screen::Unplugged { .. } => "card unplugged".into(),
+        Screen::Busy { .. } => "card busy (used by another app)".into(),
+    }
+}
+
+/// What the crash note's buttons do (docs/spec/v1.md §2.11).
+struct CrashActions {
+    /// **Open an issue on GitHub**, after a crash only.
+    issue: Option<crate::screens::Handler>,
+    /// **Show the files**.
+    files: crate::screens::Handler,
+    /// ×.
+    close: crate::screens::Handler,
+}
+
+/// Width of the crash note, which has buttons beside its text.
+const CRASH_BAR_WIDTH: f32 = 680.0;
+
+/// The crash note: a small bar at the top of the picture, like the format-changed notice. With
+/// `actions` its buttons work; without, it's the overlay window's picture of it (Windows).
+fn crash_bar(pal: theme::Palette, crashed: bool, actions: Option<CrashActions>) -> Stateful<Div> {
+    let link = |id: &'static str, label: &'static str| div().id(id).flex_none().whitespace_nowrap().text_color(pal.accent).cursor_pointer().hover(|d| d.text_color(pal.text)).child(label);
+    let mut issue = crashed.then(|| link("crash-issue", "Open an issue on GitHub"));
+    let mut files = link("crash-files", "Show the files");
+    let mut close = div()
+        .id("crash-close")
+        .flex_none()
+        .cursor_pointer()
+        .text_color(pal.muted)
+        .hover(|d| d.text_color(pal.text))
+        .child(gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Close).size_4());
+    if let Some(actions) = actions {
+        if let Some(on_issue) = actions.issue {
+            issue = issue.map(|d| d.on_click(move |_, window, cx| on_issue(window, cx)));
+        }
+        let (on_files, on_close) = (actions.files, actions.close);
+        files = files.on_click(move |_, window, cx| on_files(window, cx));
+        close = close.on_click(move |_, window, cx| on_close(window, cx));
+    }
+    div()
+        .id("crash-note")
+        .max_w(px(CRASH_BAR_WIDTH))
+        .px_2()
+        .py_1()
+        .rounded(px(8.))
+        .bg(pal.panel)
+        .border_1()
+        .border_color(pal.line)
+        .text_color(pal.text)
+        .text_sm()
+        .flex()
+        .items_center()
+        .gap_3()
+        // Clicks on the note stay with it.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(div().flex_1().min_w_0().child(if crashed { crate::crash::CRASHED } else { crate::crash::NOT_CLEAN }))
+        .children(issue)
+        .child(files)
+        .child(close)
+}
+
 /// A copy of what the display-only overlays show: the overlay window draws from it, never from
 /// [`XReveal`] itself (which may be mid-update when that window draws).
 #[derive(Clone)]
@@ -1019,39 +1280,51 @@ struct Overlays {
     handle: drawer::Slide,
     /// Draw What's new, on this scroll position (only where the overlays have their own window).
     whats_new: Option<ScrollHandle>,
+    /// The crash note shows: after a crash (true) or a run that didn't close normally (false).
+    crash: Option<bool>,
 }
 
 impl Overlays {
-    /// The performance box, the bars at the top centre (the one-time notice, the echo and blank
-    /// picture hints, the colour tip, and `extra` from the main window), the one-line status and the
-    /// edge handle.
-    fn render(&self, window: &mut Window, extra: Vec<AnyElement>) -> Vec<AnyElement> {
+    /// The performance box, the bars at the top centre (the crash note first, then the one-time
+    /// notice, the echo and blank picture hints, the colour tip, and `extra` from the main window),
+    /// the one-line status and the edge handle. `crash` makes the crash note's buttons work.
+    ///
+    /// `twin`: only an invisible crash note, laid out exactly where the overlay window draws the
+    /// visible one, so the main window takes its clicks (Windows; like What's new's twin).
+    fn render(&self, window: &mut Window, crash: Option<CrashActions>, extra: Vec<AnyElement>, twin: bool) -> Vec<AnyElement> {
         let pal = theme::palette();
         let panel = |child: Div| child.px_2().py_1().rounded(px(8.)).bg(pal.panel).border_1().border_color(pal.line).text_color(pal.text).text_sm();
         let bar = |text: SharedString| panel(div().max_w(px(BAR_WIDTH))).child(text).into_any_element();
         let side = self.side;
         let mut out = Vec::new();
-        if let Some(scroll) = &self.whats_new {
+        if twin && self.crash.is_none() {
+            return out;
+        }
+        if let Some(scroll) = self.whats_new.as_ref().filter(|_| !twin) {
             // Shown only: the main window's invisible twin takes the clicks and the scrolling.
             out.push(crate::whats_new::dialog(pal, &crate::whats_new::notes(), scroll, None));
         }
-        if let Some(status) = self.status.clone() {
+        if let Some(status) = self.status.clone().filter(|_| !twin) {
             out.push(panel(div()).child(status).into_any_element());
         }
         // The bars at the top centre, one under another when more than one shows.
         let mut bars: Vec<AnyElement> = Vec::new();
-        bars.extend(self.notice.clone().map(|n| bar(n.into())));
-        if self.microphone_off {
-            bars.push(bar("Microphone access is off, so xReveal can't play sound. Settings (Tab) › Audio turns it back on.".into()));
+        bars.extend(self.crash.map(|crashed| crash_bar(pal, crashed, crash).when(twin, |d| d.opacity(0.)).into_any_element()));
+        // The twin needs only the note: the bars below it can't move it.
+        if !twin {
+            bars.extend(self.notice.clone().map(|n| bar(n.into())));
+            if self.microphone_off {
+                bars.push(bar("Microphone access is off, so xReveal can't play sound. Settings (Tab) › Audio turns it back on.".into()));
+            }
+            if self.echo {
+                bars.push(bar(crate::audio::echo::MUTED_NOTICE.into()));
+            }
+            bars.extend(self.blank_hint.clone().map(|hint| bar(hint.into())));
+            if self.tip {
+                bars.push(bar("Blacks look grey? Open settings (Tab) › Colour and set Range to Limited, or set your console's RGB range to Full.".into()));
+            }
+            bars.extend(extra);
         }
-        if self.echo {
-            bars.push(bar(crate::audio::echo::MUTED_NOTICE.into()));
-        }
-        bars.extend(self.blank_hint.clone().map(|hint| bar(hint.into())));
-        if self.tip {
-            bars.push(bar("Blacks look grey? Open settings (Tab) › Colour and set Range to Limited, or set your console's RGB range to Full.".into()));
-        }
-        bars.extend(extra);
         let bar_column = |bars: Vec<AnyElement>| div().flex().flex_col().items_center().gap_2().children(bars);
         let mut bars = Some(bars).filter(|b| !b.is_empty());
         if let Some((stats, rows)) = self.stats.clone() {
@@ -1091,14 +1364,16 @@ impl Overlays {
                 // The box keeps its own inset (it slides aside with the drawer on its side).
                 let slid = px(side_inset - STATS_MARGIN);
                 let row = div().absolute().top(px(vertical_inset)).left(px(STATS_MARGIN)).right(px(STATS_MARGIN)).flex().items_start().gap_3();
-                let twin = stats_box().invisible();
+                let copy = stats_box().invisible();
+                // The twin lays the box out too, unseen, so the note lands where it's drawn.
+                let own = stats_box().when(twin, |d| d.invisible());
                 let row = if corner.is_left() {
-                    row.child(stats_box().ml(slid)).child(area).child(twin)
+                    row.child(own.ml(slid)).child(area).child(copy)
                 } else {
-                    row.child(twin).child(area).child(stats_box().mr(slid))
+                    row.child(copy).child(area).child(own.mr(slid))
                 };
                 out.push(row.into_any_element());
-            } else {
+            } else if !twin {
                 out.push(
                     stats_box()
                         .absolute()
@@ -1112,6 +1387,9 @@ impl Overlays {
         if let Some(bars) = bars {
             let edge = px(STATS_MARGIN);
             out.push(div().absolute().top(edge).left(edge).right(edge).flex().justify_center().child(bar_column(bars)).into_any_element());
+        }
+        if twin {
+            return out;
         }
         // The edge handle. A click on it lands on the window's own mouse handler (which opens the
         // drawer), also when it's drawn in the click-through overlay window.
@@ -1243,9 +1521,14 @@ impl XReveal {
             DrawerEvent::DownloadUpdate => self.download_update(window, cx),
             DrawerEvent::RestartToUpdate => {
                 if let crate::update::Updater::Ready(prepared) = &self.updater {
+                    // Not a crash: the marker goes before the new version starts (docs/spec/v1.md §2.11).
+                    crate::log::info("update", "restarting to update");
+                    crate::crash::end();
                     match crate::platform::install_update(prepared) {
                         Ok(()) => cx.quit(),
                         Err(why) => {
+                            crate::crash::resume();
+                            crate::log::error("update", format!("the update didn't start: {why}"));
                             self.updater = crate::update::Updater::Failed(why);
                             self.refresh_drawer(window, cx);
                         }
@@ -1359,7 +1642,10 @@ impl XReveal {
                     if let Some(video) = &mut this.video {
                         this.status = match video.switch_to(&os_id, choice) {
                             Ok(()) => video.description().to_owned(),
-                            Err(error) => error,
+                            Err(error) => {
+                                crate::log::error("source", format!("couldn't switch: {error}"));
+                                error
+                            }
                         };
                     }
                     this.showing_changed(window, cx);
@@ -1439,6 +1725,11 @@ impl XReveal {
             }
         }
         self.drawer_open = open;
+        if open && self.crash_note_timer.is_some() {
+            self.dismiss_crash_note(cx);
+        } else if !open {
+            self.show_crash_note(cx);
+        }
         self.near_edge = false;
         // The notch stays while the drawer is open (to close it), and tucks away after it closes.
         self.handle_slide = if open { drawer::Slide::opened() } else { drawer::Slide::opened().toward(false) };
@@ -1653,14 +1944,18 @@ impl Render for XReveal {
         // The notices with buttons live in this window (they're macOS's: microphone access, another
         // app's format), and join the overlays' bars at the top centre.
         let notices: Vec<AnyElement> = microphone.into_iter().chain(taken_over).map(IntoElement::into_any_element).collect();
+        // The crash note's buttons (docs/spec/v1.md §2.11).
+        let crash = self.crash_actions(cx);
         let passive = if self.overlays_in_own_window {
             let edge = px(STATS_MARGIN);
             let column = (!notices.is_empty()).then(|| div().absolute().top(edge).left(edge).right(edge).flex().flex_col().items_center().gap_2().children(notices).into_any_element());
             // An empty copy of the notch, for its hand cursor (see `Overlays::notch`).
             let notch = self.overlays().notch(window).map(IntoElement::into_any_element);
-            column.into_iter().chain(notch).collect()
+            // The overlay window draws the crash note; an invisible twin here takes its clicks.
+            let twin = self.overlays().render(window, crash, Vec::new(), true);
+            column.into_iter().chain(notch).chain(twin).collect()
         } else {
-            self.overlays().render(window, notices)
+            self.overlays().render(window, crash, notices, false)
         };
         // What's new (#144). Its buttons work here; where the overlays have their own click-through
         // window (Windows), that window draws the card and this one is an invisible twin at the
@@ -1672,6 +1967,7 @@ impl Render for XReveal {
                     let _ = this.update(cx, |this, cx| {
                         this.whats_new = None;
                         this.store.update(|s| s.whats_new_seen = Some(crate::whats_new::VERSION.into()));
+                        this.show_crash_note(cx);
                         cx.notify();
                     });
                 }),
@@ -1756,7 +2052,7 @@ impl OverlayWindow {
 
 impl Render for OverlayWindow {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().relative().flex().items_end().p_3().children(self.overlays.render(window, Vec::new()))
+        div().size_full().relative().flex().items_end().p_3().children(self.overlays.render(window, None, Vec::new(), false))
     }
 }
 

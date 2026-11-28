@@ -2,6 +2,7 @@
 //! (docs/spec/v1.md §3.1, §3.3, §3.4; ADR 0001).
 
 pub mod access;
+pub mod crash;
 mod capture;
 pub mod http;
 pub mod install;

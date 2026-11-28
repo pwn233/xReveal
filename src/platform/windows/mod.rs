@@ -2,6 +2,7 @@
 //! GPUI's window (docs/spec/v1.md §3.1, §3.3, §3.4; ADR 0001, ADR 0002).
 
 pub mod access;
+pub mod crash;
 pub mod container;
 mod device_settings;
 pub mod http;
