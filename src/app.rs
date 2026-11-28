@@ -191,6 +191,9 @@ pub struct XReveal {
     logged_source: Option<String>,
     /// The picture has been one flat colour for a while: a hint over it, never a screen (#108).
     blank_hint: Option<String>,
+    /// Held while the Picture shows, so the display doesn't sleep mid-game (#215).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    display_awake: Option<crate::platform::DisplayAwake>,
     /// The wanted card was unplugged: open it again as soon as it is back.
     unplugged: bool,
     /// When to try a busy card again.
@@ -302,6 +305,8 @@ impl XReveal {
             crash_note_timer: None,
             logged_source: None,
             blank_hint: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            display_awake: None,
             unplugged: false,
             next_retry: None,
             taken_over: None,
@@ -648,6 +653,8 @@ impl XReveal {
                 // Windows' surface covers GPUI's screens, so it hides while one shows.
                 video.set_surface_visible(matches!(screen, Screen::Picture | Screen::Starting));
             }
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            self.keep_display_awake(screen == Screen::Picture);
             self.screen = screen;
             self.picture_seen |= self.screen.shows_picture();
             cx.notify();
@@ -701,6 +708,18 @@ impl XReveal {
         }
         self.refresh_drawer(window, cx);
         cx.notify();
+    }
+
+    /// Holds the display awake while the Picture shows, and lets go on every other screen (#215).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn keep_display_awake(&mut self, awake: bool) {
+        if awake == self.display_awake.is_some() {
+            return;
+        }
+        self.display_awake = awake.then(crate::platform::DisplayAwake::hold).flatten();
+        if awake && self.display_awake.is_none() {
+            crate::log::warn("app", "the OS refused to keep the display awake; it may sleep during play");
+        }
     }
 
     /// Plays the input on screen again with the current route (it changed, or the buffer grew).
