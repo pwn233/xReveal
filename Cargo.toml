@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 cpal = "0.18"
+# Async channels into GPUI's foreground tasks: macOS's fullscreen slide (#203).
+futures = "0.3"
 # GPUI Kit: GPUI + gpui-component + default assets behind one dependency.
 # https://gpui-kit.com
 gpui-kit = "0.11.0"

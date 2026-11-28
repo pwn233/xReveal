@@ -77,6 +77,17 @@ pub fn toggle_fullscreen(window: raw_window_handle::RawWindowHandle) {
     }
 }
 
+/// Watches macOS's fullscreen slide for `window` (#203): `on_change(true)` when it starts,
+/// `on_change(false)` when it has finished. Called from AppKit: send it on, don't update GPUI in it.
+#[cfg(target_os = "macos")]
+pub fn watch_fullscreen(window: raw_window_handle::RawWindowHandle, on_change: impl Fn(bool) + Send + Sync + 'static) {
+    if let raw_window_handle::RawWindowHandle::AppKit(appkit) = window {
+        // SAFETY: GPUI's raw window handle on macOS is a valid NSView for the window's lifetime.
+        let view: &objc2_app_kit::NSView = unsafe { appkit.ns_view.cast().as_ref() };
+        macos::screens::watch_fullscreen(view, on_change);
+    }
+}
+
 /// Makes `overlay` a click-through layer over `owner`, for the overlays that would otherwise sit
 /// under the video surface (Windows) — see `app::OverlayWindow`.
 pub fn make_overlay(overlay: &gpui_kit::Window, owner: raw_window_handle::RawWindowHandle) {
