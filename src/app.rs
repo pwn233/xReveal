@@ -348,7 +348,57 @@ impl XReveal {
         let stats = this.store.setup.stats;
         this.stats_refresh = None;
         this.apply_stats(stats, cx);
+        // The driver's control channel, for unattended runs (#204).
+        if crate::drive::wanted() {
+            crate::drive::start(window, cx);
+        }
         this
+    }
+
+    /// The driver's `state` (#204): one JSON line with what a script needs to see that a step has
+    /// finished.
+    pub fn drive_state(&self, window: &Window, cx: &App) -> String {
+        let bounds = window.bounds();
+        let stats = self.stats().unwrap_or_default();
+        let tab = match &self.drawer_window {
+            Some((_, host)) => host.read(cx).drawer.read(cx).tab(),
+            None => self.drawer.read(cx).tab(),
+        };
+        serde_json::json!({
+            "drawer_open": self.drawer_open,
+            "drawer_tab": format!("{tab:?}"),
+            "stats_shown": self.store.setup.stats.shown,
+            "window_mode": format!("{:?}", self.store.setup.window_mode),
+            "fullscreen": window.is_fullscreen(),
+            // macOS is sliding into or out of Fullscreen (#203): `fullscreen` isn't settled yet.
+            "transition_in_progress": self.fullscreen_switch.running,
+            "bounds": [bounds.origin.x.as_f32(), bounds.origin.y.as_f32(), bounds.size.width.as_f32(), bounds.size.height.as_f32()],
+            "monitor": self.store.setup.monitor,
+            "screen": format!("{:?}", self.screen),
+            "status": self.status,
+            "audio_output": self.store.setup.audio.output,
+            "fps": stats.fps,
+            "dropped": stats.dropped,
+            "late": stats.late,
+            "mouse": [window.mouse_position().x.as_f32(), window.mouse_position().y.as_f32()],
+            // How the last run ended: #205 fills it in.
+            "last_run": null,
+        })
+        .to_string()
+    }
+
+    /// The drawer's own window while it's open there (Windows): it has xReveal's keys, not the main
+    /// window. `None` when the main window has them.
+    pub fn keys_window(&self) -> Option<AnyWindowHandle> {
+        self.drawer_window.as_ref().filter(|_| self.drawer_open).map(|(handle, _)| *handle)
+    }
+
+    /// Where a pointer at `position` in this window's content goes: the drawer's own window and the
+    /// point in it, when the drawer is open there and the point is over it. `None`: this window.
+    pub fn pointer_target(&self, position: Point<Pixels>, window: &Window) -> Option<(AnyWindowHandle, Point<Pixels>)> {
+        let handle = self.keys_window()?;
+        let area = drawer_area(window.viewport_size(), self.store.setup.drawer_side);
+        area.contains(&position).then(|| (handle, position - area.origin))
     }
 
     /// Works out what the Source is doing (docs/spec/v1.md §2.8) and reacts: reopens the card when
