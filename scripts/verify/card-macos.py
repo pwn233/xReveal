@@ -76,13 +76,13 @@ EVERY = 5.0          # the 5 s cadence of states.csv (gpu_pct is a 5 s figure, #
 # Budgets and limits, with where they come from.
 CPU_MAX, GPU_MAX, SHARE_MAX = 5.0, 10.0, 8.3              # §4
 LAUNCH_MEDIAN_MAX, LAUNCH_ANY_MAX = 1000.0, 1500.0         # §4, #220 row 4 (ms)
-CEILINGS = {"windowed": 220.0, "fullscreen": 250.0}        # §4, #195, #201 (MB)
+CEILINGS = {"windowed": 290.0, "fullscreen": 250.0}        # §4, #195, #201, #220 (MB): Windowed covers the UI animating
 LEAK_MB_H, COUNT_PER_H = 1.0, 10.0                         # #192
 LEAK_KB_CYCLE = 10.0                                       # #192, #197
 FRAMES_MIN = 0.95                                          # #192: of the source rate
 WAKE_LIMIT, REPLUG_LIMIT = 10.0, 5.0                       # #197 (s)
 
-PASS, FAIL, NOT_RUN, INCONCLUSIVE = "✅", "❌", "not run", "inconclusive"
+PASS, FAIL, NOT_RUN, INCONCLUSIVE, REPORTED = "✅", "❌", "not run", "inconclusive", "reported"
 
 # The capture card's own sound device: a wired output, but not the second one the card means.
 CARD_AUDIO = ("USB2 Digital Audio", "MACROSILICON")
@@ -1392,7 +1392,11 @@ class Judge:
         return self.two(values, CPU_MAX, "%")
 
     def gpu(self):
-        return self.two(self.windows("gpu_pct"), GPU_MAX, "%")
+        """Reported, not judged (#220): macOS lowers the GPU's clock when there's headroom, and a
+        busy share then reads high (6% or 14.5% for the same work). Latency (row 3) and frames
+        (row 7) catch a GPU that's really too slow."""
+        measured, result = self.two(self.windows("gpu_pct"), GPU_MAX, "%")
+        return measured + ("" if result == PASS else " (over 10%: the GPU at a low clock?)"), NOT_RUN if result == NOT_RUN else REPORTED
 
     def share(self):
         return self.two(self.windows("share_p50"), SHARE_MAX, " ms")
@@ -1599,10 +1603,10 @@ class Judge:
 
 ROWS = [
     ("CPU", "≤ 5% of the machine, soak and Fullscreen medians"),
-    ("GPU", "`gpu_pct` ≤ 10%, the same minutes"),
+    ("GPU", "`gpu_pct`, the same minutes: reported, not judged (the GPU's clock varies)"),
     ("xReveal's share (latency)", "p50 ≤ 8.3 ms, the same minutes"),
     ("Launch → picture", "median ≤ 1 s, none over 1.5 s"),
-    ("Memory ceilings", "highest 1-min median ≤ 220 MB Windowed, ≤ 250 MB Fullscreen"),
+    ("Memory ceilings", "highest 1-min median ≤ 290 MB Windowed, ≤ 250 MB Fullscreen"),
     ("Soak leak", "footprint slope's 95% upper bound < 1 MB/h, windows not rising; threads, fds < 10/h"),
     ("Frames, soak", "≥ 95% of the source rate"),
     ("Each paced batch", "< 10 kB/cycle, not rising; every recovery in its limit; no crash; frames ≥ 95% after"),
@@ -1628,7 +1632,7 @@ class CardWriter:
             L += ["> **Quick run** (`--quick`), to test the runner: soak {soak} min, Fullscreen {fs_settle} + {fs_measure} min, "
                   "{warm_cycles} + {cycles} cycles per batch, {launches} launches. Its verdicts don't count for the card.".format(**run.plan), ""]
         verdicts = [v for _, v in self.rows]
-        card = FAIL if FAIL in verdicts else (PASS if all(v == PASS for v in verdicts) else "incomplete")
+        card = FAIL if FAIL in verdicts else (PASS if all(v in (PASS, REPORTED) for v in verdicts) else "incomplete")
         L += [
             "- **Card:** {}{}".format(card, "" if card != "incomplete" else " (no row fails; some are not run or inconclusive)"),
             "- **Machine:** {} ({}), {}".format(facts.get("model", "?"), facts.get("chip", "?"), facts.get("power", "?")),

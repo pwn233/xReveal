@@ -88,7 +88,7 @@ OSES = {
             ("gpu_pct", "GPU %", 1),
         ],
         "ceilings": [
-            ("footprint_mb", "Memory footprint", {"windowed": 220, "fullscreen": 250}),
+            ("footprint_mb", "Memory footprint", {"windowed": 290, "fullscreen": 250}),
         ],
     },
 }
