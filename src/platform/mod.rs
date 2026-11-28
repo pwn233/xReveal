@@ -10,6 +10,12 @@ pub use macos::VideoPipeline;
 #[cfg(target_os = "windows")]
 pub use windows::VideoPipeline;
 
+/// Keeps the display from idling to sleep while it lives (#215). Display only, never the system.
+#[cfg(target_os = "macos")]
+pub use macos::awake::DisplayAwake;
+#[cfg(target_os = "windows")]
+pub use windows::awake::DisplayAwake;
+
 /// The window's native handle, for the few things GPUI can't do (moving it to another screen).
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn raw_window(window: &gpui_kit::Window) -> Option<raw_window_handle::RawWindowHandle> {

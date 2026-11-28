@@ -78,6 +78,8 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_Performance",
+    # Keeping the display awake while the picture is live (#215).
+    "Win32_System_Power",
     # Camera and Microphone access: the privacy settings' consent store (#176).
     "Win32_System_Registry",
     "Win32_System_Threading",
