@@ -9,6 +9,7 @@ When stopped, each writes `summary.md` in the format of the first Windows baseli
 | `sample-windows.ps1` | Windows sampler: `typeperf` on `Process V2`, `GPU Engine` and `GPU Process Memory`. `-Analyze <folder>` writes the summary again. |
 | `sample-macos.py` | macOS sampler: `proc_pid_rusage`, `proc_pidinfo`, the IORegistry GPU counter, `footprint` at the start and end. `--analyze <folder>` writes the summary again. |
 | `analyze.py` | The summary for a folder from either OS. `sample-macos.py` uses it; on Windows, `sample-windows.ps1` has the same rules in PowerShell so the PC needs no Python. Change both together. |
+| `card-macos.py` | The macOS verification card (#220): runs its steps in order, judges its 14 rows and writes the run folder (#222). |
 
 ## Before a run, on either OS
 
@@ -83,3 +84,44 @@ when it is minimised, hidden or in another Space.
 When waiting by name, a sampler picks up the next xReveal after one exits; the summary covers the
 first one and lists the rest. A process that isn't the sampler's child has no readable exit code on
 macOS; on Windows the script keeps a handle so it can record it.
+
+## The macOS card runner
+
+`card-macos.py` runs the macOS verification card (#220) on the MacBook with the PS5 idle on the
+Reference card: build the app first with `scripts/dev-app.sh --release` (it launches it: quit it),
+quit xReveal, then in Terminal, from the repository:
+
+```sh
+/usr/bin/python3 -I scripts/verify/card-macos.py               # the whole card, about 4½ hours
+/usr/bin/python3 -I scripts/verify/card-macos.py --quick       # every step, shortened (~20 min)
+/usr/bin/python3 -I scripts/verify/card-macos.py --no-manual   # skip the unplug/replug by hand
+```
+
+Other options: `--out DIR` (default `~/Documents/xreveal-card-macos-<date>-<time>/`), `--app PATH`
+(default `target/dev-app/xReveal.app`), `--no-sleep`, `--audio-output NAME` (the second wired
+output, when `system_profiler` doesn't find it).
+
+- **Before and after:** it backs up `setup.toml` and sets the card's values (Windowed, a 1280×855
+  window, the overlay on, sound on). The backup is put back byte for byte at the end, even after a
+  failure or Ctrl+C; `run.log` says so. It refuses to start while xReveal is running.
+- **Keep away from the Mac.** xReveal comes to the front before Fullscreen keys (#200). Only the
+  unplug/replug steps ask for a person, on the terminal; `--no-manual` marks them not run.
+- **Sleep/wake** needs the card's one-time sudoers entry for `pmset sleepnow` and
+  `pmset schedule wake`; without it the row is not run. **Audio output** needs a second wired
+  output (a USB audio adapter; the card's own sound device doesn't count); without one the batch
+  is not run.
+- **The drawer is driven by its keys** (`tab`, `up`, `down`, `left`, `right`): Video format and
+  Source › Input step one entry per press, each waiting for its picture. On the Reference card
+  720p60 is six presses from 1080p50, so a Video format cycle passes the 1080p rates between.
+- **`--quick`** tests the runner, not xReveal: 2-minute soak, 1 + 5 cycles per batch, 3 launches.
+  Its row 6 comes out inconclusive (too few minutes for a slope).
+
+The run folder holds `run.log` (each step, and every driver command and answer, timestamped), the
+sampler's `samples.csv`, `minutes.csv` and `summary.md`, `states.csv` (the driver's `state` every
+5 s: `gpu_pct`, xReveal's share, frames), `batches.json` (per batch: footprint before and after,
+kB per cycle, the slowest recovery, frames after, crashes) and `card.md`, the card's table with
+the measured values and ✅/❌/not run/inconclusive. Post `card.md` on #220.
+
+What `state` can't show is said in `card.md`'s notes: the update tip, the crash note bar and What's
+new aren't in `state` (What's new counts as closed when `whats-new-seen` is saved again after
+Got it), and an Audio output switch is judged on `audio_output`, not on hearing the sound.
