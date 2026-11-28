@@ -74,6 +74,18 @@ function Beep { 1..3 | ForEach-Object { [console]::Beep(880, 250); Start-Sleep -
 if (-not (Test-Path $Exe)) { throw "xreveal.exe not found at $Exe. Pass -Exe <path>." }
 if (Get-Process xreveal -ErrorAction SilentlyContinue) { throw "xReveal is already running. Quit it first: the soak must start from launch." }
 
+# --- xReveal's saved setup. F3 (stats overlay) and F11 (Fullscreen) are both remembered, so the overlay may
+# already be on (then F3 would hide it) and the window may open in Fullscreen. Flat "section.key" -> value.
+$setupToml = "$env:LOCALAPPDATA\xReveal\setup.toml"
+function Read-Setup { $s = @{}; $sec = ''
+    if (Test-Path $setupToml) { foreach ($l in Get-Content $setupToml) {
+        if ($l -match '^\s*\[+([^\]]+)\]+\s*$') { $sec = $Matches[1] + '.' }
+        elseif ($l -match '^\s*([\w-]+)\s*=\s*"?([^"]*)"?\s*$') { if (-not $s.ContainsKey("$sec$($Matches[1])")) { $s["$sec$($Matches[1])"] = $Matches[2] } } } }
+    $s }
+$setup0 = Read-Setup
+if ($setup0['window-mode'] -and $setup0['window-mode'] -ne 'windowed') { throw "xReveal is set to open '$($setup0['window-mode'])' ($setupToml). Open it, press F11 until it's a window, quit it, and run this again." }
+$statsOn = $setup0['stats.shown'] -eq 'true'
+
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $out = Join-Path (Get-Location) "xreveal-baseline-$stamp"
 New-Item -ItemType Directory $out | Out-Null
@@ -92,13 +104,16 @@ $meta = [ordered]@{
     xreveal   = "$((Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\xReveal' -ErrorAction SilentlyContinue).DisplayVersion) (exe built $((Get-Item $Exe).LastWriteTime.ToString('yyyy-MM-dd HH:mm')))"
     exe       = $Exe
     intervalSeconds = $IntervalSeconds
+    videoFormat = "$($setup0['video-format.width'])x$($setup0['video-format.height']) @ $($setup0['video-format.fps']) (saved in setup.toml)"
+    statsOverlayAtStart = $statsOn
 }
 
 # --- Process V2 (instance "xreveal:<pid>") where it exists, else the old Process set
 $hasV2 = (typeperf -qx "Process V2" 2>$null | Select-Object -First 1) -match 'Process V2'
 $meta.processSet = if ($hasV2) { 'Process V2' } else { 'Process' }
 
-Write-Host "`nLaunching xReveal. Press F3 in its window for the stats overlay within 15 s, then don't touch the machine for $SoakMinutes minutes." -ForegroundColor Cyan
+$f3 = if ($statsOn) { "The stats overlay is already on: do NOT press F3 (it would hide it). Don't touch" } else { "Press F3 in its window for the stats overlay within 15 s, then don't touch" }
+Write-Host "`nLaunching xReveal. $f3 the machine for $SoakMinutes minutes." -ForegroundColor Cyan
 $proc = Start-Process $Exe -PassThru
 $launch = Get-Date
 Start-Sleep -Seconds 10   # the picture is up within 1 s; GPU engine instances exist once it has drawn
@@ -157,6 +172,8 @@ while ((Get-Date) -lt $fsEnd) {
 }
 Start-Sleep -Seconds ($IntervalSeconds * 2); Stop-Process $tp -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1
 Write-Host "`n"; Beep
+$meta.statsOverlayAtEnd = (Read-Setup)['stats.shown'] -eq 'true'
+if ($meta.statsOverlayAtEnd -ne $meta.statsOverlayAtStart) { Write-Warning "The stats overlay was $(if ($meta.statsOverlayAtStart) {'on'} else {'off'}) at launch and is $(if ($meta.statsOverlayAtEnd) {'on'} else {'off'}) now: F3 was pressed during the run." }
 
 # --- Read the samples. typeperf's first column is its timestamp ("MM/dd/yyyy HH:mm:ss.fff" on Windows 11);
 # its interval drifts ~14 ms per sample, so row i is NOT sampleStart + i * interval. That is only the fallback.
@@ -247,6 +264,7 @@ $L.Add("- **CPU:** $($meta.cpu), $($meta.logicalCpus) logical; **RAM:** $($meta.
 $L.Add("- **GPU:** $($meta.gpus -join '; ')  ")
 $L.Add("- **Monitors:** $($meta.monitors -join '; ')  ")
 $L.Add("- **xReveal:** $($meta.xreveal); counters from ``$($meta.processSet)``, $($meta.gpuEngineInstances) GPU engine instances, every $IntervalSeconds s")
+$L.Add("- **Video format:** $($meta.videoFormat); **stats overlay:** $(if ($meta.statsOverlayAtStart) {'on'} else {'off'}) at launch, $(if ($meta.statsOverlayAtEnd) {'on'} else {'off'}) at the end (from setup.toml; F3 toggles it)  ")
 $L.Add("- **Windowed:** $($meta.windowsWindowed -join '; ')  ")
 $L.Add("- **Fullscreen:** $($meta.windowsFullscreen -join '; ')")
 if ($meta.openedFullscreen) { $L.Add('- Note: xReveal opened in Fullscreen and was switched to Windowed by hand in the first minute.') }
