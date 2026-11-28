@@ -225,7 +225,10 @@ CF.CFRelease.argtypes = [C.c_void_p]
 _key = {k: CF.CFStringCreateWithCString(None, k.encode(), 0x08000100)  # kCFStringEncodingUTF8
         for k in ("kCGWindowOwnerPID", "kCGWindowLayer", "kCGWindowBounds")}
 ON_SCREEN_ONLY, EXCLUDE_DESKTOP = 1 << 0, 1 << 4
-MAIN_MENU_LAYER = 24  # kCGMainMenuWindowLevel: the menu bar, absent in a fullscreen Space
+# kCGStatusWindowLevel: the menu bar's status items (clock, Control Center), absent in a fullscreen
+# Space. The menu bar itself (kCGMainMenuWindowLevel, 24) stays listed there on macOS 26, so it
+# can't tell a fullscreen window below the notch from a window zoomed to fill the screen.
+STATUS_LAYER = 25
 
 
 def _cfnum(d, key):
@@ -254,7 +257,7 @@ def window_state(pid):
             if not CG.CGRectMakeWithDictionaryRepresentation(CF.CFDictionaryGetValue(d, _key["kCGWindowBounds"]), C.byref(r)):
                 continue
             layer = _cfnum(d, "kCGWindowLayer")
-            if layer == MAIN_MENU_LAYER:
+            if layer == STATUS_LAYER:
                 menubars.append(r)
             elif layer == 0 and _cfnum(d, "kCGWindowOwnerPID") == pid:
                 mine.append(r)
@@ -275,7 +278,7 @@ def window_state(pid):
     near = lambda a, z: abs(a - z) < 1.5  # noqa: E731
     covers = near(w.x, b.x) and near(w.y, b.y) and near(w.w, b.w) and near(w.h, b.h)
     # Fullscreen on a notched screen sits below the camera housing: full width, down to the bottom,
-    # a little short at the top, and the display shows no menu bar.
+    # a little short at the top, and the display shows no menu bar items.
     menubar_here = any(b.x <= m.x < b.x + b.w and near(m.y, b.y) for m in menubars)
     below_notch = (near(w.x, b.x) and near(w.w, b.w) and near(w.y + w.h, b.y + b.h)
                    and w.y - b.y <= 40 and not menubar_here)
