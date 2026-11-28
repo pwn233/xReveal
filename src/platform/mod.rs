@@ -72,6 +72,19 @@ pub fn set_borderless(window: raw_window_handle::RawWindowHandle, borderless: bo
     let _ = (window, borderless, display);
 }
 
+/// Frees the window-size drawables GPUI's layer piled up while the drawer slid in or out (#225);
+/// macOS only, where the drawer is drawn in the main window. Call it once the UI is still.
+pub fn trim_drawables(window: raw_window_handle::RawWindowHandle) {
+    #[cfg(target_os = "macos")]
+    if let raw_window_handle::RawWindowHandle::AppKit(appkit) = window {
+        // SAFETY: GPUI's raw window handle on macOS is a valid NSView for the window's lifetime.
+        let view: &objc2_app_kit::NSView = unsafe { appkit.ns_view.cast().as_ref() };
+        macos::screens::trim_drawables(view);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
 /// Enters or leaves macOS's own fullscreen for `window` (#56), a moment later from the main queue.
 /// A borderless window gets its title bar back first: macOS's fullscreen needs a normal window.
 #[cfg(target_os = "macos")]

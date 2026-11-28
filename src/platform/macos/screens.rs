@@ -168,3 +168,25 @@ pub fn make_overlay(overlay: &NSView, owner: &NSView) {
     overlay.setLevel(objc2_app_kit::NSNormalWindowLevel);
     unsafe { owner.addChildWindow_ordered(&overlay, objc2_app_kit::NSWindowOrderingMode::Above) };
 }
+
+/// Makes GPUI's `CAMetalLayer` (the layer of `view`) drop the drawables it no longer needs (#225),
+/// a moment later from the main queue. While the drawer slides, GPUI draws every frame and its
+/// layer's pool grows to five window-size surfaces (17 MB each in a 1280×887 pt window); once the
+/// UI is still again it keeps them until the window is resized. Changing the drawable size frees
+/// the pool, as a resize does, and setting it straight back means GPUI never draws at the wrong
+/// size: both happen in one main-queue block, between two of its frames.
+pub fn trim_drawables(view: &NSView) {
+    let view = view as *const NSView as usize;
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        // SAFETY: as in `move_window`.
+        let view = unsafe { &*(view as *const NSView) };
+        let Some(layer) = view.layer() else { return };
+        let Ok(layer) = layer.downcast::<objc2_quartz_core::CAMetalLayer>() else { return };
+        let size = layer.drawableSize();
+        if size.height <= 2.0 {
+            return;
+        }
+        layer.setDrawableSize(objc2_core_foundation::CGSize { width: size.width, height: size.height - 2.0 });
+        layer.setDrawableSize(size);
+    });
+}

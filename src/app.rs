@@ -1891,6 +1891,19 @@ impl XReveal {
                 _ => {}
             }
         }
+        // Once the drawer has slid in or out and the UI is still, give back the drawables GPUI's
+        // layer piled up while it moved (#225: ~35 MB in a 1280×887 pt window, kept until a resize).
+        if !self.drawer_in_own_window
+            && let Some(handle) = crate::platform::window_handle(window)
+        {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                if this.update(cx, |this, _| this.drawer_open == open).unwrap_or(false) {
+                    crate::platform::trim_drawables(handle);
+                }
+            })
+            .detach();
+        }
         // The Input level meter reads the sound about 20 times a second, only while it can be seen.
         self.meter_feed = open.then(|| {
             cx.spawn(async move |this, cx| {
