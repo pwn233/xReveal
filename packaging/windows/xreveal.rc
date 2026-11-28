@@ -1,2 +1,35 @@
 // The Windows exe's icon (#130): Explorer, the taskbar and Alt+Tab use the first icon resource.
 1 ICON "xreveal.ico"
+
+// The version resource (#206): Explorer's Details tab, Task Manager (FileDescription is the name it
+// shows), WER reports and Event Viewer read it. build.rs writes xreveal-version.h into OUT_DIR from
+// Cargo.toml's version, so nothing here changes for a release.
+#include "xreveal-version.h"
+
+1 VERSIONINFO
+FILEVERSION     XREVEAL_VERSION_BIN
+PRODUCTVERSION  XREVEAL_VERSION_BIN
+FILEFLAGSMASK   0x3F
+FILEFLAGS       0x0
+FILEOS          0x40004 // VOS_NT_WINDOWS32
+FILETYPE        0x1     // VFT_APP
+FILESUBTYPE     0x0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0" // U.S. English, Unicode
+        BEGIN
+            VALUE "ProductName",      "xReveal"
+            VALUE "FileDescription",  "xReveal"
+            VALUE "ProductVersion",   XREVEAL_VERSION_STR
+            VALUE "FileVersion",      XREVEAL_VERSION_STR
+            VALUE "InternalName",     "xreveal"
+            VALUE "OriginalFilename", "xreveal.exe"
+            VALUE "LegalCopyright",   XREVEAL_COPYRIGHT_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
