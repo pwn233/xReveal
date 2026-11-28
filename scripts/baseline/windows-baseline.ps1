@@ -13,9 +13,16 @@
 
 .PARAMETER Exe
   Path to xreveal.exe. Defaults to the installed copy.
+
+.PARAMETER Analyze
+  An existing xreveal-baseline-* folder: write its summary.md and meta.json again without a run. For a run
+  that stopped at the F11 prompt, add the Fullscreen part by hand: fullscreen-start.txt (an ISO time),
+  fullscreen-windows.txt and samples-fullscreen.csv (typeperf with the folder's counters.txt, same process).
+  Optional: windowed-windows.txt. The launch time is taken as the first sample - 11 s.
 #>
 param(
     [string]$Exe = "$env:LOCALAPPDATA\Programs\xReveal\xreveal.exe",
+    [string]$Analyze,
     [int]$SoakMinutes = 20,
     [int]$FullscreenSettleMinutes = 2,
     [int]$FullscreenMeasureMinutes = 3,
@@ -72,7 +79,7 @@ function Get-XrWindows([int]$ProcessId) { $fs = $false; $w = [XrWin]::Windows([u
 function Beep { 1..3 | ForEach-Object { [console]::Beep(880, 250); Start-Sleep -Milliseconds 150 } }
 
 if (-not (Test-Path $Exe)) { throw "xreveal.exe not found at $Exe. Pass -Exe <path>." }
-if (Get-Process xreveal -ErrorAction SilentlyContinue) { throw "xReveal is already running. Quit it first: the soak must start from launch." }
+if (-not $Analyze -and (Get-Process xreveal -ErrorAction SilentlyContinue)) { throw "xReveal is already running. Quit it first: the soak must start from launch." }
 
 # --- xReveal's saved setup. F3 (stats overlay) and F11 (Fullscreen) are both remembered, so the overlay may
 # already be on (then F3 would hide it) and the window may open in Fullscreen. Flat "section.key" -> value.
@@ -83,12 +90,17 @@ function Read-Setup { $s = @{}; $sec = ''
         elseif ($l -match '^\s*([\w-]+)\s*=\s*"?([^"]*)"?\s*$') { if (-not $s.ContainsKey("$sec$($Matches[1])")) { $s["$sec$($Matches[1])"] = $Matches[2] } } } }
     $s }
 $setup0 = Read-Setup
-if ($setup0['window-mode'] -and $setup0['window-mode'] -ne 'windowed') { throw "xReveal is set to open '$($setup0['window-mode'])' ($setupToml). Open it, press F11 until it's a window, quit it, and run this again." }
+if (-not $Analyze -and $setup0['window-mode'] -and $setup0['window-mode'] -ne 'windowed') { throw "xReveal is set to open '$($setup0['window-mode'])' ($setupToml). Open it, press F11 until it's a window, quit it, and run this again." }
 $statsOn = $setup0['stats.shown'] -eq 'true'
 
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$out = Join-Path (Get-Location) "xreveal-baseline-$stamp"
-New-Item -ItemType Directory $out | Out-Null
+if ($Analyze) {
+    $out = (Resolve-Path $Analyze).Path
+    $stamp = (Split-Path $out -Leaf) -replace '^xreveal-baseline-', ''
+} else {
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $out = Join-Path (Get-Location) "xreveal-baseline-$stamp"
+    New-Item -ItemType Directory $out | Out-Null
+}
 
 # --- The machine
 $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
@@ -112,6 +124,21 @@ $meta = [ordered]@{
 $hasV2 = (typeperf -qx "Process V2" 2>$null | Select-Object -First 1) -match 'Process V2'
 $meta.processSet = if ($hasV2) { 'Process V2' } else { 'Process' }
 
+if ($Analyze) {
+    # --- No run: rebuild the timeline from the folder
+    $csv = Join-Path $out 'samples.csv'
+    $firstStamp = (@(Import-Csv $csv)[0].PSObject.Properties | Select-Object -First 1).Value
+    $sampleStart = [datetime]::ParseExact("$firstStamp".Trim(), 'MM/dd/yyyy HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture)
+    $launch = $sampleStart.AddSeconds(-11)   # typeperf starts 10 s after launch; its first sample about 1 s later
+    $soakEnd = $launch.AddMinutes($SoakMinutes)
+    $fsStart = [datetime]::Parse((Get-Content (Join-Path $out 'fullscreen-start.txt') -Raw).Trim())
+    $fsEnd = $fsStart.AddMinutes($FullscreenSettleMinutes + $FullscreenMeasureMinutes)
+    $ww = Join-Path $out 'windowed-windows.txt'
+    $meta.windowsWindowed = if (Test-Path $ww) { @(Get-Content $ww) } else { @('not recorded') }
+    $meta.windowsFullscreen = @(Get-Content (Join-Path $out 'fullscreen-windows.txt'))
+    $meta.statsOverlayAtEnd = $statsOn
+    $meta.analyzedAfterwards = "summary written afterwards with -Analyze: launch taken as the first sample - 11 s ($($launch.ToString('HH:mm:ss'))); Fullscreen from $($fsStart.ToString('HH:mm:ss')) (fullscreen-start.txt); the overlay state is setup.toml's at analysis time."
+} else {
 $f3 = if ($statsOn) { "The stats overlay is already on: do NOT press F3 (it would hide it). Don't touch" } else { "Press F3 in its window for the stats overlay within 15 s, then don't touch" }
 Write-Host "`nLaunching xReveal. $f3 the machine for $SoakMinutes minutes." -ForegroundColor Cyan
 $proc = Start-Process $Exe -PassThru
@@ -174,10 +201,14 @@ Start-Sleep -Seconds ($IntervalSeconds * 2); Stop-Process $tp -ErrorAction Silen
 Write-Host "`n"; Beep
 $meta.statsOverlayAtEnd = (Read-Setup)['stats.shown'] -eq 'true'
 if ($meta.statsOverlayAtEnd -ne $meta.statsOverlayAtStart) { Write-Warning "The stats overlay was $(if ($meta.statsOverlayAtStart) {'on'} else {'off'}) at launch and is $(if ($meta.statsOverlayAtEnd) {'on'} else {'off'}) now: F3 was pressed during the run." }
+}
+$meta.launch = $launch.ToString('o'); $meta.fullscreenStart = $fsStart.ToString('o')
 
 # --- Read the samples. typeperf's first column is its timestamp ("MM/dd/yyyy HH:mm:ss.fff" on Windows 11);
 # its interval drifts ~14 ms per sample, so row i is NOT sampleStart + i * interval. That is only the fallback.
 $rows = @(Import-Csv $csv)
+$fsCsv = Join-Path $out 'samples-fullscreen.csv'
+if (Test-Path $fsCsv) { $rows += @(Import-Csv $fsCsv) }
 $stampCol = $rows[0].PSObject.Properties.Name | Select-Object -First 1
 $meta.stampFallbacks = 0
 function Stamp($s, [int]$i) { $d = [datetime]::MinValue
@@ -268,6 +299,7 @@ $L.Add("- **Video format:** $($meta.videoFormat); **stats overlay:** $(if ($meta
 $L.Add("- **Windowed:** $($meta.windowsWindowed -join '; ')  ")
 $L.Add("- **Fullscreen:** $($meta.windowsFullscreen -join '; ')")
 if ($meta.openedFullscreen) { $L.Add('- Note: xReveal opened in Fullscreen and was switched to Windowed by hand in the first minute.') }
+if ($meta.analyzedAfterwards) { $L.Add("- Note: $($meta.analyzedAfterwards)") }
 if ($meta.stampFallbacks) { $L.Add("- Note: $($meta.stampFallbacks) of $($rows.Count) typeperf timestamps didn't parse; those rows were placed by index.") }
 $L.Add(''); $L.Add('## Budgets (medians; p95 in brackets)'); $L.Add('')
 $L.Add('| | Windowed (soak min 18-20) | Fullscreen (last 3 min) | Budget |'); $L.Add('|---|---|---|---|')
